@@ -26,6 +26,21 @@ only_schema = dbutils.widgets.get("only_source_schema").strip()
 only_table = dbutils.widgets.get("only_source_table").strip()
 only_id = dbutils.widgets.get("only_source_table_id").strip()
 
+# Retry / ForEach parameters. A retry task passes source_table_id (scoping this
+# run to one table), plus parent_run_id and attempt_number for lineage.
+dbutils.widgets.text("source_table_id", "")
+dbutils.widgets.text("parent_run_id", "")
+dbutils.widgets.text("attempt_number", "1")
+dbutils.widgets.text("recovery_action", "")
+_std_id = dbutils.widgets.get("source_table_id").strip()
+if _std_id and not only_id:
+    only_id = _std_id
+parent_run_id = dbutils.widgets.get("parent_run_id").strip() or None
+try:
+    attempt_number = int(dbutils.widgets.get("attempt_number").strip() or "1")
+except ValueError:
+    attempt_number = 1
+
 # Full-load write mode policy: overwrite is the default replacement policy.
 # Onboarding is an idempotent snapshot replacement.
 write_mode = "overwrite"
@@ -74,10 +89,11 @@ print("Tables to full-load:", len(auto))
 
 from pyspark.sql import Row
 
-def log_run(ident, target_fqn, s_count, t_count, status, err, started):
-    repo.log_table_run({
+def log_run(ident, target_fqn, s_count, t_count, status, err, started, extra=None):
+    fields = {
         "run_id": run_id,
         "source_table_id": ident["source_table_id"],
+        "connection_id": ident.get("connection_id"),
         "source_system": ident["source_system"],
         "source_server": ident["source_server"],
         "source_database": ident["source_database"],
@@ -85,8 +101,12 @@ def log_run(ident, target_fqn, s_count, t_count, status, err, started):
         "operation": "FULL_LOAD", "target_full_name": target_fqn,
         "source_row_count": s_count, "target_row_count": t_count,
         "status": status, "error_message": err,
+        "attempt_number": attempt_number, "parent_run_id": parent_run_id,
         "started_ts": started, "ended_ts": now_utc(),
-    })
+    }
+    if extra:
+        fields.update(extra)
+    repo.log_table_run(fields)
 
 # COMMAND ----------
 
@@ -100,6 +120,7 @@ for r in auto:
     src_db = d.get("source_database")
     s_schema, s_table = r["source_schema"], r["source_table"]
     ident = {"source_table_id": src_id, "source_system": src_system,
+             "connection_id": d.get("connection_id"),
              "source_server": src_server, "source_database": src_db,
              "source_schema": s_schema, "source_table": s_table}
     t_catalog = r["target_catalog"] or CATALOG
@@ -111,7 +132,7 @@ for r in auto:
     s_count = None
     t_count = None
     try:
-        adapter = get_source_adapter_for_row(r)
+        adapter = get_source_adapter_routed(r)
 
         # Approved mappings define the target's typed schema (built by NB08).
         mrows = spark.sql(f"""
@@ -213,16 +234,20 @@ for r in auto:
         log_run(ident, target_fqn, s_count, t_count, status, None, started)
     except Exception as e:
         failed += 1
+        cls = failcls.classify_failure(e, failcls.SOURCE_READ, idempotent=True)
         try:
             repo.update_control(src_id, {
                 "current_status": "FULL_LOAD_FAILED",
-                "error_message": str(e)[:1000],
+                "error_message": cls.sanitized_message[:1000],
             })
         except Exception as update_error:
             print(f"  [warn] failed to record control error: {update_error}")
         try:
             log_run(ident, target_fqn, s_count, t_count,
-                    "FAILED", str(e)[:1000], started)
+                    "FAILED", cls.sanitized_message[:1000], started,
+                    extra={"failure_stage": cls.stage,
+                           "error_category": cls.category,
+                           "retry_eligible": cls.retry_eligible})
         except Exception as log_error:
             print(f"  [warn] failed to write table audit: {log_error}")
         print(f"  FAILED [{src_system}] {s_schema}.{s_table}: {e}")

@@ -22,6 +22,83 @@ def ctrl(t):
 
 # COMMAND ----------
 
+# Retry / ForEach parameters. A retry task carries parent_run_id + attempt_number
+# for lineage; recovery_action selects a no-reapply path when only the checkpoint
+# or the queue finalization failed previously.
+dbutils.widgets.text("parent_run_id", "")
+dbutils.widgets.text("attempt_number", "1")
+dbutils.widgets.text("recovery_action", "")
+parent_run_id = dbutils.widgets.get("parent_run_id").strip() or None
+try:
+    attempt_number = int(dbutils.widgets.get("attempt_number").strip() or "1")
+except ValueError:
+    attempt_number = 1
+recovery_action = dbutils.widgets.get("recovery_action").strip().upper()
+only_id = SOURCE_TABLE_ID or None
+
+# COMMAND ----------
+
+# Checkpoint-only / finalization-only recovery: operate on the parent run's
+# already-applied+reconciled queue rows and commit/finalize WITHOUT re-reading
+# the source or reapplying data (WATERMARK/HYBRID reuse the frozen upper bound).
+if recovery_action in ("RETRY_CHECKPOINT_ONLY", "RETRY_QUEUE_FINALIZATION_ONLY"):
+    src_run = parent_run_id or run_id
+    statuses = (("RECONCILED", "CHECKPOINT_COMMIT_FAILED")
+                if recovery_action == "RETRY_CHECKPOINT_ONLY"
+                else ("CHECKPOINT_COMMITTED", "FAILED_FINALIZATION"))
+    in_list = ", ".join(escape_string_literal(s) for s in statuses)
+    scope = (f" AND source_table_id = {escape_string_literal(only_id)}"
+             if only_id else "")
+    rows = spark.sql(f"""
+        SELECT * FROM {ctrl('delta_sync_queue')}
+        WHERE run_id = {escape_string_literal(src_run)}
+          AND status IN ({in_list}){scope}
+    """).collect()
+    recovered, rec_failed = 0, 0
+    for q in rows:
+        src_id = q["source_table_id"]
+        strategy = q["load_strategy"]
+        upper_wm = q["upper_watermark_value"]
+        try:
+            if recovery_action == "RETRY_CHECKPOINT_ONLY":
+                fields = {
+                    "last_successful_run_id": src_run,
+                    "last_successful_run_ts": now_utc().strftime("%Y-%m-%d %H:%M:%S.%f"),
+                    "current_status": ("DELTA_FULL_REFRESH_SUCCEEDED"
+                                       if strategy == "FULL_LOAD" else "DELTA_SYNCED"),
+                    "error_message": None,
+                }
+                if strategy in ("WATERMARK", "HYBRID"):
+                    fields["last_watermark_value"] = sqlb.canonical_watermark_string(
+                        upper_wm, strict=True)
+                repo.update_control(src_id, fields)
+                spark.sql(f"""
+                    UPDATE {ctrl('delta_sync_queue')}
+                    SET status = 'CHECKPOINT_COMMITTED',
+                        checkpoint_committed_ts = current_timestamp()
+                    WHERE run_id = {escape_string_literal(src_run)}
+                      AND source_table_id = {escape_string_literal(src_id)}
+                """)
+            spark.sql(f"""
+                UPDATE {ctrl('delta_sync_queue')}
+                SET status = 'SUCCEEDED', finalized_ts = current_timestamp()
+                WHERE run_id = {escape_string_literal(src_run)}
+                  AND source_table_id = {escape_string_literal(src_id)}
+            """)
+            recovered += 1
+        except Exception as e:
+            rec_failed += 1
+            print(f"  recovery failed for {src_id}: {failcls.sanitize_message(e)[:300]}")
+    print(f"{recovery_action}: recovered={recovered} failed={rec_failed} "
+          "(no data reapplied)")
+    if rec_failed:
+        raise Exception(f"{rec_failed} row(s) failed {recovery_action}.")
+    dbutils.notebook.exit(json.dumps({
+        "status": "SUCCEEDED", "run_id": run_id, "recovery_action": recovery_action,
+        "recovered": recovered}))
+
+# COMMAND ----------
+
 queue = spark.sql(f"""
     SELECT * FROM {ctrl('delta_sync_queue')}
     WHERE run_id = {escape_string_literal(run_id)} AND status = 'QUEUED'
@@ -59,6 +136,7 @@ def log_run(ident, target_fqn, s_count, t_count,
         "operation": op, "target_full_name": target_fqn,
         "source_row_count": s_count, "target_row_count": t_count,
         "status": status, "error_message": err,
+        "attempt_number": attempt_number, "parent_run_id": parent_run_id,
         "started_ts": started, "ended_ts": now_utc(),
     }
     if extra:
@@ -333,6 +411,7 @@ for q in queue:
     except Exception as apply_error:
         # Failure before the checkpoint was committed: normal data-failure path.
         failed += 1
+        cls = failcls.classify_failure(apply_error, failcls.SOURCE_READ, idempotent=True)
         try:
             _update_queue("FAILED")
         except Exception as queue_error:
@@ -340,14 +419,15 @@ for q in queue:
         try:
             repo.update_control(src_id, {
                 "current_status": "DELTA_FAILED",
-                "error_message": str(apply_error)[:1000],
+                "error_message": cls.sanitized_message[:1000],
             })
         except Exception as update_error:
             print(f"  [warn] failed to record control error: {update_error}")
         try:
             log_run(ident, plain_target, s_count, t_count,
-                    op, "FAILED", str(apply_error)[:1000], started,
-                    extra={"failure_stage": "SOURCE_READ"})
+                    op, "FAILED", cls.sanitized_message[:1000], started,
+                    extra={"failure_stage": cls.stage, "error_category": cls.category,
+                           "retry_eligible": cls.retry_eligible})
         except Exception as log_error:
             print(f"  [warn] failed to write table audit: {log_error}")
         print(f"  FAILED [{src_system}] {s_schema}.{s_table}: {apply_error}")
