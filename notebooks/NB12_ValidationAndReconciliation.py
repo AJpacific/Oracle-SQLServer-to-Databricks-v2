@@ -61,6 +61,7 @@ for r in loaded:
     target_fqn = f"{t_catalog}.{t_schema}.{t_table}"
 
     try:
+        check_type = "ROW_COUNT"
         if mode == "full":
             src_count = r["source_row_count"]
             tgt_count = r["target_row_count"]
@@ -79,30 +80,40 @@ for r in loaded:
             else:
                 status = "PASS"
         else:
-            # Count through the correct adapter for this row's source.
-            adapter = get_source_adapter_for_row(r)
-            src_count = read_source_jdbc(
-                adapter, adapter.count_query(src_db, s_schema, s_table),
-                source_server=src_server, source_database=src_db
-            ).collect()[0]["ROW_COUNT"]
-            tgt_count = spark.table(target_fqn).count()
-            # Incremental: the target retains every row ever synced, so it should
-            # hold at least the current source count (more only if the source had
-            # hard deletes). Fewer rows than source means data is missing.
-            if tgt_count == 0 and src_count > 0:
-                status, any_fail = "FAIL", True
-            elif tgt_count >= src_count:
-                status = "PASS"
-            else:
-                # behind source: surfaced for investigation but not fatal, since
-                # it can be legitimate mid-catch-up lag between scheduled syncs.
+            # Source-to-Bronze delta reconciliation already ran in NB11b BEFORE
+            # the checkpoint was committed (extract -> apply -> reconcile ->
+            # checkpoint -> finalize). NB12 only summarizes those named checks and
+            # NEVER derives a PASS from target_count >= source_count.
+            check_type = "DELTA_RECON_SUMMARY"
+            rr = spark.sql(f"""
+                SELECT status, count(*) AS n
+                FROM {ctrl('reconciliation_results')}
+                WHERE run_id = {escape_string_literal(run_id)}
+                  AND source_table_id = {escape_string_literal(src_id)}
+                  AND check_type IN ('FULL_SNAPSHOT_COUNT','DELTA_INTERVAL_COUNT',
+                                     'STAGE_COUNT','DUPLICATE_PRIMARY_KEY',
+                                     'MERGED_KEY_EXISTENCE')
+                GROUP BY status
+            """).collect()
+            counts = {row["status"]: row["n"] for row in rr}
+            src_count = "reconciled_in_NB11b"
+            tgt_count = str(counts)
+            if not counts:
+                # No mandatory checks recorded: surface for investigation, but do
+                # not pass by assumption and do not fabricate a count comparison.
                 status = "WARN"
-        results.append((run_id, src_id, src_system, s_schema, s_table, "ROW_COUNT",
+            elif counts.get("FAIL", 0) > 0:
+                status, any_fail = "FAIL", True
+            elif counts.get("WARN", 0) > 0:
+                status = "WARN"
+            else:
+                status = "PASS"
+        results.append((run_id, src_id, src_system, s_schema, s_table, check_type,
                         str(src_count), str(tgt_count), status,
                         f"src={src_count} tgt={tgt_count} mode={mode}"))
 
         # ---- Check 2: target table is queryable / not empty on a full load ----
-        if mode == "full" and src_count > 0 and tgt_count == 0:
+        if mode == "full" and src_count is not None and src_count > 0 and tgt_count == 0:
             any_fail = True
             results.append((run_id, src_id, src_system, s_schema, s_table, "NON_EMPTY",
                             str(src_count), str(tgt_count), "FAIL",

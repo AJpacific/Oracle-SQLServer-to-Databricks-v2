@@ -136,6 +136,7 @@ try:
     )
     from src import ddl_builder as ddl
     from src import sql_builder as sqlb
+    from src import reconciliation as recon
     from src.control_repository import (
         ControlRepository, new_run_id,
         normalize_connection_input, assert_source_system_match,
@@ -154,6 +155,7 @@ except ModuleNotFoundError:
     )
     import ddl_builder as ddl
     import sql_builder as sqlb
+    import reconciliation as recon
     from control_repository import (
         ControlRepository, new_run_id,
         normalize_connection_input, assert_source_system_match,
