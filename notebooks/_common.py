@@ -138,6 +138,7 @@ try:
     from src import sql_builder as sqlb
     from src import reconciliation as recon
     from src import failure_classifier as failcls
+    from src import sql_object_converter as sqlconv
     from src.control_repository import (
         ControlRepository, new_run_id,
         normalize_connection_input, assert_source_system_match,
@@ -158,6 +159,7 @@ except ModuleNotFoundError:
     import sql_builder as sqlb
     import reconciliation as recon
     import failure_classifier as failcls
+    import sql_object_converter as sqlconv
     from control_repository import (
         ControlRepository, new_run_id,
         normalize_connection_input, assert_source_system_match,
