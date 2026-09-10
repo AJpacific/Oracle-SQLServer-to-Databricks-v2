@@ -14,7 +14,10 @@ notebooks/
   00_TEST_ORACLE_CONNECTION.py
   00_TEST_SQLSERVER_CONNECTION.py
   NB00_ControlTableInit.py
+  NB00A_UpsertAndValidateConnection.py
   NB01_SourceInventory.py
+  NB01A_SourceAssessment.py
+  NB01B_RegisterSelectedTables.py
   NB02_TypeNormalization.py
   NB03_MappingRulesGeneration.py
   NB04_MappingValidation.py
@@ -25,6 +28,11 @@ notebooks/
   NB11a_DeltaSyncPrep.py
   NB11b_DeltaSyncApply.py
   NB12_ValidationAndReconciliation.py
+  NB13_SQLObjectAssessmentAndConversion.py
+  NB14_RetryFailedTables.py
+  NB15_BronzeToSilverETL.py
+  NB16_NotifyFailures.py
+  NB17_DashboardViews.py
 src/
   source_adapters/
     base.py
@@ -34,17 +42,107 @@ src/
   control_repository.py
   crosssourcetypemapper.py
   ddl_builder.py
+  dq_rules.py
+  failure_classifier.py
   identifiers.py
   partitioning.py
+  reconciliation.py
   source_identity.py
   sql_builder.py
+  sql_object_converter.py
   sqlserver_sql_builder.py
   strategy.py
+docs/
+  installation.md
+  supported_features_and_limitations.md
 tests/
-  test_accelerator.py
-  test_sqlserver.py
+  _fakes.py
+  test_connection_registry.py
+  test_assessment.py
+  test_reconciliation.py
+  test_failure_retry.py
+  test_sql_object_converter.py
+  test_etl_dq.py
 requirements-dev.txt
 ```
+
+## Architecture: two pipelines (INGEST and ETL)
+
+The accelerator is organized as two Databricks pipelines over shared control and
+audit tables. They share metadata, run IDs, failure classification, and
+reporting views, but never duplicate responsibilities or checkpoints.
+
+**INGEST pipeline (source -> Bronze).** Owns connection selection/validation,
+source assessment and inventory, object discovery, metadata mapping and Bronze
+provisioning, full and incremental loads into Bronze, source-to-Bronze
+reconciliation, ingest checkpoints, failed-ingest recovery, and SQL-object
+assessment/conversion drafts.
+
+**ETL pipeline (Bronze -> Silver).** Starts only after Bronze ingestion
+succeeds. Owns Bronze-to-Silver transformation, data-quality checks and
+cleansing, quarantine, Bronze-to-Silver reconciliation, a separate ETL
+checkpoint, and failed-ETL recovery. It never connects to a source and never
+reads a source secret scope.
+
+### Multi-connection onboarding
+- `source_connection` stores non-secret connection metadata; credentials stay in
+  a per-connection Databricks secret scope.
+- `NB00A_UpsertAndValidateConnection` upserts metadata and validates
+  connectivity (`SELECT 1 FROM DUAL` / `SELECT 1`), setting the connection
+  `VALID` or `FAILED` with a sanitized error. Downstream tasks receive only
+  `connection_id`, `source_table_id`, and `run_id`.
+
+### Source assessment and registration
+- `NB01A_SourceAssessment` discovers objects via data-dictionary/catalog views
+  and classifies table compatibility (`COMPATIBLE` / `REVIEW` / `MANUAL` /
+  `UNABLE_TO_ASSESS`) without per-table `COUNT(*)`.
+- `NB01B_RegisterSelectedTables` registers only explicitly selected COMPATIBLE/
+  REVIEW tables as **inactive** rows, computes the deterministic
+  `source_table_id`, blocks target collisions, and preserves existing state.
+  Newly registered rows are never auto-activated.
+
+### Source-to-Bronze full and delta, reconciliation, and checkpoint order
+- Full load is overwrite-only (`NB09`); delta sync uses frozen intervals
+  (`NB11a`/`NB11b`).
+- The mandatory delta order is **extract -> apply -> reconcile the exact work
+  unit -> commit checkpoint -> finalize queue**. `target_count >= source_count`
+  is never an automatic pass; named checks (`FULL_SNAPSHOT_COUNT`,
+  `DELTA_INTERVAL_COUNT`, `STAGE_COUNT`, `DUPLICATE_PRIMARY_KEY`,
+  `MERGED_KEY_EXISTENCE`) decide PASS/WARN/FAIL. A reconciliation failure leaves
+  the ingest watermark unchanged.
+
+### Failed-ingest handling
+- `table_run_log` carries `attempt_number`, `failure_stage`, `error_category`,
+  `retry_eligible`, and `parent_run_id`. `NB14_RetryFailedTables` is a selector
+  that returns a per-table retry worklist with a safe `recovery_action`
+  (checkpoint-only and finalization-only retries never reapply data).
+
+### SQL objects
+- `NB13_SQLObjectAssessmentAndConversion` (ASSESS/CONVERT) captures Oracle
+  `ALL_VIEWS`/`ALL_SOURCE` and SQL Server `sys.sql_modules` definitions,
+  classifies complexity, and produces limited deterministic Databricks SQL drafts
+  for simple views. Every draft is `PENDING_REVIEW`; nothing is executed.
+
+### Bronze-to-Silver ETL and data quality
+- Enable per table with `etl_is_active`, a Silver target, and `dq_rule` rows.
+- `NB15_BronzeToSilverETL` applies cleansing then validation, quarantines
+  rejects (with column redaction), reconciles the processed set before a
+  **separate** ETL checkpoint, and is retry-safe. Source-ingest and ETL
+  watermarks are tracked independently.
+
+### Notifications and dashboards
+- `NB16_NotifyFailures` builds a sanitized per-run failure summary and optionally
+  posts a Teams webhook (read only from a secret, never logged).
+- `NB17_DashboardViews` creates `vw_assessment_summary`, `vw_ingest_status`,
+  `vw_etl_status`, and `vw_validation_status` (history preserved in base tables).
+
+### Security requirements
+- No credential, token, secret value, or credential-bearing JDBC URL is stored in
+  Delta, returned by a task, or logged. SQL Server uses `encrypt=true` with
+  `trustServerCertificate=false` by default. Errors and URLs are sanitized.
+
+See `docs/installation.md` and `docs/supported_features_and_limitations.md` for
+details and manual validation steps.
 
 Pipeline JSON files may be maintained separately. Confirm notebook paths, task order, compute, and parameters before importing any job definition.
 
@@ -285,10 +383,17 @@ Install development dependencies and run:
 
 ```bash
 python -m pip install -r requirements-dev.txt
+python -m compileall src tests
 python -m pytest tests -q
 ```
 
-The current repository tests cover Oracle and SQL Server adapters, source identity, identifiers, source SQL generation, type mapping, watermark strategy, partition planning, and shared-notebook wiring. Always run the suite after changing adapter contracts, query builders, mappings, or notebook calls.
+The repository unit tests are pure Python (no Spark or JDBC). They cover the
+connection registry and input validation, source-assessment discovery-query
+generation and compatibility classification, source-to-Bronze and Bronze-to-Silver
+reconciliation rules, failure classification and retry recovery mapping, SQL-object
+classification/conversion, and DQ-rule parsing. `tests/_fakes.py` provides a Spark
+double for query-building assertions. Always run the suite after changing adapter
+contracts, query builders, mappings, reconciliation, or notebook wiring.
 
 ## Deployment validation
 

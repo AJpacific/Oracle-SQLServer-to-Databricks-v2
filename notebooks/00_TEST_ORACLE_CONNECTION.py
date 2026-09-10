@@ -5,8 +5,11 @@
 # ///
 # MAGIC %md
 # MAGIC # 00_TEST_ORACLE_CONNECTION
-# MAGIC Run this FIRST. It proves network, TLS, login and SELECT before any
-# MAGIC control tables or loads are built. It reads no more than a few rows.
+# MAGIC OPTIONAL diagnostic. The production path validates connections through
+# MAGIC NB00A_UpsertAndValidateConnection. Run this only to manually prove network,
+# MAGIC TLS, login and SELECT for an Oracle source. It reads no more than a few
+# MAGIC rows and prints no secrets. Provide a connection_id (preferred) or the
+# MAGIC legacy oracle-migration secret scope.
 
 # COMMAND ----------
 
@@ -33,11 +36,6 @@
 # COMMAND ----------
 
 import sys
-
-repo_root = "/Workspace/Users/ashutosh.jha1@lumen.com/Oracle-SQLServer-to-Databricks"
-
-if repo_root not in sys.path:
-    sys.path.insert(0, repo_root)
 
 modules = [
     "src.identifiers",
@@ -98,13 +96,13 @@ for widget_name in ("test_schema", "test_table"):
 
 dbutils.widgets.text(
     "test_schema",
-    "OLIST",
+    "",
     "Oracle source owner"
 )
 
 dbutils.widgets.text(
     "test_table",
-    "CUSTOMERS",
+    "",
     "Oracle source table"
 )
 
@@ -161,99 +159,104 @@ print(
 
 # COMMAND ----------
 
-# MAGIC %md ### 3. Source table sample test
+# MAGIC %md ### 3. Source table sample test (skipped unless test_schema/test_table set)
 
 # COMMAND ----------
 
-probe = sqlb.build_top_n_probe(
-    test_schema,
-    test_table,
-    5
-)
-
-print(
-    "Testing Oracle object:",
-    f"{test_schema}.{test_table}"
-)
-
-sample_df = read_jdbc(
-    probe,
-    fetchsize=5
-)
-
-sample_df.show(
-    n=5,
-    truncate=False
-)
-
-sample_count = sample_df.count()
-
-print(
-    "Sample rows returned:",
-    sample_count
-)
-
-# COMMAND ----------
-
-# MAGIC %md ### 4. Column metadata test
-
-# COMMAND ----------
-
-meta = read_jdbc(
-    sqlb.columns_metadata_query(
+if not (test_schema and test_table):
+    print("Set test_schema and test_table to run the source-table diagnostics.")
+else:
+    probe = sqlb.build_top_n_probe(
         test_schema,
-        test_table
-    )
-)
-
-meta.show(
-    truncate=False
-)
-
-meta_count = meta.count()
-
-print(
-    "Column metadata rows:",
-    meta_count
-)
-
-if meta_count == 0:
-    raise RuntimeError(
-        "No Oracle column metadata was returned. "
-        "Verify the owner/table names are uppercase and "
-        "the Oracle user can see the source object."
+        test_table,
+        5
     )
 
-# COMMAND ----------
-
-# MAGIC %md ### 5. Primary-key metadata test
-
-# COMMAND ----------
-
-pk = read_jdbc(
-    sqlb.primary_key_query(
-        test_schema,
-        test_table
-    )
-)
-
-pk.show(
-    truncate=False
-)
-
-pk_count = pk.count()
-
-print(
-    "Primary-key columns:",
-    pk_count
-)
-
-if pk_count == 0:
     print(
-        "No primary key was found. "
-        "The accelerator may select WATERMARK or FULL_LOAD "
-        "depending on available watermark columns."
+        "Testing Oracle object:",
+        f"{test_schema}.{test_table}"
     )
+
+    sample_df = read_jdbc(
+        probe,
+        fetchsize=5
+    )
+
+    sample_df.show(
+        n=5,
+        truncate=False
+    )
+
+    sample_count = sample_df.count()
+
+    print(
+        "Sample rows returned:",
+        sample_count
+    )
+
+# COMMAND ----------
+
+# MAGIC %md ### 4. Column metadata test (skipped unless test_schema/test_table set)
+
+# COMMAND ----------
+
+if test_schema and test_table:
+    meta = read_jdbc(
+        sqlb.columns_metadata_query(
+            test_schema,
+            test_table
+        )
+    )
+
+    meta.show(
+        truncate=False
+    )
+
+    meta_count = meta.count()
+
+    print(
+        "Column metadata rows:",
+        meta_count
+    )
+
+    if meta_count == 0:
+        raise RuntimeError(
+            "No Oracle column metadata was returned. "
+            "Verify the owner/table names are uppercase and "
+            "the Oracle user can see the source object."
+        )
+
+# COMMAND ----------
+
+# MAGIC %md ### 5. Primary-key metadata test (skipped unless test_schema/test_table set)
+
+# COMMAND ----------
+
+if test_schema and test_table:
+    pk = read_jdbc(
+        sqlb.primary_key_query(
+            test_schema,
+            test_table
+        )
+    )
+
+    pk.show(
+        truncate=False
+    )
+
+    pk_count = pk.count()
+
+    print(
+        "Primary-key columns:",
+        pk_count
+    )
+
+    if pk_count == 0:
+        print(
+            "No primary key was found. "
+            "The accelerator may select WATERMARK or FULL_LOAD "
+            "depending on available watermark columns."
+        )
 
 # COMMAND ----------
 

@@ -5,10 +5,10 @@
 # ///
 # MAGIC %md
 # MAGIC # 00_TEST_SQLSERVER_CONNECTION
-# MAGIC Run this FIRST for SQL Server sources. It proves network, TLS, login and
-# MAGIC SELECT before any control tables or loads are built, using the shared SQL
-# MAGIC Server source adapter. It reads no more than a few rows and prints no
-# MAGIC secrets.
+# MAGIC OPTIONAL diagnostic. The production path validates connections through
+# MAGIC NB00A_UpsertAndValidateConnection. Run this only to manually prove network,
+# MAGIC TLS, login and SELECT for a SQL Server source using the shared adapter. It
+# MAGIC reads no more than a few rows and prints no secrets.
 
 # COMMAND ----------
 
@@ -92,37 +92,42 @@ for widget_name in ("test_server", "test_database", "test_schema", "test_table")
 
 dbutils.widgets.text(
     "test_server",
-    "35.237.230.182",
+    "",
     "SQL Server host",
 )
 
 dbutils.widgets.text(
     "test_database",
-    "BI_HomeCredit",
+    "",
     "SQL Server database",
 )
 
 dbutils.widgets.text(
     "test_schema",
-    "dbo",
+    "",
     "SQL Server schema",
 )
 
 dbutils.widgets.text(
     "test_table",
-    "BUREAU",
+    "",
     "SQL Server table",
 )
 
-print("GCP SQL Server test values created.")
+print("SQL Server test widgets created. Fill them in before running the tests.")
 
 # COMMAND ----------
 
-# Read the current GCP values from the widgets after Python restart.
+# Read the widget values after any Python restart.
 test_server = dbutils.widgets.get("test_server").strip() or None
 test_database = dbutils.widgets.get("test_database").strip()
 test_schema = dbutils.widgets.get("test_schema").strip()
 test_table = dbutils.widgets.get("test_table").strip()
+
+if not test_database:
+    raise ValueError(
+        "Set the test_database widget (required for SQL Server) before running "
+        "this optional diagnostic.")
 
 print(
     "Effective SQL Server object:",
@@ -189,55 +194,60 @@ ping.show(
 )
 
 print(
-    "GCP SQL Server TLS connection and authentication succeeded."
+    "SQL Server TLS connection and authentication succeeded."
 )
 
 # COMMAND ----------
 
-# MAGIC %md ### 3. Source table TOP sample test
+# MAGIC %md ### 3. Source table TOP sample test (skipped unless schema/table set)
 
 # COMMAND ----------
 
-probe = adapter.top_n_probe_query(test_database, test_schema, test_table, 5)
-print("Testing SQL Server object:", f"{test_database}.{test_schema}.{test_table}")
+if not (test_schema and test_table):
+    print("Set test_schema and test_table to run the source-table diagnostics.")
+else:
+    probe = adapter.top_n_probe_query(test_database, test_schema, test_table, 5)
+    print("Testing SQL Server object:", f"{test_database}.{test_schema}.{test_table}")
 
-sample_df = read_source_jdbc(
-    adapter, probe, source_server=test_server,
-    source_database=test_database, fetchsize=5)
-sample_df.show(n=5, truncate=False)
-sample_count = sample_df.count()
-print("Sample rows returned:", sample_count)
-
-# COMMAND ----------
-
-# MAGIC %md ### 4. Column metadata test
-
-# COMMAND ----------
-
-meta = read_source_jdbc(
-    adapter, adapter.columns_metadata_query(test_database, test_schema, test_table),
-    source_server=test_server, source_database=test_database)
-meta.show(truncate=False)
-meta_count = meta.count()
-print("Column metadata rows:", meta_count)
-
-if meta_count == 0:
-    raise RuntimeError(
-        "No SQL Server column metadata was returned. Verify the "
-        "database/schema/table names and that the login can see the object.")
+    sample_df = read_source_jdbc(
+        adapter, probe, source_server=test_server,
+        source_database=test_database, fetchsize=5)
+    sample_df.show(n=5, truncate=False)
+    sample_count = sample_df.count()
+    print("Sample rows returned:", sample_count)
 
 # COMMAND ----------
 
-# MAGIC %md ### 5. Primary-key metadata test
+# MAGIC %md ### 4. Column metadata test (skipped unless schema/table set)
 
 # COMMAND ----------
 
-pk = read_source_jdbc(
-    adapter, adapter.primary_key_query(test_database, test_schema, test_table),
-    source_server=test_server, source_database=test_database)
-pk.orderBy("KEY_POSITION").show(truncate=False)
-pk_count = pk.count()
-print("Primary-key columns:", pk_count)
+if test_schema and test_table:
+    meta = read_source_jdbc(
+        adapter, adapter.columns_metadata_query(test_database, test_schema, test_table),
+        source_server=test_server, source_database=test_database)
+    meta.show(truncate=False)
+    meta_count = meta.count()
+    print("Column metadata rows:", meta_count)
+
+    if meta_count == 0:
+        raise RuntimeError(
+            "No SQL Server column metadata was returned. Verify the "
+            "database/schema/table names and that the login can see the object.")
+
+# COMMAND ----------
+
+# MAGIC %md ### 5. Primary-key metadata test (skipped unless schema/table set)
+
+# COMMAND ----------
+
+if test_schema and test_table:
+    pk = read_source_jdbc(
+        adapter, adapter.primary_key_query(test_database, test_schema, test_table),
+        source_server=test_server, source_database=test_database)
+    pk.orderBy("KEY_POSITION").show(truncate=False)
+    pk_count = pk.count()
+    print("Primary-key columns:", pk_count)
 
 if pk_count == 0:
     print("No primary key found. The accelerator may select WATERMARK or "
