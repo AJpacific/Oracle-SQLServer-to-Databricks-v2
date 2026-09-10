@@ -142,3 +142,72 @@ def reconcile_primary_key(extracted_count, staged_count, duplicate_key_count,
             f"source_snapshot={extracted_count} bronze_total={bronze_total_count} "
             f"extra_retained={extra} (IGNORE_DELETES)"))
     return ReconResult(_rollup(checks), checks)
+
+
+# ---- Bronze-to-Silver ETL reconciliation -----------------------------------
+# ETL check types.
+ETL_INPUT_ACCOUNTING = "ETL_INPUT_ACCOUNTING"
+ETL_SILVER_COUNT = "ETL_SILVER_COUNT"
+ETL_DUPLICATE_VALID_KEY = "ETL_DUPLICATE_VALID_KEY"
+ETL_VALID_KEY_EXISTENCE = "ETL_VALID_KEY_EXISTENCE"
+ETL_INTERVAL_COUNT = "ETL_INTERVAL_COUNT"
+
+
+def reconcile_etl_full(input_count, valid_count, rejected_distinct_count,
+                       silver_count) -> ReconResult:
+    """FULL ETL: input == valid + distinct rejected, and Silver == valid.
+
+    A record that fails several rules is counted once as rejected, so the
+    accounting uses the distinct rejected-record count.
+    """
+    accounted = (valid_count or 0) + (rejected_distinct_count or 0)
+    checks = [
+        _check(ETL_INPUT_ACCOUNTING, input_count, accounted,
+               PASS if input_count == accounted else FAIL,
+               f"input={input_count} valid={valid_count} "
+               f"rejected_distinct={rejected_distinct_count}"),
+        _check(ETL_SILVER_COUNT, valid_count, silver_count,
+               PASS if valid_count == silver_count else FAIL,
+               f"valid={valid_count} silver={silver_count}"),
+    ]
+    return ReconResult(_rollup(checks), checks)
+
+
+def reconcile_etl_incremental_merge(input_count, valid_count,
+                                    rejected_distinct_count,
+                                    duplicate_valid_key_count,
+                                    missing_valid_key_count) -> ReconResult:
+    """INCREMENTAL ETL via MERGE: every valid key present, zero duplicate keys.
+
+    Complete Silver count is never compared to the interval input count.
+    """
+    accounted = (valid_count or 0) + (rejected_distinct_count or 0)
+    checks = [
+        _check(ETL_INPUT_ACCOUNTING, input_count, accounted,
+               PASS if input_count == accounted else FAIL,
+               f"input={input_count} valid={valid_count} "
+               f"rejected_distinct={rejected_distinct_count}"),
+        _check(ETL_DUPLICATE_VALID_KEY, None, duplicate_valid_key_count,
+               PASS if duplicate_valid_key_count == 0 else FAIL,
+               f"duplicate_valid_keys={duplicate_valid_key_count}"),
+        _check(ETL_VALID_KEY_EXISTENCE, None, missing_valid_key_count,
+               PASS if missing_valid_key_count == 0 else FAIL,
+               f"valid_keys_missing_in_silver={missing_valid_key_count}"),
+    ]
+    return ReconResult(_rollup(checks), checks)
+
+
+def reconcile_etl_interval(input_count, valid_count, rejected_distinct_count,
+                           silver_interval_count) -> ReconResult:
+    """INCREMENTAL ETL interval replacement: Silver interval count == valid count."""
+    accounted = (valid_count or 0) + (rejected_distinct_count or 0)
+    checks = [
+        _check(ETL_INPUT_ACCOUNTING, input_count, accounted,
+               PASS if input_count == accounted else FAIL,
+               f"input={input_count} valid={valid_count} "
+               f"rejected_distinct={rejected_distinct_count}"),
+        _check(ETL_INTERVAL_COUNT, valid_count, silver_interval_count,
+               PASS if valid_count == silver_interval_count else FAIL,
+               f"valid_interval={valid_count} silver_interval={silver_interval_count}"),
+    ]
+    return ReconResult(_rollup(checks), checks)
