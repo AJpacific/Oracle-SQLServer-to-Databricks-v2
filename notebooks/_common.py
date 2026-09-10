@@ -48,18 +48,41 @@ _ensure_widget("sqlserver_secret_scope", "sqlserver-migration")
 # Absolute path to the repo src folder, used only as a fallback if the
 # package import below fails (e.g. notebook run outside a Git folder).
 _ensure_widget("src_path", "")
+# Pipeline-driven identifiers. Downstream tasks receive only non-secret ids;
+# credentials always stay in the connection's Databricks secret scope.
+_ensure_widget("connection_id", "")
+_ensure_widget("source_table_id", "")
+_ensure_widget("run_id", "")
 
 CATALOG = dbutils.widgets.get("catalog").strip()
 CONTROL_SCHEMA = dbutils.widgets.get("control_schema").strip()
 SECRET_SCOPE = dbutils.widgets.get("secret_scope").strip()
 SQLSERVER_SECRET_SCOPE = dbutils.widgets.get("sqlserver_secret_scope").strip()
 _SRC_PATH = dbutils.widgets.get("src_path").strip()
+CONNECTION_ID = dbutils.widgets.get("connection_id").strip()
+SOURCE_TABLE_ID = dbutils.widgets.get("source_table_id").strip()
 
 # COMMAND ----------
 
 # --- make the src package importable ----------------------------------------
 
-repo_root = "/Workspace/Users/ashutosh.jha1@lumen.com/Oracle-SQLServer-to-Databricks"
+# Discover the repo root from the running notebook / working directory instead of
+# a hard-coded personal workspace path. src_path (widget) is the explicit
+# override; otherwise the package import and cwd walk below locate src/.
+def _discover_repo_root():
+    try:
+        ctx = (dbutils.notebook.entry_point.getDbutils().notebook()
+               .getContext())
+        nb_path = ctx.notebookPath().get()
+        # /Workspace/<...>/<repo>/notebooks/<name> -> /Workspace/<...>/<repo>
+        ws = "/Workspace" + os.path.dirname(os.path.dirname(nb_path))
+        if os.path.isdir(ws):
+            return ws
+    except Exception:
+        pass
+    return os.getcwd()
+
+repo_root = _discover_repo_root()
 
 if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
@@ -113,7 +136,10 @@ try:
     )
     from src import ddl_builder as ddl
     from src import sql_builder as sqlb
-    from src.control_repository import ControlRepository, new_run_id
+    from src.control_repository import (
+        ControlRepository, new_run_id,
+        normalize_connection_input, assert_source_system_match,
+    )
     from src.source_identity import compute_source_table_id, normalize_source_system
     from src.source_adapters.factory import get_source_adapter
 except ModuleNotFoundError:
@@ -128,7 +154,10 @@ except ModuleNotFoundError:
     )
     import ddl_builder as ddl
     import sql_builder as sqlb
-    from control_repository import ControlRepository, new_run_id
+    from control_repository import (
+        ControlRepository, new_run_id,
+        normalize_connection_input, assert_source_system_match,
+    )
     from source_identity import compute_source_table_id, normalize_source_system
     from source_adapters.factory import get_source_adapter
 
@@ -209,6 +238,74 @@ def get_source_adapter_for_row(row):
         secret_scope=scope,
         config=config,
     )
+
+
+def get_connection(connection_id):
+    "Return the source_connection row for an id, or None (no secrets involved)."
+    if not connection_id:
+        return None
+    return control_repo().get_connection(connection_id)
+
+
+def get_source_adapter_for_connection(connection, source_database=None,
+                                      require_valid=True):
+    """Build the source adapter described by a source_connection row.
+
+    All connection metadata (system, server, database, secret scope, TLS trust)
+    comes from the registered connection; credentials are read by the adapter
+    from that connection's secret scope. No secret value or credential-bearing
+    URL is ever returned or printed.
+    """
+    c = connection.asDict() if hasattr(connection, "asDict") else dict(connection)
+    if require_valid and not c.get("is_active"):
+        raise ValueError(
+            f"connection {c.get('connection_id')!r} is not active")
+    if require_valid and (c.get("connection_status") or "") != "VALID":
+        raise ValueError(
+            f"connection {c.get('connection_id')!r} is not VALID "
+            f"(status={c.get('connection_status')!r}); validate it first")
+    source_system = c.get("source_system") or "oracle"
+    scope = c.get("secret_scope") or _scope_for_system(source_system)
+    database = source_database or c.get("source_database")
+    config = {}
+    trp = _type_rules_path_for(source_system)
+    if trp:
+        config["type_rules_path"] = trp
+    if c.get("trust_server_certificate") is not None:
+        config["trust_server_certificate"] = bool(c.get("trust_server_certificate"))
+    return get_source_adapter(
+        source_system,
+        source_server=c.get("source_server"),
+        source_database=database,
+        secret_provider=_secret_provider,
+        secret_scope=scope,
+        config=config,
+    )
+
+
+def get_source_adapter_routed(row, require_valid=True):
+    """Route a control/queue row to its adapter, preferring its connection_id.
+
+    When the row carries a ``connection_id`` the adapter (source system, server,
+    database, secret scope, TLS trust) is taken from the registered connection,
+    and its source_system must not conflict with the row's. A legacy row without
+    a connection_id falls back to per-row routing with a warning, preserving
+    existing behavior. Never prints secrets or credential-bearing URLs.
+    """
+    d = row.asDict() if hasattr(row, "asDict") else dict(row)
+    conn_id = d.get("connection_id")
+    if not conn_id:
+        print("[_common] row has no connection_id; using legacy per-row "
+              "source routing (fallback).")
+        return get_source_adapter_for_row(row)
+    connection = get_connection(conn_id)
+    if connection is None:
+        raise ValueError(f"connection_id {conn_id!r} not found in source_connection")
+    cd = connection.asDict()
+    assert_source_system_match(d.get("source_system"), cd.get("source_system"))
+    return get_source_adapter_for_connection(
+        connection, source_database=d.get("source_database"),
+        require_valid=require_valid)
 
 
 def read_source_jdbc(adapter, dbtable, source_server=None, source_database=None,

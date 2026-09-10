@@ -42,6 +42,24 @@ def ctrl(t):
     return f"{quote_databricks(CATALOG)}.{quote_databricks(CONTROL_SCHEMA)}.{quote_databricks(t)}"
 
 spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {ctrl('source_connection')} (
+  connection_id            STRING,
+  connection_name          STRING,
+  source_system            STRING,
+  source_server            STRING,
+  source_database          STRING,
+  secret_scope             STRING,
+  trust_server_certificate BOOLEAN,
+  connection_status        STRING,
+  is_active                BOOLEAN,
+  error_message            STRING,
+  last_validated_ts        TIMESTAMP,
+  created_ts               TIMESTAMP,
+  updated_ts               TIMESTAMP
+) USING DELTA
+""")
+
+spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {ctrl('source_table_control')} (
   source_table_id          STRING,
   source_system            STRING,
@@ -174,6 +192,54 @@ CREATE TABLE IF NOT EXISTS {ctrl('reconciliation_results')} (
 ) USING DELTA
 """)
 
+# --- INGEST: source assessment & SQL-object assessment ---------------------
+spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {ctrl('source_assessment')} (
+  assessment_id STRING, run_id STRING, connection_id STRING,
+  source_system STRING, source_server STRING, source_database STRING,
+  source_schema STRING, object_name STRING, object_type STRING,
+  row_count BIGINT, row_count_method STRING, size_mb DECIMAL(18,2),
+  column_count INT, compatibility_status STRING, complexity STRING,
+  assessment_message STRING, is_selected BOOLEAN, captured_ts TIMESTAMP
+) USING DELTA
+""")
+
+spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {ctrl('sql_object_assessment')} (
+  assessment_id STRING, run_id STRING, connection_id STRING,
+  source_system STRING, source_database STRING, source_schema STRING,
+  object_name STRING, object_type STRING, source_definition STRING,
+  complexity_category STRING, classification_reason STRING,
+  converted_definition STRING, conversion_language STRING,
+  conversion_status STRING, review_status STRING, error_message STRING,
+  captured_ts TIMESTAMP, updated_ts TIMESTAMP
+) USING DELTA
+""")
+
+# --- ETL: data-quality rules, results, and quarantine ----------------------
+spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {ctrl('dq_rule')} (
+  rule_id STRING, source_table_id STRING, rule_type STRING,
+  column_name STRING, rule_value STRING, severity STRING,
+  is_active BOOLEAN, created_ts TIMESTAMP, updated_ts TIMESTAMP
+) USING DELTA
+""")
+
+spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {ctrl('dq_result')} (
+  run_id STRING, source_table_id STRING, rule_id STRING, rule_type STRING,
+  input_count BIGINT, checked_count BIGINT, failed_count BIGINT,
+  passed_count BIGINT, status STRING, message STRING, captured_ts TIMESTAMP
+) USING DELTA
+""")
+
+spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {ctrl('dq_quarantine')} (
+  run_id STRING, source_table_id STRING, rule_id STRING,
+  record_json STRING, failure_reason STRING, quarantined_ts TIMESTAMP
+) USING DELTA
+""")
+
 # Idempotent upgrade: add newer columns to control tables created by an older run.
 def _ensure_columns(table_key, cols):
     plain = ctrl(table_key).replace("`", "")
@@ -196,6 +262,20 @@ _ensure_columns(
     [
         ("source_table_id", "STRING"),
         ("delete_policy", "STRING"),
+        ("connection_id", "STRING"),
+        # Bronze-to-Silver ETL fields (owned by the ETL pipeline). Source-ingest
+        # watermarks and ETL watermarks are kept strictly separate.
+        ("silver_catalog", "STRING"),
+        ("silver_schema", "STRING"),
+        ("silver_table", "STRING"),
+        ("etl_is_active", "BOOLEAN"),
+        ("etl_load_strategy", "STRING"),
+        ("etl_watermark_column", "STRING"),
+        ("last_etl_watermark_value", "STRING"),
+        ("last_successful_etl_run_id", "STRING"),
+        ("last_successful_etl_run_ts", "TIMESTAMP"),
+        ("etl_current_status", "STRING"),
+        ("etl_error_message", "STRING"),
     ]
 )
 
@@ -237,6 +317,36 @@ _ensure_columns(
         ("upper_watermark_value", "STRING"),
     ]
 )
+
+# connection_id is propagated idempotently onto every operational table so the
+# INGEST pipeline can scope work per connection without recomputing identity.
+_CONNECTION_ID = [("connection_id", "STRING")]
+for _t in ("source_inventory", "normalized_source_inventory",
+           "resolved_column_mappings", "mapping_validation_results",
+           "table_load_decisions", "review_queue", "table_run_log",
+           "delta_sync_queue", "reconciliation_results"):
+    _ensure_columns(_t, _CONNECTION_ID)
+
+# Retry / failure-classification lineage on the shared audit table (used by both
+# the INGEST and ETL pipelines and by the retry selector).
+_ensure_columns("table_run_log", [
+    ("attempt_number", "INT"), ("failure_stage", "STRING"),
+    ("error_category", "STRING"), ("retry_eligible", "BOOLEAN"),
+    ("retry_status", "STRING"), ("parent_run_id", "STRING"),
+    ("lower_watermark", "STRING"), ("upper_watermark", "STRING"),
+    ("extracted_row_count", "BIGINT"), ("staged_row_count", "BIGINT"),
+    ("applied_row_count", "BIGINT"), ("rejected_row_count", "BIGINT"),
+])
+
+# Per-work-unit reconciliation columns so source-to-Bronze delta is reconciled
+# against the exact frozen interval BEFORE the checkpoint is committed.
+_ensure_columns("delta_sync_queue", [
+    ("extracted_row_count", "BIGINT"), ("staged_row_count", "BIGINT"),
+    ("applied_row_count", "BIGINT"), ("rejected_row_count", "BIGINT"),
+    ("duplicate_key_count", "BIGINT"), ("reconciliation_status", "STRING"),
+    ("data_applied_ts", "TIMESTAMP"), ("reconciled_ts", "TIMESTAMP"),
+    ("checkpoint_committed_ts", "TIMESTAMP"), ("finalized_ts", "TIMESTAMP"),
+])
 
 # Backfill source_table_id for existing control rows that predate this upgrade
 # and have the source fields needed to compute a deterministic id. Rows missing

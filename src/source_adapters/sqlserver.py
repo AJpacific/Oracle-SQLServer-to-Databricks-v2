@@ -43,11 +43,10 @@ class SqlServerSourceAdapter(SourceAdapter):
 
         The ``source_database`` MUST come from the control row (validated). The
         server is taken from the row, else a documented ``sqlserver-host``
-        secret. For the current GCP POC, encrypt=true and
-        trustServerCertificate=true are used because the SQL Server VM
-        presents a certificate whose CA chain is not trusted by the
-        Databricks JVM. Production deployments must use a trusted
-        certificate and trustServerCertificate=false.
+        secret. Connections always use encrypt=true; the server certificate is
+        trusted only when the registered connection sets
+        ``trust_server_certificate=true`` (default false). Production
+        deployments must use a trusted certificate with trust disabled.
         """
         user = self._get_secret("sqlserver-user")
         password = self._get_secret("sqlserver-password")
@@ -84,7 +83,9 @@ class SqlServerSourceAdapter(SourceAdapter):
         elif ":" in server and "\\" not in server:
             host, sep_port = server.split(":", 1)
         effective_port = sep_port or port
-        trust = "true"
+        # Trust the server certificate only when explicitly enabled; default is
+        # false so a production deployment uses a properly trusted certificate.
+        trust = "true" if self.config.get("trust_server_certificate") else "false"
         return (
             f"jdbc:sqlserver://{host}:{effective_port};"
             f"databaseName={database};"
