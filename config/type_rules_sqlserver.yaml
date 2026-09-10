@@ -1,0 +1,220 @@
+# =============================================================================
+# type_rules_sqlserver.yaml
+# SQL Server -> Databricks (Delta) deterministic type mapping rules.
+# status:   AUTO | REVIEW | BLOCKED
+# fidelity: EXACT | WIDENED | LOSSY | UNKNOWN
+#
+# Selected by source_system = 'sqlserver'.
+#
+# NOTES:
+#   * decimal / numeric are resolved in code from precision/scale
+#     (crosssourcetypemapper._map_sqlserver_decimal); precision > 38 is BLOCKED.
+#     They are intentionally omitted here.
+#   * SQL Server `timestamp` is *rowversion* (an 8-byte binary change token),
+#     NOT a datetime. Both `timestamp` and `rowversion` map to BINARY and are
+#     never treated as temporal watermarks.
+#   * Unknown / user-defined / CLR types are BLOCKED, never mapped to STRING.
+# =============================================================================
+
+version: 1
+source_dialect: sqlserver
+target: databricks_delta
+
+types:
+  # ---- integer / boolean ----
+  bit:
+    databricks_delta: BOOLEAN
+    status: AUTO
+    fidelity: EXACT
+
+  tinyint:
+    databricks_delta: SMALLINT
+    status: AUTO
+    fidelity: WIDENED
+    notes: "SQL Server tinyint is unsigned 0-255; widened to signed SMALLINT"
+
+  smallint:
+    databricks_delta: SMALLINT
+    status: AUTO
+    fidelity: EXACT
+
+  int:
+    databricks_delta: INT
+    status: AUTO
+    fidelity: EXACT
+
+  bigint:
+    databricks_delta: BIGINT
+    status: AUTO
+    fidelity: EXACT
+
+  # ---- money / approximate numeric ----
+  money:
+    databricks_delta: DECIMAL(19,4)
+    status: AUTO
+    fidelity: EXACT
+
+  smallmoney:
+    databricks_delta: DECIMAL(10,4)
+    status: AUTO
+    fidelity: EXACT
+
+  real:
+    databricks_delta: FLOAT
+    status: AUTO
+    fidelity: EXACT
+
+  float:
+    databricks_delta: DOUBLE
+    status: AUTO
+    fidelity: WIDENED
+    notes: "SQL Server float(n) mapped to Delta DOUBLE"
+
+  # ---- character ----
+  char:
+    databricks_delta: STRING
+    status: AUTO
+    fidelity: EXACT
+
+  varchar:
+    databricks_delta: STRING
+    status: AUTO
+    fidelity: EXACT
+
+  nchar:
+    databricks_delta: STRING
+    status: AUTO
+    fidelity: EXACT
+
+  nvarchar:
+    databricks_delta: STRING
+    status: AUTO
+    fidelity: EXACT
+
+  text:
+    databricks_delta: STRING
+    status: REVIEW
+    fidelity: LOSSY
+    notes: "deprecated SQL Server text type; review before migrating"
+
+  ntext:
+    databricks_delta: STRING
+    status: REVIEW
+    fidelity: LOSSY
+    notes: "deprecated SQL Server ntext type; review before migrating"
+
+  # ---- binary ----
+  binary:
+    databricks_delta: BINARY
+    status: AUTO
+    fidelity: EXACT
+
+  varbinary:
+    databricks_delta: BINARY
+    status: AUTO
+    fidelity: EXACT
+
+  image:
+    databricks_delta: BINARY
+    status: REVIEW
+    fidelity: LOSSY
+    notes: "deprecated SQL Server image type; review before migrating"
+
+  # ---- rowversion (binary change token, NOT a datetime) ----
+  timestamp:
+    databricks_delta: BINARY
+    status: AUTO
+    fidelity: EXACT
+    notes: "SQL Server timestamp is rowversion (an 8-byte binary change token), NOT a datetime; mapped to BINARY and never a temporal watermark"
+
+  rowversion:
+    databricks_delta: BINARY
+    status: AUTO
+    fidelity: EXACT
+    notes: "SQL Server rowversion is an 8-byte binary change token; mapped to BINARY and never a temporal watermark"
+
+  # ---- identifiers / semi-structured ----
+  uniqueidentifier:
+    databricks_delta: STRING
+    status: AUTO
+    fidelity: WIDENED
+    notes: "GUID serialized to canonical STRING form"
+
+  xml:
+    databricks_delta: STRING
+    status: REVIEW
+    fidelity: LOSSY
+    notes: "SQL Server XML serialized to STRING; confirm fidelity/schema policy"
+
+  # ---- temporal ----
+  date:
+    databricks_delta: DATE
+    status: AUTO
+    fidelity: EXACT
+
+  datetime:
+    databricks_delta: TIMESTAMP
+    status: AUTO
+    fidelity: WIDENED
+    notes: "SQL Server datetime (~3.33ms resolution) widened to Delta TIMESTAMP"
+
+  smalldatetime:
+    databricks_delta: TIMESTAMP
+    status: AUTO
+    fidelity: WIDENED
+    notes: "SQL Server smalldatetime (minute resolution) widened to Delta TIMESTAMP"
+
+  datetime2:
+    databricks_delta: TIMESTAMP
+    status: AUTO
+    fidelity: LOSSY
+    notes: "AUTO policy: SQL Server datetime2 is normalized to microsecond precision (6 fractional digits) for Delta TIMESTAMP and watermark processing; a datetime2(7) source loses the seventh digit"
+
+  datetimeoffset:
+    databricks_delta: TIMESTAMP
+    status: REVIEW
+    fidelity: LOSSY
+    notes: "timezone offset dropped when converted to Delta TIMESTAMP; confirm timezone-fidelity policy"
+
+  time:
+    databricks_delta: STRING
+    status: REVIEW
+    fidelity: LOSSY
+    notes: "no Delta time-of-day type; retained as STRING - confirm representation"
+
+  # ---- types requiring an explicit approved policy (never auto-STRING) ----
+  sql_variant:
+    databricks_delta: null
+    status: BLOCKED
+    fidelity: UNKNOWN
+    notes: "sql_variant stores heterogeneous types; cannot be safely auto-mapped"
+
+  hierarchyid:
+    databricks_delta: null
+    status: BLOCKED
+    fidelity: UNKNOWN
+    notes: "hierarchyid is a CLR type; needs an explicit approved representation"
+
+  geometry:
+    databricks_delta: null
+    status: BLOCKED
+    fidelity: UNKNOWN
+    notes: "spatial geometry needs an explicit approved serialization strategy"
+
+  geography:
+    databricks_delta: null
+    status: BLOCKED
+    fidelity: UNKNOWN
+    notes: "spatial geography needs an explicit approved serialization strategy"
+
+  cursor:
+    databricks_delta: null
+    status: BLOCKED
+    fidelity: UNKNOWN
+    notes: "cursor is not a storable column type"
+
+  table:
+    databricks_delta: null
+    status: BLOCKED
+    fidelity: UNKNOWN
+    notes: "table type is not a storable column type"

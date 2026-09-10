@@ -1,0 +1,200 @@
+# =============================================================================
+# type_rules.yaml
+# Oracle -> Databricks (Delta) deterministic type mapping rules.
+# status:   AUTO | REVIEW | BLOCKED
+# fidelity: EXACT | WIDENED | LOSSY | UNKNOWN
+#
+# NOTE ON NUMBER: Oracle reports almost every numeric column as data_type
+# 'NUMBER' with the real shape held in precision/scale. The mapper resolves
+# NUMBER(p,s) in code (crosssourcetypemapper._map_number), so the entry below is
+# only a documented fallback:
+#   scale 0/None -> SMALLINT/INT/BIGINT by precision, else DECIMAL(p,0)
+#   scale > 0    -> DECIMAL(p,s); precision > 38 is BLOCKED
+#   no precision & no scale -> DECIMAL(38,0) (AUTO, approved whole-number policy)
+# =============================================================================
+
+version: 1
+source_dialect: oracle
+target: databricks_delta
+
+types:
+  # ---- numeric ----
+  number:
+    databricks_delta: DECIMAL
+    status: AUTO
+    fidelity: EXACT
+    notes: "resolved in code from precision/scale; unconstrained NUMBER uses the approved whole-number mapping DECIMAL(38,0); precision greater than 38 is BLOCKED"
+
+  float:
+    databricks_delta: DOUBLE
+    status: AUTO
+    fidelity: WIDENED
+    notes: "Oracle FLOAT is binary-precision NUMBER; widened to DOUBLE"
+
+  binary_float:
+    databricks_delta: FLOAT
+    status: AUTO
+    fidelity: EXACT
+
+  binary_double:
+    databricks_delta: DOUBLE
+    status: AUTO
+    fidelity: EXACT
+
+  # ---- character ----
+  varchar2:
+    databricks_delta: STRING
+    status: AUTO
+    fidelity: EXACT
+
+  nvarchar2:
+    databricks_delta: STRING
+    status: AUTO
+    fidelity: EXACT
+
+  char:
+    databricks_delta: STRING
+    status: AUTO
+    fidelity: EXACT
+
+  nchar:
+    databricks_delta: STRING
+    status: AUTO
+    fidelity: EXACT
+
+  clob:
+    databricks_delta: STRING
+    status: AUTO
+    fidelity: WIDENED
+    notes: "Oracle CLOB content is materialized as Delta STRING; validate JDBC LOB handling and maximum observed payload size"
+
+  nclob:
+    databricks_delta: STRING
+    status: AUTO
+    fidelity: WIDENED
+    notes: "Oracle NCLOB content is materialized as Delta STRING; validate Unicode round-trip, JDBC LOB handling, and maximum observed payload size"
+
+  long:
+    databricks_delta: STRING
+    status: REVIEW
+    fidelity: LOSSY
+    notes: "deprecated LONG type (one per table); review before migrating"
+
+  # ---- datetime ----
+  date:
+    databricks_delta: TIMESTAMP
+    status: AUTO
+    fidelity: WIDENED
+    notes: "Oracle DATE carries a time component; mapped to Delta TIMESTAMP"
+
+  timestamp:
+    databricks_delta: TIMESTAMP
+    status: AUTO
+    fidelity: EXACT
+    notes: "verify fractional-seconds precision against Delta TIMESTAMP (micros)"
+
+  timestamp with time zone:
+    databricks_delta: TIMESTAMP
+    status: REVIEW
+    fidelity: LOSSY
+    notes: "timezone offset dropped when converted to Delta TIMESTAMP; confirm policy"
+
+  timestamp with local time zone:
+    databricks_delta: TIMESTAMP
+    status: REVIEW
+    fidelity: LOSSY
+    notes: "session-local timezone semantics lost; confirm policy"
+
+  interval year to month:
+    databricks_delta: STRING
+    status: REVIEW
+    fidelity: LOSSY
+    notes: "no Delta interval type; retained as STRING"
+
+  interval day to second:
+    databricks_delta: STRING
+    status: REVIEW
+    fidelity: LOSSY
+    notes: "no Delta interval type; retained as STRING"
+
+  # ---- binary ----
+  raw:
+    databricks_delta: BINARY
+    status: AUTO
+    fidelity: EXACT
+
+  long raw:
+    databricks_delta: BINARY
+    status: REVIEW
+    fidelity: LOSSY
+    notes: "deprecated LONG RAW; review before migrating"
+
+  blob:
+    databricks_delta: BINARY
+    status: AUTO
+    fidelity: WIDENED
+    notes: "Oracle BLOB content is materialized as Delta BINARY; validate JDBC LOB streaming and maximum observed payload size"
+
+  bfile:
+    databricks_delta: STRING
+    status: BLOCKED
+    fidelity: UNKNOWN
+    notes: "BFILE points to an external OS file; cannot be auto-migrated"
+
+  # ---- identifiers / semi-structured / spatial ----
+  rowid:
+    databricks_delta: STRING
+    status: REVIEW
+    fidelity: LOSSY
+    notes: "physical ROWID serialized to STRING"
+
+  urowid:
+    databricks_delta: STRING
+    status: REVIEW
+    fidelity: LOSSY
+    notes: "universal ROWID serialized to STRING"
+
+  xmltype:
+    databricks_delta: STRING
+    status: REVIEW
+    fidelity: LOSSY
+    notes: "XMLTYPE serialized to STRING"
+
+  anydata:
+    databricks_delta: STRING
+    status: BLOCKED
+    fidelity: UNKNOWN
+    notes: "ANYDATA stores heterogeneous types; cannot be safely auto-mapped"
+
+  sdo_geometry:
+    databricks_delta: BINARY
+    status: BLOCKED
+    fidelity: UNKNOWN
+    notes: "spatial type requires an explicit, approved serialization strategy"
+
+  # ---- Oracle 23ai / 26ai ----
+  boolean:
+    databricks_delta: BOOLEAN
+    status: AUTO
+    fidelity: EXACT
+    notes: "Oracle 23ai+ native BOOLEAN maps to Delta BOOLEAN; subject to a live JDBC round-trip check"
+
+  json:
+    databricks_delta: STRING
+    status: REVIEW
+    fidelity: LOSSY
+    notes: >-
+      Native Oracle JSON. This policy describes the target representation only.
+      It stays REVIEW/LOSSY because the generic SELECT * extraction does not
+      apply JSON_SERIALIZE; a JSON column must be explicitly serialized and pass
+      a live JDBC round-trip before it can become AUTO. This YAML update does not
+      implement native JSON migration.
+
+  vector:
+    databricks_delta: null
+    status: BLOCKED
+    fidelity: UNKNOWN
+    notes: >-
+      Oracle 23ai/26ai VECTOR. Blocked until an approved representation is
+      defined that preserves dimensions, element format (e.g. FLOAT32/INT8), and
+      dense vs sparse semantics. Not auto-mapped to ARRAY, BINARY, or STRING.

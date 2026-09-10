@@ -1,0 +1,8 @@
+# Local test suite
+tests/
+requirements-dev.txt
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
