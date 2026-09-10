@@ -141,6 +141,32 @@ class SourceAdapter(ABC):
                                   upper_watermark, columns=None):
         ...
 
+    # ------------------------------------------------------- discovery SQL
+    # Broad source-assessment discovery. Concrete adapters return neutral
+    # aliases (SCHEMA_NAME / OBJECT_NAME / OBJECT_TYPE / ROW_COUNT / SIZE_MB /
+    # ROW_COUNT_METHOD) so the assessment notebook stays source-independent. A
+    # broad assessment never runs COUNT(*) per table; it uses catalog/dictionary
+    # metadata and labels the method EXACT, ESTIMATED, or UNAVAILABLE.
+    @abstractmethod
+    def list_schemas_query(self, source_database=None):
+        ...
+
+    @abstractmethod
+    def list_tables_query(self, source_database=None, source_schema=None):
+        ...
+
+    @abstractmethod
+    def list_views_query(self, source_database=None, source_schema=None):
+        ...
+
+    @abstractmethod
+    def list_routines_query(self, source_database=None, source_schema=None):
+        ...
+
+    @abstractmethod
+    def table_statistics_query(self, source_database=None, source_schema=None):
+        ...
+
     # ------------------------------------------------------- watermark policy
     @abstractmethod
     def normalize_watermark_type(self, source_type):

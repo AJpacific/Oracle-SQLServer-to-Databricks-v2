@@ -1,0 +1,101 @@
+"""
+Unit tests for source assessment (Commit 2): discovery query generation and
+table compatibility classification. All pure string / policy checks (no Spark).
+"""
+
+import os
+import sys
+import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SRC = os.path.join(os.path.dirname(HERE), "src")
+for p in (SRC, os.path.dirname(HERE)):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+import sql_builder as ora  # noqa: E402
+import sqlserver_sql_builder as ss  # noqa: E402
+from crosssourcetypemapper import classify_table_compatibility  # noqa: E402
+from source_adapters.factory import get_source_adapter  # noqa: E402
+
+
+class TestOracleDiscovery(unittest.TestCase):
+    def test_list_schemas_excludes_system_owners(self):
+        q = ora.list_schemas_query()
+        self.assertIn("all_objects", q)
+        self.assertIn("'SYS'", q)
+        self.assertIn("NOT IN", q)
+
+    def test_list_tables_uses_all_tables_and_estimated_rows(self):
+        q = ora.list_tables_query()
+        self.assertIn("all_tables", q)
+        self.assertIn("num_rows AS ROW_COUNT", q)
+
+    def test_list_tables_scoped_to_owner(self):
+        q = ora.list_tables_query("HR")
+        self.assertIn("owner = 'HR'", q)
+
+    def test_table_statistics_labelled_estimated(self):
+        self.assertIn("'ESTIMATED' AS ROW_COUNT_METHOD", ora.table_statistics_query())
+
+    def test_list_routines_covers_package(self):
+        q = ora.list_routines_query()
+        for kind in ("PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE BODY"):
+            self.assertIn(kind, q)
+
+    def test_object_source_ordered_by_line(self):
+        q = ora.object_source_query("HR", "PKG1", "PACKAGE BODY")
+        self.assertIn("all_source", q)
+        self.assertIn("ORDER BY line", q)
+
+
+class TestSqlServerDiscovery(unittest.TestCase):
+    def test_list_schemas_uses_sys_schemas(self):
+        q = ss.list_schemas_query("SourceDb")
+        self.assertIn("sys.schemas", q)
+        self.assertIn("[SourceDb].sys.", q)
+
+    def test_list_tables_uses_partitions_for_counts(self):
+        q = ss.list_tables_query("SourceDb")
+        self.assertIn("sys.partitions", q)
+        self.assertIn("SUM(pr.rows) AS ROW_COUNT", q)
+
+    def test_table_statistics_labelled_exact(self):
+        q = ss.table_statistics_query("SourceDb")
+        self.assertIn("'EXACT' AS ROW_COUNT_METHOD", q)
+        self.assertIn("allocation_units", q)
+
+    def test_module_definition_uses_sql_modules(self):
+        q = ss.module_definition_query("SourceDb", "dbo", "usp_Get")
+        self.assertIn("sys.sql_modules", q)
+        self.assertIn("'dbo'", q)
+        self.assertIn("'usp_Get'", q)
+
+
+class TestCompatibilityClassification(unittest.TestCase):
+    def test_all_auto_is_compatible(self):
+        self.assertEqual(classify_table_compatibility(["AUTO", "AUTO"]), "COMPATIBLE")
+
+    def test_review_present_no_blocked_is_review(self):
+        self.assertEqual(classify_table_compatibility(["AUTO", "REVIEW"]), "REVIEW")
+
+    def test_blocked_present_is_manual(self):
+        self.assertEqual(
+            classify_table_compatibility(["AUTO", "REVIEW", "BLOCKED"]), "MANUAL")
+
+    def test_empty_is_unable(self):
+        self.assertEqual(classify_table_compatibility([]), "UNABLE_TO_ASSESS")
+
+
+class TestAdapterDiscoveryRouting(unittest.TestCase):
+    def test_oracle_adapter_returns_oracle_discovery(self):
+        a = get_source_adapter("oracle")
+        self.assertIn("all_tables", a.list_tables_query())
+
+    def test_sqlserver_adapter_returns_sqlserver_discovery(self):
+        a = get_source_adapter("sqlserver", source_database="Db")
+        self.assertIn("sys.tables", a.list_tables_query("Db"))
+
+
+if __name__ == "__main__":
+    unittest.main()

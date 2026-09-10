@@ -262,3 +262,101 @@ def build_incremental_extract_query(owner, table, watermark_col, watermark_famil
     where = f"{wm} > {lower_lit} AND {wm} <= {upper_lit}"
     return (f"(SELECT {col_list} FROM {oracle_fqn(owner, table)} "
             f"WHERE {where}) q")
+
+
+# ------------------------------------------------------- discovery / assessment
+# Owners excluded from a broad Oracle assessment. These are Oracle-maintained
+# schemas that never hold user data worth migrating.
+ORACLE_SYSTEM_OWNERS = (
+    "SYS", "SYSTEM", "OUTLN", "XDB", "CTXSYS", "MDSYS", "ORDSYS", "ORDDATA",
+    "ORDPLUGINS", "DBSNMP", "APPQOSSYS", "WMSYS", "LBACSYS", "DVSYS", "AUDSYS",
+    "GSMADMIN_INTERNAL", "OJVMSYS", "DBSFWUSER", "REMOTE_SCHEDULER_AGENT",
+    "SYS$UMF", "OLAPSYS", "SI_INFORMTN_SCHEMA", "DIP", "ANONYMOUS", "MDDATA",
+    "FLOWS_FILES", "APEX_PUBLIC_USER", "SPATIAL_CSW_ADMIN_USR",
+    "SPATIAL_WFS_ADMIN_USR", "GGSYS", "SYSBACKUP", "SYSDG", "SYSKM", "SYSRAC",
+    "PDBADMIN", "GSMCATUSER", "GSMUSER", "XS$NULL",
+)
+
+
+def _oracle_owner_exclusion():
+    "IN-list of quoted Oracle system owners for a WHERE ... NOT IN (...)."
+    return ", ".join(escape_string_literal(o) for o in ORACLE_SYSTEM_OWNERS)
+
+
+def _oracle_owner_filter(owner=None, column="owner"):
+    "Restrict to one owner, else exclude Oracle system owners."
+    if owner:
+        return f"{column} = {escape_string_literal(owner)}"
+    return f"{column} NOT IN ({_oracle_owner_exclusion()})"
+
+
+def list_schemas_query() -> str:
+    """Distinct visible, non-system Oracle owners as SCHEMA_NAME."""
+    return (
+        "(SELECT DISTINCT owner AS SCHEMA_NAME FROM all_objects "
+        f"WHERE {_oracle_owner_filter()}) q"
+    )
+
+
+def list_tables_query(owner: str = None) -> str:
+    """Oracle tables (estimated NUM_ROWS from the dictionary, never a COUNT(*))."""
+    return (
+        "(SELECT owner AS SCHEMA_NAME, table_name AS OBJECT_NAME, "
+        "num_rows AS ROW_COUNT FROM all_tables "
+        f"WHERE {_oracle_owner_filter(owner)}) q"
+    )
+
+
+def list_views_query(owner: str = None) -> str:
+    """Oracle views as SCHEMA_NAME / OBJECT_NAME."""
+    return (
+        "(SELECT owner AS SCHEMA_NAME, view_name AS OBJECT_NAME FROM all_views "
+        f"WHERE {_oracle_owner_filter(owner)}) q"
+    )
+
+
+def list_routines_query(owner: str = None) -> str:
+    """Oracle routines/packages as SCHEMA_NAME / OBJECT_NAME / OBJECT_TYPE."""
+    return (
+        "(SELECT owner AS SCHEMA_NAME, object_name AS OBJECT_NAME, "
+        "object_type AS OBJECT_TYPE FROM all_objects "
+        f"WHERE object_type IN ('PROCEDURE','FUNCTION','PACKAGE','PACKAGE BODY') "
+        f"AND {_oracle_owner_filter(owner)}) q"
+    )
+
+
+def table_statistics_query(owner: str = None) -> str:
+    """Estimated table statistics from the data dictionary (ROW_COUNT_METHOD=ESTIMATED).
+
+    NUM_ROWS/BLOCKS come from the optimizer dictionary, so they are ESTIMATED
+    unless statistics were just gathered; SIZE_MB assumes the common 8 KiB block.
+    """
+    return (
+        "(SELECT owner AS SCHEMA_NAME, table_name AS OBJECT_NAME, "
+        "num_rows AS ROW_COUNT, "
+        "CAST(NVL(blocks,0) * 8192 / 1048576 AS NUMBER(18,2)) AS SIZE_MB, "
+        "'ESTIMATED' AS ROW_COUNT_METHOD FROM all_tables "
+        f"WHERE {_oracle_owner_filter(owner)}) q"
+    )
+
+
+def object_source_query(owner: str, object_name: str, object_type: str) -> str:
+    """Assemble an Oracle routine/package definition from ALL_SOURCE in line order."""
+    o = escape_string_literal(owner)
+    n = escape_string_literal(object_name)
+    t = escape_string_literal(object_type)
+    return (
+        "(SELECT line AS LINE_NO, text AS SOURCE_TEXT FROM all_source "
+        f"WHERE owner = {o} AND name = {n} AND type = {t} "
+        "ORDER BY line) q"
+    )
+
+
+def view_text_query(owner: str, view_name: str) -> str:
+    """Oracle view text (LONG column) as DEFINITION_TEXT."""
+    o = escape_string_literal(owner)
+    v = escape_string_literal(view_name)
+    return (
+        "(SELECT text AS DEFINITION_TEXT FROM all_views "
+        f"WHERE owner = {o} AND view_name = {v}) q"
+    )

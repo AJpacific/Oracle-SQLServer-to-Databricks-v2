@@ -153,6 +153,32 @@ class SqlServerSourceAdapter(SourceAdapter):
             db, source_schema, source_table, watermark_column, watermark_type,
             lower_watermark, upper_watermark, columns)
 
+    # ------------------------------------------------------- discovery SQL
+    def list_schemas_query(self, source_database=None):
+        db = validate_database(source_database) if source_database else None
+        return ssb.list_schemas_query(db)
+
+    def list_tables_query(self, source_database=None, source_schema=None):
+        db = validate_database(source_database) if source_database else None
+        return ssb.list_tables_query(db, source_schema)
+
+    def list_views_query(self, source_database=None, source_schema=None):
+        db = validate_database(source_database) if source_database else None
+        return ssb.list_views_query(db, source_schema)
+
+    def list_routines_query(self, source_database=None, source_schema=None):
+        db = validate_database(source_database) if source_database else None
+        return ssb.list_routines_query(db, source_schema)
+
+    def table_statistics_query(self, source_database=None, source_schema=None):
+        db = validate_database(source_database) if source_database else None
+        return ssb.table_statistics_query(db, source_schema)
+
+    def module_definition_query(self, source_database, source_schema=None,
+                                object_name=None):
+        db = validate_database(source_database) if source_database else None
+        return ssb.module_definition_query(db, source_schema, object_name)
+
     # ------------------------------------------------------- watermark policy
     def normalize_watermark_type(self, source_type):
         return ssb.normalize_watermark_type(source_type)

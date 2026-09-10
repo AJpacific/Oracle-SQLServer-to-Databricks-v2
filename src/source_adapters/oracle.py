@@ -89,6 +89,29 @@ class OracleSourceAdapter(SourceAdapter):
             source_schema, source_table, watermark_column, watermark_type,
             lower_watermark, upper_watermark, columns)
 
+    # ------------------------------------------------------- discovery SQL
+    def list_schemas_query(self, source_database=None):
+        return sqlb.list_schemas_query()
+
+    def list_tables_query(self, source_database=None, source_schema=None):
+        return sqlb.list_tables_query(source_schema)
+
+    def list_views_query(self, source_database=None, source_schema=None):
+        return sqlb.list_views_query(source_schema)
+
+    def list_routines_query(self, source_database=None, source_schema=None):
+        return sqlb.list_routines_query(source_schema)
+
+    def table_statistics_query(self, source_database=None, source_schema=None):
+        return sqlb.table_statistics_query(source_schema)
+
+    def object_source_query(self, source_database, source_schema, object_name,
+                            object_type):
+        return sqlb.object_source_query(source_schema, object_name, object_type)
+
+    def view_text_query(self, source_database, source_schema, view_name):
+        return sqlb.view_text_query(source_schema, view_name)
+
     # ------------------------------------------------------- watermark policy
     def normalize_watermark_type(self, source_type):
         return strat.normalize_watermark_type(source_type)

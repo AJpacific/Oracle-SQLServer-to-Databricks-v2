@@ -32,6 +32,25 @@ class ColumnMappingResult:
     is_nullable: bool
 
 
+def classify_table_compatibility(statuses):
+    """Roll per-column mapping statuses up to a table compatibility category.
+
+    COMPATIBLE when every column is AUTO, MANUAL when any column is BLOCKED,
+    REVIEW when at least one column is REVIEW and none is BLOCKED. An empty
+    column list is UNABLE_TO_ASSESS (nothing could be evaluated).
+    """
+    normalized = [str(s or "").strip().upper() for s in (statuses or [])]
+    if not normalized:
+        return "UNABLE_TO_ASSESS"
+    if any(s == "BLOCKED" for s in normalized):
+        return "MANUAL"
+    if any(s == "REVIEW" for s in normalized):
+        return "REVIEW"
+    if all(s == "AUTO" for s in normalized):
+        return "COMPATIBLE"
+    return "REVIEW"
+
+
 # Built-in fallback rules used when no YAML file is available. Keys are the
 # Oracle data_type as reported by ALL_TAB_COLUMNS (upper case, family stripped).
 _BUILTIN_RULES = {

@@ -305,3 +305,117 @@ def build_incremental_extract_query(database, owner, table, watermark_col,
     where = f"{wm_expr} > {lower_lit} AND {wm_expr} <= {upper_lit}"
     return (f"(SELECT {col_list} FROM {sqlserver_fqn(owner, table, database)} "
             f"WHERE {where}) q")
+
+
+# ------------------------------------------------------- discovery / assessment
+# System schemas excluded from a broad SQL Server assessment.
+SQLSERVER_SYSTEM_SCHEMAS = ("sys", "INFORMATION_SCHEMA", "guest", "db_owner",
+                            "db_accessadmin", "db_securityadmin", "db_ddladmin",
+                            "db_backupoperator", "db_datareader", "db_datawriter",
+                            "db_denydatareader", "db_denydatawriter")
+
+
+def _ss_prefix(database):
+    "Database-qualified sys. prefix when a validated database is supplied."
+    if database:
+        return f"{quote_sqlserver(database)}.sys."
+    return "sys."
+
+
+def _ss_schema_exclusion():
+    return ", ".join(escape_string_literal(s) for s in SQLSERVER_SYSTEM_SCHEMAS)
+
+
+def _ss_schema_filter(owner=None, column="s.name"):
+    if owner:
+        return f"{column} = {escape_string_literal(owner)}"
+    return f"{column} NOT IN ({_ss_schema_exclusion()})"
+
+
+def list_schemas_query(database: str = None) -> str:
+    """Non-system SQL Server schemas as SCHEMA_NAME."""
+    p = _ss_prefix(database)
+    return (
+        f"(SELECT s.name AS SCHEMA_NAME FROM {p}schemas s "
+        f"WHERE {_ss_schema_filter(owner=None)}) q"
+    )
+
+
+def list_tables_query(database: str = None, owner: str = None) -> str:
+    """SQL Server user tables with exact catalog row counts (sys.partitions)."""
+    p = _ss_prefix(database)
+    return (
+        "(SELECT s.name AS SCHEMA_NAME, t.name AS OBJECT_NAME, "
+        "SUM(pr.rows) AS ROW_COUNT "
+        f"FROM {p}tables t "
+        f"JOIN {p}schemas s ON t.schema_id = s.schema_id "
+        f"JOIN {p}partitions pr ON pr.object_id = t.object_id "
+        "AND pr.index_id IN (0,1) "
+        f"WHERE {_ss_schema_filter(owner)} "
+        "GROUP BY s.name, t.name) q"
+    )
+
+
+def list_views_query(database: str = None, owner: str = None) -> str:
+    """SQL Server views as SCHEMA_NAME / OBJECT_NAME."""
+    p = _ss_prefix(database)
+    return (
+        "(SELECT s.name AS SCHEMA_NAME, v.name AS OBJECT_NAME "
+        f"FROM {p}views v JOIN {p}schemas s ON v.schema_id = s.schema_id "
+        f"WHERE {_ss_schema_filter(owner)}) q"
+    )
+
+
+def list_routines_query(database: str = None, owner: str = None) -> str:
+    """SQL Server procedures and functions as SCHEMA_NAME / OBJECT_NAME / OBJECT_TYPE."""
+    p = _ss_prefix(database)
+    return (
+        "(SELECT s.name AS SCHEMA_NAME, o.name AS OBJECT_NAME, "
+        "CASE WHEN o.type = 'P' THEN 'PROCEDURE' ELSE 'FUNCTION' END AS OBJECT_TYPE "
+        f"FROM {p}objects o JOIN {p}schemas s ON o.schema_id = s.schema_id "
+        "WHERE o.type IN ('P','FN','IF','TF','AF') "
+        f"AND {_ss_schema_filter(owner)}) q"
+    )
+
+
+def table_statistics_query(database: str = None, owner: str = None) -> str:
+    """Exact SQL Server table statistics (ROW_COUNT_METHOD=EXACT).
+
+    Row counts come from sys.partitions and size from sys.allocation_units
+    (total_pages * 8 KiB), both exact catalog metadata rather than estimates.
+    """
+    p = _ss_prefix(database)
+    return (
+        "(SELECT s.name AS SCHEMA_NAME, t.name AS OBJECT_NAME, "
+        "SUM(DISTINCT_ROWS.rows) AS ROW_COUNT, "
+        "CAST(SUM(au.total_pages) * 8.0 / 1024 AS DECIMAL(18,2)) AS SIZE_MB, "
+        "'EXACT' AS ROW_COUNT_METHOD "
+        f"FROM {p}tables t "
+        f"JOIN {p}schemas s ON t.schema_id = s.schema_id "
+        f"JOIN {p}indexes i ON i.object_id = t.object_id "
+        f"JOIN {p}partitions DISTINCT_ROWS ON DISTINCT_ROWS.object_id = t.object_id "
+        "AND DISTINCT_ROWS.index_id = i.index_id AND i.index_id IN (0,1) "
+        f"JOIN {p}allocation_units au ON au.container_id = DISTINCT_ROWS.partition_id "
+        f"WHERE {_ss_schema_filter(owner)} "
+        "GROUP BY s.name, t.name) q"
+    )
+
+
+def module_definition_query(database: str = None, owner: str = None,
+                            object_name: str = None) -> str:
+    """SQL Server object definition text from sys.sql_modules as DEFINITION_TEXT.
+
+    An encrypted or otherwise inaccessible module returns a NULL definition,
+    which the assessor records as UNABLE_TO_ASSESS rather than fabricating text.
+    """
+    p = _ss_prefix(database)
+    return (
+        "(SELECT s.name AS SCHEMA_NAME, o.name AS OBJECT_NAME, "
+        "o.type AS OBJECT_TYPE, m.definition AS DEFINITION_TEXT "
+        f"FROM {p}objects o "
+        f"JOIN {p}schemas s ON o.schema_id = s.schema_id "
+        f"LEFT JOIN {p}sql_modules m ON m.object_id = o.object_id "
+        f"WHERE {_ss_schema_filter(owner)}"
+        + (f" AND o.name = {escape_string_literal(object_name)}" if object_name else "")
+        + ") q"
+    )
