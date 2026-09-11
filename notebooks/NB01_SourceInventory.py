@@ -23,8 +23,9 @@ def ctrl(t):
 
 # COMMAND ----------
 
-active = repo.active_tables().collect()
-print(f"Active tables to inventory: {len(active)}")
+active = repo.active_tables(connection_id=(CONNECTION_ID or None)).collect()
+print(f"Active tables to inventory: {len(active)}"
+      + (f" (connection_id={CONNECTION_ID})" if CONNECTION_ID else ""))
 
 # COMMAND ----------
 
@@ -37,6 +38,7 @@ for r in active:
     src_schema = r["source_schema"]
     src_table = r["source_table"]
     src_id = d.get("source_table_id")
+    conn_id = d.get("connection_id")
 
     # Validate the source and obtain its adapter first. A bad/unsupported
     # source_system isolates only this row - other rows keep processing.
@@ -48,7 +50,7 @@ for r in active:
             repo.update_control_by_identity(src_system, src_server, src_db,
                                             src_schema, src_table,
                                             {"source_table_id": src_id})
-        adapter = get_source_adapter_for_row(r)
+        adapter = get_source_adapter_routed(r)
     except Exception as e:
         try:
             if src_id:
@@ -103,7 +105,7 @@ for r in active:
                                            if c["DATETIME_PRECISION"] is not None else None),
                 })
             inventory_rows.append((
-                run_id, src_id, src_system, src_server, src_db,
+                run_id, src_id, conn_id, src_system, src_server, src_db,
                 src_schema, src_table, c["COLUMN_NAME"],
                 int(c["ORDINAL_POSITION"]), c["IS_NULLABLE"], c["DATA_TYPE"],
                 (int(c["CHARACTER_MAXIMUM_LENGTH"]) if c["CHARACTER_MAXIMUM_LENGTH"] is not None else None),
@@ -158,6 +160,7 @@ from pyspark.sql.types import *
 inventory_schema = StructType([
     StructField("run_id", StringType(), True),
     StructField("source_table_id", StringType(), True),
+    StructField("connection_id", StringType(), True),
     StructField("source_system", StringType(), True),
     StructField("source_server", StringType(), True),
     StructField("source_database", StringType(), True),
@@ -188,7 +191,8 @@ inv_df = spark.createDataFrame(
 if inventory_rows:
     inv_df = inv_df.withColumn("captured_ts", F.current_timestamp())
 
-    inv_df.write.format("delta").mode("append").saveAsTable(
+    inv_df.write.format("delta").mode("append").option(
+        "mergeSchema", "true").saveAsTable(
         ctrl("source_inventory").replace("`", "")
     )
 

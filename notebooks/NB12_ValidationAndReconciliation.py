@@ -29,7 +29,7 @@ op_filter = (
     else "'DELTA_MERGE','DELTA_APPEND','DELTA_FULL_REFRESH'"
 )
 loaded = spark.sql(f"""
-    SELECT DISTINCT c.source_table_id, c.source_system,
+    SELECT DISTINCT c.source_table_id, c.connection_id, c.source_system,
            c.source_server, c.source_database,
            c.source_schema, c.source_table,
            c.target_catalog, c.target_schema, c.target_table,
@@ -51,6 +51,7 @@ any_fail = False
 
 for r in loaded:
     src_id = r["source_table_id"]
+    conn_id = r["connection_id"]
     src_system = r["source_system"]
     src_server = r["source_server"]
     src_db = r["source_database"]
@@ -61,7 +62,9 @@ for r in loaded:
     target_fqn = f"{t_catalog}.{t_schema}.{t_table}"
 
     try:
-        check_type = "ROW_COUNT"
+        # Canonical full-load check type shared with NB10's state gate and the
+        # dashboard views; delta runs summarize NB11b's named checks.
+        check_type = "FULL_SNAPSHOT_COUNT"
         if mode == "full":
             src_count = r["source_row_count"]
             tgt_count = r["target_row_count"]
@@ -108,21 +111,23 @@ for r in loaded:
                 status = "WARN"
             else:
                 status = "PASS"
-        results.append((run_id, src_id, src_system, s_schema, s_table, check_type,
-                        str(src_count), str(tgt_count), status,
+        results.append((run_id, src_id, conn_id, src_system, s_schema, s_table,
+                        check_type, str(src_count), str(tgt_count), status,
                         f"src={src_count} tgt={tgt_count} mode={mode}"))
 
         # ---- Check 2: target table is queryable / not empty on a full load ----
         if mode == "full" and src_count is not None and src_count > 0 and tgt_count == 0:
             any_fail = True
-            results.append((run_id, src_id, src_system, s_schema, s_table, "NON_EMPTY",
-                            str(src_count), str(tgt_count), "FAIL",
+            results.append((run_id, src_id, conn_id, src_system, s_schema, s_table,
+                            "NON_EMPTY", str(src_count), str(tgt_count), "FAIL",
                             "source had rows but target is empty"))
     except Exception as e:
         any_fail = True
-        results.append((run_id, src_id, src_system, s_schema, s_table, "RECON_ERROR",
-                        None, None, "FAIL", str(e)[:500]))
-        print(f"  RECON ERROR [{src_system}] {s_schema}.{s_table}: {e}")
+        results.append((run_id, src_id, conn_id, src_system, s_schema, s_table,
+                        "RECON_ERROR", None, None, "FAIL",
+                        failcls.sanitize_message(e)[:500]))
+        print(f"  RECON ERROR [{src_system}] {s_schema}.{s_table}: "
+              f"{failcls.sanitize_message(e)[:300]}")
 
 # COMMAND ----------
 
@@ -132,7 +137,7 @@ for r in loaded:
 # watermark and never fails the run.
 if mode == "delta":
     wm_details = spark.sql(f"""
-        SELECT q.source_table_id, q.source_system,
+        SELECT q.source_table_id, q.connection_id, q.source_system,
                q.source_schema, q.source_table,
                q.last_watermark_value  AS previous_wm,
                q.upper_watermark_value AS captured_upper_wm,
@@ -150,8 +155,8 @@ if mode == "delta":
         upper = w["captured_upper_wm"]
         final = w["final_wm"]
         advanced = (final == upper)
-        results.append((run_id, w["source_table_id"], w["source_system"],
-                        w["source_schema"], w["source_table"],
+        results.append((run_id, w["source_table_id"], w["connection_id"],
+                        w["source_system"], w["source_schema"], w["source_table"],
                         "DELTA_WATERMARK", upper, final,
                         "PASS" if advanced else "WARN",
                         f"previous={prev} captured_upper={upper} final={final}"))
@@ -159,11 +164,11 @@ if mode == "delta":
 # COMMAND ----------
 
 if results:
-    cols = ["run_id", "source_table_id", "source_system", "source_schema",
-            "source_table", "check_type", "source_value", "target_value",
-            "status", "message"]
+    cols = ["run_id", "source_table_id", "connection_id", "source_system",
+            "source_schema", "source_table", "check_type", "source_value",
+            "target_value", "status", "message"]
     df = spark.createDataFrame(results, cols).withColumn("captured_ts", F.current_timestamp())
-    df.write.format("delta").mode("append").saveAsTable(
+    df.write.format("delta").mode("append").option("mergeSchema", "true").saveAsTable(
         ctrl("reconciliation_results").replace("`", ""))
     df.groupBy("status").count().show()
 

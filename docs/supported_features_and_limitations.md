@@ -12,8 +12,14 @@
   `NB00A`). Only non-secret metadata is stored.
 - Broad source assessment (`NB01A`) using data-dictionary / catalog views:
   schemas, tables, views, procedures, functions, packages. Row counts are
-  labelled `EXACT` (SQL Server), `ESTIMATED` (Oracle), or `UNAVAILABLE`. No
-  per-table `COUNT(*)` during a broad assessment.
+  labelled `CATALOG` (SQL Server catalog metadata from `sys.partitions`,
+  heap/clustered partitions only), `ESTIMATED` (Oracle `ALL_TABLES.NUM_ROWS`),
+  or `UNAVAILABLE`. A broad assessment never executes a per-table `COUNT(*)` /
+  `COUNT_BIG(*)`, so no label claims an executed exact count. `SIZE_MB` is the
+  reserved size of the base table and all of its indexes.
+- Source assessment and SQL-object assessment are retry-safe: re-running the
+  same `assessment_id` updates its own rows instead of duplicating them, and an
+  existing `APPROVED`/`REJECTED` review decision is preserved.
 - Assessment-based, collision-safe registration (`NB01B`). New rows are inactive
   (`REGISTERED`); `MANUAL` / `UNABLE_TO_ASSESS` are never auto-activated.
 - Full load (`NB09`, overwrite) and delta sync (`NB11a`/`NB11b`) with
@@ -24,7 +30,11 @@
   checkpoint -> finalize). `target_count >= source_count` is never an automatic
   pass.
 - Failed-ingest classification and retry worklists (`NB14`) with no-reapply
-  checkpoint-only / finalization-only recovery.
+  checkpoint-only / finalization-only recovery. `max_retries` means the number
+  of **additional** attempts allowed after the first.
+- `table_run_log.status` is normalized to `SUCCEEDED` / `FAILED`; the detailed
+  operational state lives on `source_table_control` / `delta_sync_queue`, and
+  `failure_stage` + `error_category` carry the precise meaning.
 - SQL-object assessment and limited deterministic conversion drafts (`NB13`);
   every generated draft is `PENDING_REVIEW` and is never executed.
 
@@ -33,9 +43,24 @@
   or reads a source secret.
 - MVP data-quality rules only: `NOT_NULL`, `DUPLICATE_KEY`, `DATA_TYPE`,
   `ALLOWED_VALUES`, `DEFAULT_VALUE`, `TRIM_STRING`, `STANDARDIZE_CASE`.
+- **DUPLICATE_KEY policy:** every record in a duplicate-key group is rejected.
+  No survivor is kept, because there is no deterministic survivor-ordering rule.
+  Key columns come from the rule's `column_name` (comma-separated for a
+  composite key), otherwise from the table's registered primary key.
+- An **invalid active** DQ rule fails the table before any transform, Silver
+  write, or quarantine write (`DQ_CONFIG_ERROR`); it is never silently skipped.
+  An inactive invalid rule does not block ETL.
+- Incremental ETL compares a DATE/TIMESTAMP Bronze watermark using explicitly
+  cast typed bounds - never a lexical string comparison. Any other watermark
+  type is a configuration error.
+- Quarantine is idempotent per `run_id` + `source_table_id`: re-running the same
+  ETL run replaces that run's quarantine rows instead of duplicating them.
+  Other runs' history is untouched. With `quarantine_enabled=false` rejected
+  rows are still counted for reconciliation but are not persisted.
 - Valid rows to Silver; rejected rows to `dq_quarantine` (with column
   redaction). Bronze-to-Silver reconciliation before a **separate** ETL
   checkpoint. Retry-safe FULL overwrite, MERGE, and interval replacement.
+- Duplicate primary keys in the valid ETL input fail **before** the MERGE runs.
 
 ### Shared
 - Failure classification, retry metadata, notifications (`NB16`, Teams webhook

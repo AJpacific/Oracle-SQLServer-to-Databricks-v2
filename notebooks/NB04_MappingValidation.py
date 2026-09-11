@@ -32,13 +32,14 @@ results = []
 for r in maps:
     src_id = r["source_table_id"]
     src_system = r["source_system"]
+    conn_id = r["connection_id"]
     schema, table, col = r["source_schema"], r["source_table"], r["column_name"]
     status = (r["mapping_status"] or "").upper()
     fidelity = (r["fidelity"] or "").upper()
     dtype = r["databricks_delta_type"] or ""
 
     def _add(severity, rule, message):
-        results.append((run_id, src_id, src_system, schema, table, col,
+        results.append((run_id, src_id, conn_id, src_system, schema, table, col,
                         severity, rule, message))
     # Source-column safety policy is explicit and source-qualified.
     if bool(r["is_hidden"]):
@@ -69,10 +70,11 @@ for r in maps:
 # COMMAND ----------
 
 if results:
-    cols = ["run_id", "source_table_id", "source_system", "source_schema",
-            "source_table", "column_name", "severity", "rule", "message"]
+    cols = ["run_id", "source_table_id", "connection_id", "source_system",
+            "source_schema", "source_table", "column_name", "severity", "rule",
+            "message"]
     df = spark.createDataFrame(results, cols).withColumn("captured_ts", F.current_timestamp())
-    df.write.format("delta").mode("append").saveAsTable(
+    df.write.format("delta").mode("append").option("mergeSchema", "true").saveAsTable(
         ctrl("mapping_validation_results").replace("`", ""))
     df.groupBy("severity").count().show()
     print(f"Wrote {len(results)} validation records.")

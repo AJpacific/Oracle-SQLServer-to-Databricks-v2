@@ -60,7 +60,7 @@ for r in norm:
                 status, fidelity = "REVIEW", "UNKNOWN"
                 notes = "SQL Server computed column requires explicit approval before materialization"
         mapped.append((
-            run_id, r["source_table_id"], src_system,
+            run_id, r["source_table_id"], r["connection_id"], src_system,
             r["source_schema"], r["source_table"], r["column_name"],
             int(r["ordinal_position"]), res.source_type, res.databricks_delta_type,
             status, fidelity, notes, bool(r["is_nullable"]),
@@ -69,7 +69,7 @@ for r in norm:
         ))
     except Exception as exc:
         mapped.append((
-            run_id, r["source_table_id"], src_system,
+            run_id, r["source_table_id"], r["connection_id"], src_system,
             r["source_schema"], r["source_table"], r["column_name"],
             int(r["ordinal_position"]), r["raw_type"], None,
             "BLOCKED", "UNKNOWN",
@@ -103,6 +103,7 @@ if mapped:
     resolved_mapping_schema = StructType([
         StructField("run_id", StringType(), True),
         StructField("source_table_id", StringType(), True),
+        StructField("connection_id", StringType(), True),
         StructField("source_system", StringType(), True),
         StructField("source_schema", StringType(), True),
         StructField("source_table", StringType(), True),
@@ -131,6 +132,7 @@ if mapped:
 
     df.write.format("delta") \
         .mode("append") \
+        .option("mergeSchema", "true") \
         .saveAsTable(
             ctrl("resolved_column_mappings").replace("`", "")
         )

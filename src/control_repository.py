@@ -30,6 +30,106 @@ try:
 except ModuleNotFoundError:
     from source_identity import normalize_source_system
 
+try:
+    from src.failure_classifier import sanitize_message as sanitize_error_message
+except ModuleNotFoundError:
+    from failure_classifier import sanitize_message as sanitize_error_message
+
+
+# Keys that must never reach a control/audit table. log_table_run() writes an
+# explicit column allowlist, so these are structurally excluded; the constant
+# makes that intent reviewable and testable.
+SECRET_FIELD_KEYS = frozenset({
+    "password", "pwd", "token", "access_token", "user", "username",
+    "secret", "secret_value", "client_secret", "jdbc_url", "url",
+    "webhook_url", "webhook", "sas",
+})
+
+
+def _to_long(value):
+    """Coerce to int for a BIGINT column; null stays null."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_int(value):
+    """Coerce to int for an INT column; null stays null."""
+    return _to_long(value)
+
+
+def _to_bool(value):
+    """Coerce to bool for a BOOLEAN column; null stays null (not False)."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in ("true", "yes", "1"):
+            return True
+        if token in ("false", "no", "0"):
+            return False
+        return None
+    return bool(value)
+
+
+# Every column table_run_log supports, with its Spark type token. Declared here
+# (not inline) so the audit contract is reviewable and unit-testable without a
+# Spark session. Order is the write order.
+TABLE_RUN_LOG_COLUMNS = (
+    ("run_id", "string"),
+    ("source_table_id", "string"),
+    ("connection_id", "string"),
+    ("source_system", "string"),
+    ("source_server", "string"),
+    ("source_database", "string"),
+    ("source_schema", "string"),
+    ("source_table", "string"),
+    ("operation", "string"),
+    ("target_full_name", "string"),
+    ("source_row_count", "bigint"),
+    ("target_row_count", "bigint"),
+    ("status", "string"),
+    ("error_message", "string"),
+    ("attempt_number", "int"),
+    ("failure_stage", "string"),
+    ("error_category", "string"),
+    ("retry_eligible", "boolean"),
+    ("retry_status", "string"),
+    ("parent_run_id", "string"),
+    ("lower_watermark", "string"),
+    ("upper_watermark", "string"),
+    ("extracted_row_count", "bigint"),
+    ("staged_row_count", "bigint"),
+    ("applied_row_count", "bigint"),
+    ("rejected_row_count", "bigint"),
+    ("started_ts", "timestamp"),
+    ("ended_ts", "timestamp"),
+)
+
+_COERCE = {"bigint": _to_long, "int": _to_int, "boolean": _to_bool}
+
+
+def build_table_run_row(fields: dict) -> tuple:
+    """Coerce a table-run field dict into the ordered audit row (pure).
+
+    Only the declared columns are read, so a secret-bearing key can never reach
+    the audit table. Values the caller did not supply stay null; nothing is
+    derived. ``error_message`` is sanitized as defense in depth.
+    """
+    fields = fields or {}
+    values = []
+    for name, type_token in TABLE_RUN_LOG_COLUMNS:
+        value = fields.get(name)
+        if name == "error_message":
+            value = sanitize_error_message(value) if value is not None else None
+        elif type_token in _COERCE:
+            value = _COERCE[type_token](value)
+        values.append(value)
+    return tuple(values)
+
 
 def new_run_id(prefix: str = "run") -> str:
     """Time-ordered, collision-resistant run id."""
@@ -333,56 +433,28 @@ class ControlRepository:
     def log_table_run(self, fields: dict):
         """
         Append one row to table_run_log (carries source identity).
+
+        Every column declared in TABLE_RUN_LOG_COLUMNS is persisted, including
+        the connection, retry-lineage, and row-count metrics the retry selector,
+        dashboard views, and notification notebook read back. Legacy callers that
+        supply only the original fields keep working; the rest stay null.
         """
 
         from pyspark.sql.types import (
-            StructType,
-            StructField,
-            StringType,
-            LongType,
-            TimestampType,
+            StructType, StructField, StringType, IntegerType, BooleanType,
+            LongType, TimestampType,
         )
 
-        def _long(v):
-            return int(v) if v is not None else None
-
+        spark_types = {
+            "string": StringType, "int": IntegerType, "boolean": BooleanType,
+            "bigint": LongType, "timestamp": TimestampType,
+        }
         schema = StructType([
-            StructField("run_id", StringType(), True),
-            StructField("source_table_id", StringType(), True),
-            StructField("source_system", StringType(), True),
-            StructField("source_server", StringType(), True),
-            StructField("source_database", StringType(), True),
-            StructField("source_schema", StringType(), True),
-            StructField("source_table", StringType(), True),
-            StructField("operation", StringType(), True),
-            StructField("target_full_name", StringType(), True),
-            StructField("source_row_count", LongType(), True),
-            StructField("target_row_count", LongType(), True),
-            StructField("status", StringType(), True),
-            StructField("error_message", StringType(), True),
-            StructField("started_ts", TimestampType(), True),
-            StructField("ended_ts", TimestampType(), True),
+            StructField(name, spark_types[token](), True)
+            for name, token in TABLE_RUN_LOG_COLUMNS
         ])
 
-        row = (
-            fields.get("run_id"),
-            fields.get("source_table_id"),
-            fields.get("source_system"),
-            fields.get("source_server"),
-            fields.get("source_database"),
-            fields.get("source_schema"),
-            fields.get("source_table"),
-            fields.get("operation"),
-            fields.get("target_full_name"),
-            _long(fields.get("source_row_count")),
-            _long(fields.get("target_row_count")),
-            fields.get("status"),
-            fields.get("error_message"),
-            fields.get("started_ts"),
-            fields.get("ended_ts"),
-        )
-
-        df = self.spark.createDataFrame([row], schema)
+        df = self.spark.createDataFrame([build_table_run_row(fields)], schema)
 
         df.write.format("delta").mode("append").option(
             "mergeSchema", "true").saveAsTable(

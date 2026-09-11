@@ -62,9 +62,17 @@ def ctrl(t):
 
 # COMMAND ----------
 
-auto = repo.active_tables(decision="AUTO_MIGRATE").collect()
+auto = repo.active_tables(connection_id=(CONNECTION_ID or None),
+                          decision="AUTO_MIGRATE").collect()
 if only_id:
     auto = [r for r in auto if r["source_table_id"] == only_id]
+    # Per-table ForEach invocation: the supplied id must resolve to exactly one
+    # eligible table, otherwise the task would silently load nothing.
+    if len(auto) != 1:
+        raise ValueError(
+            f"source_table_id {only_id!r} resolved to {len(auto)} eligible "
+            "AUTO_MIGRATE table(s); expected exactly 1. Verify the table is "
+            "active, AUTO_MIGRATE, and belongs to the supplied connection_id.")
 elif only_schema or only_table or only_system or only_server or only_database:
     if not (only_schema and only_table):
         raise ValueError("Manual filtering requires both only_source_schema and only_source_table")
@@ -131,8 +139,11 @@ for r in auto:
     src_df = None
     s_count = None
     t_count = None
+    current_stage = failcls.METADATA
     try:
+        current_stage = failcls.CONNECTION
         adapter = get_source_adapter_routed(r)
+        current_stage = failcls.METADATA
 
         # Approved mappings define the target's typed schema (built by NB08).
         mrows = spark.sql(f"""
@@ -196,6 +207,7 @@ for r in auto:
             src_db, s_schema, s_table, columns=extract_columns,
             watermark_column=d.get("watermark_column"),
             watermark_type=d.get("watermark_data_type"))
+        current_stage = failcls.SOURCE_READ
         if part_col:
             src_df = read_source_jdbc(
                 adapter, extract, source_server=src_server, source_database=src_db,
@@ -212,29 +224,43 @@ for r in auto:
         s_count = src_df.count()
 
         # Conform JDBC data to the approved typed schema, then load.
+        current_stage = failcls.TARGET_WRITE
         (conform_to_table(src_df, target_fqn)
          .write.format("delta").mode(write_mode).saveAsTable(target_fqn))
 
+        current_stage = failcls.RECONCILIATION
         t_count = spark.table(target_fqn).count()
-        status = "SUCCEEDED" if t_count == s_count else "COUNT_MISMATCH"
-        if status == "SUCCEEDED":
+        counts_match = (t_count == s_count)
+        if counts_match:
             repo.update_control(src_id, {
                 "current_status": "FULL_LOADED",
                 "error_message": None,
             })
             succeeded += 1
             print(f"  loaded {target_fqn}: {t_count} rows")
+            log_run(ident, target_fqn, s_count, t_count, "SUCCEEDED", None, started,
+                    extra={"extracted_row_count": s_count,
+                           "applied_row_count": t_count})
         else:
+            # Detailed operational state stays on the control row; table_run_log
+            # status is normalized so the retry selector can filter on FAILED.
             repo.update_control(src_id, {
                 "current_status": "FULL_LOAD_COUNT_MISMATCH",
                 "error_message": f"source={s_count} target={t_count}",
             })
             failed += 1
             print(f"  COUNT MISMATCH {target_fqn}: src={s_count} tgt={t_count}")
-        log_run(ident, target_fqn, s_count, t_count, status, None, started)
+            log_run(ident, target_fqn, s_count, t_count, "FAILED",
+                    f"full-load count mismatch: source={s_count} target={t_count}",
+                    started,
+                    extra={"failure_stage": failcls.RECONCILIATION,
+                           "error_category": failcls.RECONCILIATION_ERROR,
+                           "retry_eligible": False,
+                           "extracted_row_count": s_count,
+                           "applied_row_count": t_count})
     except Exception as e:
         failed += 1
-        cls = failcls.classify_failure(e, failcls.SOURCE_READ, idempotent=True)
+        cls = failcls.classify_failure(e, current_stage, idempotent=True)
         try:
             repo.update_control(src_id, {
                 "current_status": "FULL_LOAD_FAILED",

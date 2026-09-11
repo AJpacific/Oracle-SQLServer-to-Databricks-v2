@@ -379,25 +379,40 @@ def list_routines_query(database: str = None, owner: str = None) -> str:
 
 
 def table_statistics_query(database: str = None, owner: str = None) -> str:
-    """Exact SQL Server table statistics (ROW_COUNT_METHOD=EXACT).
+    """SQL Server table statistics from catalog metadata (ROW_COUNT_METHOD=CATALOG).
 
-    Row counts come from sys.partitions and size from sys.allocation_units
-    (total_pages * 8 KiB), both exact catalog metadata rather than estimates.
+    ROW_COUNT is the catalog row count of the heap/clustered partitions
+    (``index_id IN (0,1)``) - it is catalog metadata, not a ``COUNT_BIG(*)``
+    executed against the table, so it is labelled CATALOG rather than EXACT.
+
+    SIZE_MB is the *reserved* size of the base table and all of its indexes
+    (``SUM(total_pages) * 8 KiB`` over every allocation unit of the object).
+
+    Row count and size are aggregated in separate CTEs and joined by object_id so
+    the row count is never multiplied by the index/allocation-unit join.
     """
     p = _ss_prefix(database)
     return (
-        "(SELECT s.name AS SCHEMA_NAME, t.name AS OBJECT_NAME, "
-        "SUM(DISTINCT_ROWS.rows) AS ROW_COUNT, "
-        "CAST(SUM(au.total_pages) * 8.0 / 1024 AS DECIMAL(18,2)) AS SIZE_MB, "
-        "'EXACT' AS ROW_COUNT_METHOD "
+        "(WITH rc AS ("
+        "SELECT pr.object_id, SUM(pr.rows) AS ROW_COUNT "
+        f"FROM {p}partitions pr WHERE pr.index_id IN (0,1) "
+        "GROUP BY pr.object_id"
+        "), sz AS ("
+        "SELECT pr.object_id, SUM(au.total_pages) AS total_pages "
+        f"FROM {p}partitions pr "
+        f"JOIN {p}allocation_units au ON au.container_id = pr.partition_id "
+        "GROUP BY pr.object_id"
+        ") "
+        "SELECT s.name AS SCHEMA_NAME, t.name AS OBJECT_NAME, "
+        "rc.ROW_COUNT AS ROW_COUNT, "
+        "CAST(sz.total_pages * 8.0 / 1024 AS DECIMAL(18,2)) AS SIZE_MB, "
+        "'CATALOG' AS ROW_COUNT_METHOD "
         f"FROM {p}tables t "
         f"JOIN {p}schemas s ON t.schema_id = s.schema_id "
-        f"JOIN {p}indexes i ON i.object_id = t.object_id "
-        f"JOIN {p}partitions DISTINCT_ROWS ON DISTINCT_ROWS.object_id = t.object_id "
-        "AND DISTINCT_ROWS.index_id = i.index_id AND i.index_id IN (0,1) "
-        f"JOIN {p}allocation_units au ON au.container_id = DISTINCT_ROWS.partition_id "
-        f"WHERE {_ss_schema_filter(owner)} "
-        "GROUP BY s.name, t.name) q"
+        "LEFT JOIN rc ON rc.object_id = t.object_id "
+        "LEFT JOIN sz ON sz.object_id = t.object_id "
+        f"WHERE {_ss_schema_filter(owner)}"
+        ") q"
     )
 
 

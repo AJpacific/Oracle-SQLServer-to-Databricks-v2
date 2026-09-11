@@ -129,28 +129,48 @@ if not test_database:
         "Set the test_database widget (required for SQL Server) before running "
         "this optional diagnostic.")
 
+# Optional table diagnostics are skipped when no schema/table is supplied, so
+# these counters must always be defined for the final summary.
+sample_count = 0
+meta_count = 0
+pk_count = 0
+
 print(
     "Effective SQL Server object:",
     f"{test_server}:1433/"
     f"{test_database}.{test_schema}.{test_table}",
 )
 
-# Create the SQL Server adapter.
-adapter = get_source_adapter(
-    "sqlserver",
-    source_server=test_server,
-    source_database=test_database,
-    secret_provider=_secret_provider,
-    secret_scope=SQLSERVER_SECRET_SCOPE,
-)
+# A registered connection is preferred: it selects that connection's own secret
+# scope and TLS trust setting instead of the global legacy scope.
+if CONNECTION_ID:
+    connection = get_connection(CONNECTION_ID)
+    if connection is None:
+        raise ValueError(f"connection_id {CONNECTION_ID!r} not found in source_connection")
+    if normalize_source_system(connection["source_system"]) != "sqlserver":
+        raise ValueError(
+            f"connection_id {CONNECTION_ID!r} is "
+            f"{connection['source_system']!r}; this diagnostic requires a "
+            "SQL Server connection")
+    adapter = get_source_adapter_for_connection(
+        connection, source_database=test_database, require_valid=False)
+    print(f"Using registered connection {CONNECTION_ID} (scope from source_connection).")
+else:
+    adapter = get_source_adapter(
+        "sqlserver",
+        source_server=test_server,
+        source_database=test_database,
+        secret_provider=_secret_provider,
+        secret_scope=SQLSERVER_SECRET_SCOPE,
+    )
+    print(f"[legacy fallback] no connection_id supplied; using the "
+          f"'{SQLSERVER_SECRET_SCOPE}' secret scope.")
 
 print(
     "Adapter:",
     adapter.source_system,
     "| driver:",
     adapter.DRIVER,
-    "| scope:",
-    SQLSERVER_SECRET_SCOPE,
 )
 
 # Build and inspect only the redacted URL.

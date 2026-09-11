@@ -102,7 +102,9 @@ for schema in schemas:
             obj = t["OBJECT_NAME"]
             row_count, size_mb, method = stats.get(obj, (t["ROW_COUNT"], None, None))
             if method is None:
-                method = "ESTIMATED" if src_system == "oracle" else "EXACT"
+                # Neither source executes a per-table COUNT(*) during a broad
+                # assessment, so the count is dictionary/catalog metadata.
+                method = "ESTIMATED" if src_system == "oracle" else "CATALOG"
             comp, complexity, msg, col_count = "UNABLE_TO_ASSESS", "NOT_APPLICABLE", None, None
             try:
                 cols = _q(adapter.columns_metadata_query(src_db, schema, obj))
@@ -167,8 +169,33 @@ print(f"Assessed {len(rows)} object(s).")
 
 if rows:
     df = spark.createDataFrame(rows).withColumn("captured_ts", F.current_timestamp())
-    df.write.format("delta").mode("append").option("mergeSchema", "true").saveAsTable(
-        ctrl("source_assessment").replace("`", ""))
+    df.createOrReplaceTempView("_assessed_objects")
+    # Retry-safe: the same assessment execution identity updates its own rows
+    # instead of appending duplicates. is_selected is preserved for a row that
+    # was already selected by NB01B.
+    spark.sql(f"""
+        MERGE INTO {ctrl('source_assessment')} t
+        USING _assessed_objects s
+          ON t.assessment_id = s.assessment_id
+         AND t.connection_id = s.connection_id
+         AND t.source_schema = s.source_schema
+         AND t.object_type   = s.object_type
+         AND t.object_name   = s.object_name
+        WHEN MATCHED THEN UPDATE SET
+            t.run_id = s.run_id,
+            t.source_system = s.source_system,
+            t.source_server = s.source_server,
+            t.source_database = s.source_database,
+            t.row_count = s.row_count,
+            t.row_count_method = s.row_count_method,
+            t.size_mb = s.size_mb,
+            t.column_count = s.column_count,
+            t.compatibility_status = s.compatibility_status,
+            t.complexity = s.complexity,
+            t.assessment_message = s.assessment_message,
+            t.captured_ts = s.captured_ts
+        WHEN NOT MATCHED THEN INSERT *
+    """)
     grouped = {r["compatibility_status"]: r["count"] for r in
                df.groupBy("compatibility_status").count().collect()}
     print("Compatibility summary:", grouped)

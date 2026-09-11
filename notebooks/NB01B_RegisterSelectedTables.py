@@ -106,17 +106,20 @@ from collections import Counter
 fqn_counts = Counter(c["target_fqn"] for c in candidates)
 internal_collisions = {f for f, n in fqn_counts.items() if n > 1}
 
-# 2) An existing active control row (different identity) using the same target FQN.
+# 2) An existing active control row (different identity) using the same target FQN,
+#    plus the existing connection_id so a conflicting one can be blocked.
 existing = spark.sql(f"""
-    SELECT source_table_id,
+    SELECT source_table_id, connection_id,
            lower(concat_ws('.', coalesce(target_catalog, '{CATALOG}'),
                  coalesce(target_schema, lower(source_schema)),
                  coalesce(target_table, lower(source_table)))) AS target_fqn
     FROM {ctrl('source_table_control')}
 """).collect()
 existing_fqn = {e["target_fqn"]: e["source_table_id"] for e in existing}
+existing_conn = {e["source_table_id"]: e["connection_id"] for e in existing}
 
 valid = []
+conflicts = []
 for c in candidates:
     if c["target_fqn"] in internal_collisions:
         skipped.append((c["source_schema"], c["source_table"],
@@ -127,9 +130,22 @@ for c in candidates:
         skipped.append((c["source_schema"], c["source_table"],
                         f"target collision with existing row: {c['target_fqn']}"))
         continue
+    # An existing row already bound to a different connection is a configuration
+    # conflict: never silently re-point a registered table at another source.
+    current_conn = existing_conn.get(c["source_table_id"])
+    if current_conn and current_conn != connection_id:
+        conflicts.append({"source_table_id": c["source_table_id"],
+                          "source_schema": c["source_schema"],
+                          "source_table": c["source_table"],
+                          "existing_connection_id": current_conn,
+                          "requested_connection_id": connection_id})
+        skipped.append((c["source_schema"], c["source_table"],
+                        f"connection conflict: registered to {current_conn}"))
+        continue
     valid.append(c)
 
-print(f"Registerable after collision check: {len(valid)}")
+print(f"Registerable after collision check: {len(valid)}; "
+      f"connection conflicts: {len(conflicts)}")
 
 # COMMAND ----------
 
@@ -153,13 +169,19 @@ if valid:
               .withColumn("created_ts", F.current_timestamp())
               .withColumn("updated_ts", F.current_timestamp()))
     src_df.createOrReplaceTempView("_register_rows")
-    # WHEN NOT MATCHED only: existing rows keep all state (watermark, initial-load
-    # completion, successful-run info, manual target names). New rows start
-    # inactive and are never auto-activated.
+    # An existing row keeps ALL operational state (watermark, initial-load
+    # completion, successful-run info, decision, manual target names). The only
+    # permitted update is backfilling a null connection_id onto a legacy row.
+    # New rows start inactive and are never auto-activated.
     spark.sql(f"""
         MERGE INTO {ctrl('source_table_control')} t
         USING _register_rows s
           ON t.source_table_id = s.source_table_id
+        WHEN MATCHED
+          AND (t.connection_id IS NULL OR trim(t.connection_id) = '')
+        THEN UPDATE SET
+            t.connection_id = s.connection_id,
+            t.updated_ts = current_timestamp()
         WHEN NOT MATCHED THEN INSERT (
             source_table_id, connection_id, source_system, source_server,
             source_database, source_schema, source_table, target_catalog,
@@ -174,19 +196,28 @@ if valid:
             s.created_ts, s.updated_ts
         )
     """)
-    # Backfill connection_id on any pre-existing row that matched (keeps state).
     for c in valid:
         worklist.append({"connection_id": connection_id,
                          "source_table_id": c["source_table_id"]})
 
-# Mark the assessment rows that were selected (reporting only).
+# COMMAND ----------
+
+# Mark ONLY the assessment rows that were actually registered. Unrequested,
+# skipped, collided, conflicting, MANUAL, and UNABLE_TO_ASSESS rows stay false.
 if valid:
-    ids = ", ".join(escape_string_literal(c["source_table_id"]) for c in valid) or "''"
+    sel_rows = [Row(assessment_id=assessment_id, connection_id=connection_id,
+                    source_schema=c["source_schema"], object_name=c["source_table"])
+                for c in valid]
+    spark.createDataFrame(sel_rows).createOrReplaceTempView("_selected_objects")
     spark.sql(f"""
-        UPDATE {ctrl('source_assessment')}
-        SET is_selected = true
-        WHERE assessment_id = {escape_string_literal(assessment_id)}
-          AND object_type = 'TABLE'
+        MERGE INTO {ctrl('source_assessment')} t
+        USING _selected_objects s
+          ON t.assessment_id = s.assessment_id
+         AND t.connection_id = s.connection_id
+         AND t.source_schema = s.source_schema
+         AND t.object_name  = s.object_name
+         AND t.object_type  = 'TABLE'
+        WHEN MATCHED THEN UPDATE SET t.is_selected = true
     """)
 
 for s in skipped:
@@ -197,5 +228,5 @@ for s in skipped:
 dbutils.notebook.exit(json.dumps({
     "status": "SUCCEEDED", "assessment_id": assessment_id,
     "connection_id": connection_id, "registered": len(valid),
-    "skipped": len(skipped), "worklist": worklist,
+    "skipped": len(skipped), "conflicts": conflicts, "worklist": worklist,
 }))

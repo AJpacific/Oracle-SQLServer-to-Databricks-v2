@@ -10,10 +10,6 @@
 
 # COMMAND ----------
 
-display(spark.sql("SHOW GRANTS ON SCHEMA da_accelerators.control"))
-
-# COMMAND ----------
-
 dbutils.widgets.dropdown("seed_poc_rows", "false", ["true", "false"])
 seed_poc = dbutils.widgets.get("seed_poc_rows") == "true"
 

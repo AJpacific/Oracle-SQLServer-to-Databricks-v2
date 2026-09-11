@@ -4,7 +4,8 @@
 # MAGIC Commits bootstrap state AFTER a successful, validated full load. Sets
 # MAGIC initial_load_completed=true and seeds the initial watermark from the exact
 # MAGIC Delta snapshot written by NB09. This prevents rows arriving at the source
-# MAGIC after the full-load read from being skipped during the handoff to Pipeline 2.
+# MAGIC after the full-load read from being skipped during the handoff to the
+# MAGIC INGEST recurring synchronization workflow.
 
 # COMMAND ----------
 
@@ -35,7 +36,7 @@ loaded = spark.sql(f"""
                 SELECT 1 FROM {ctrl('reconciliation_results')} rr
                 WHERE rr.run_id = {escape_string_literal(run_id)}
                     AND rr.source_table_id = c.source_table_id
-                    AND rr.check_type = 'ROW_COUNT'
+                    AND rr.check_type = 'FULL_SNAPSHOT_COUNT'
                     AND rr.status = 'PASS'
             )
       AND NOT EXISTS (
@@ -71,7 +72,7 @@ for r in loaded:
                    .agg(F.max(F.col(f"`{wm_col}`")).alias("mx"))
                    .collect()[0]["mx"])
             if val is None:
-                adapter = get_source_adapter_for_row(r)
+                adapter = get_source_adapter_routed(r)
                 new_wm = adapter.initial_watermark_value(r["watermark_data_type"])
             else:
                 new_wm = sqlb.canonical_watermark_string(val, strict=True)

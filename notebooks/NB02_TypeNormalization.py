@@ -48,6 +48,7 @@ for r in rows:
     nullable = (str(r["is_nullable"]).upper() == "YES")
     src_id = r["source_table_id"]
     src_system = r["source_system"]
+    conn_id = r["connection_id"]
     # Group by the source-qualified id so the same schema.table on two sources
     # never share a signature or collide.
     key = src_id
@@ -59,7 +60,7 @@ for r in rows:
         f"{bool(r['is_computed'])}:{bool(r['is_hidden'])}:"
         f"{bool(r['is_rowversion'])}:{r['source_type_schema']}"
     ))
-    out.append((run_id, src_id, src_system, r["source_schema"], r["source_table"],
+    out.append((run_id, src_id, conn_id, src_system, r["source_schema"], r["source_table"],
                 r["column_name"], int(r["ordinal_position"]), raw, normalized,
                 prec, scale, length, nullable, bool(r["is_identity"]),
                 bool(r["is_computed"]), bool(r["is_hidden"]),
@@ -91,6 +92,7 @@ if out:
     normalized_schema = StructType([
         StructField("run_id", StringType(), True),
         StructField("source_table_id", StringType(), True),
+        StructField("connection_id", StringType(), True),
         StructField("source_system", StringType(), True),
         StructField("source_schema", StringType(), True),
         StructField("source_table", StringType(), True),
@@ -135,6 +137,7 @@ if out:
 
     df.write.format("delta") \
         .mode("append") \
+        .option("mergeSchema", "true") \
         .saveAsTable(
             ctrl("normalized_source_inventory").replace("`", "")
         )

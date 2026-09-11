@@ -1,7 +1,7 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # NB11b_DeltaSyncApply
-# MAGIC Applies queued Pipeline 2 work according to strategy:
+# MAGIC Applies queued INGEST recurring-synchronization work according to strategy:
 # MAGIC WATERMARK replaces and appends the bounded interval,
 # MAGIC PRIMARY_KEY and HYBRID MERGE by primary key, and
 # MAGIC FULL_LOAD completely overwrites the target table.
@@ -201,6 +201,7 @@ for q in queue:
     t_count = None
     op = "DELTA_SYNC"
     metrics = {}
+    current_stage = failcls.CONNECTION
 
     def _update_queue(status, extra=None):
         assignments = [f"status = {escape_string_literal(status)}"]
@@ -215,6 +216,7 @@ for q in queue:
     try:
         # The adapter is chosen from the queue row's own connection/source_system,
         # so NB11b never uses one global (Oracle) JDBC connection for every row.
+        current_stage = failcls.CONNECTION
         adapter = get_source_adapter_routed(q)
 
         # Defense-in-depth: a stale/hand-edited queue row must never bypass the
@@ -230,6 +232,7 @@ for q in queue:
                     f"{wm_type!r} for {wm_col!r}")
 
         # --- Stage 1: EXTRACT the exact frozen slice ---------------------------
+        current_stage = failcls.SOURCE_READ
         src_df = read_source_jdbc(
             adapter, q["source_query"],
             source_server=src_server, source_database=src_db).cache()
@@ -238,10 +241,12 @@ for q in queue:
         # --- Stage 2: APPLY to Bronze + Stage 3: RECONCILE the work unit -------
         # Reconciliation always happens here, BEFORE any checkpoint is committed.
         recon_result = None
+        current_stage = failcls.TARGET_WRITE
         if strategy == "FULL_LOAD":
             (conform_to_table(src_df, plain_target)
              .write.format("delta").mode("overwrite").saveAsTable(plain_target))
             op = "DELTA_FULL_REFRESH"
+            current_stage = failcls.RECONCILIATION
             t_count = spark.table(plain_target).count()
             recon_result = recon.reconcile_full_load(s_count, t_count)
             metrics = {"extracted_row_count": s_count, "applied_row_count": t_count}
@@ -259,6 +264,7 @@ for q in queue:
             (conform_to_table(src_df, plain_target)
              .write.format("delta").mode("append").saveAsTable(plain_target))
             op = "DELTA_APPEND"
+            current_stage = failcls.RECONCILIATION
             applied_interval = spark.sql(
                 f"SELECT COUNT(*) AS c FROM {target_sql} "
                 f"WHERE {wm_sql} > {lower_lit} AND {wm_sql} <= {upper_lit}"
@@ -289,6 +295,7 @@ for q in queue:
                                           stage_table, pk,
                                           delete_unmatched=hard_delete))
             # Validate every staged key exists in Bronze BEFORE dropping the stage.
+            current_stage = failcls.RECONCILIATION
             missing_count = spark.sql(
                 f"SELECT COUNT(*) AS c FROM "
                 f"(SELECT DISTINCT {pk_list(pk)} FROM {plain_stage}) s "
@@ -337,6 +344,7 @@ for q in queue:
 
         # --- Stage 4: commit the control checkpoint ---------------------------
         # PRIMARY_KEY writes no temporal watermark; only WATERMARK/HYBRID do.
+        current_stage = failcls.CHECKPOINT
         control_fields = {
             "last_successful_run_id": run_id,
             "last_successful_run_ts": now_utc().strftime("%Y-%m-%d %H:%M:%S.%f"),
@@ -377,6 +385,7 @@ for q in queue:
         # --- Stage 5: finalize the queue row ----------------------------------
         # The checkpoint is already committed; a failure here must NOT reapply
         # data and must NOT clear the committed watermark.
+        current_stage = failcls.QUEUE_FINALIZATION
         try:
             _update_queue("SUCCEEDED", {"finalized_ts": now_utc()})
         except Exception as queue_finalize_error:
@@ -411,7 +420,7 @@ for q in queue:
     except Exception as apply_error:
         # Failure before the checkpoint was committed: normal data-failure path.
         failed += 1
-        cls = failcls.classify_failure(apply_error, failcls.SOURCE_READ, idempotent=True)
+        cls = failcls.classify_failure(apply_error, current_stage, idempotent=True)
         try:
             _update_queue("FAILED")
         except Exception as queue_error:

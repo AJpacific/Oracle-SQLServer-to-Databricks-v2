@@ -57,9 +57,25 @@ job_failures = spark.sql(f"""
 
 total = len(table_failures) + len(recon_failures) + len(dq_failures) + len(job_failures)
 
+# A single failed table can appear in several sources, so the distinct failed
+# table count is reported separately from the per-category counts. The sum is
+# never presented as a number of distinct failures.
+distinct_failed_tables = len({
+    r["source_table_id"] for r in
+    (list(table_failures) + list(recon_failures) + list(dq_failures))
+    if r["source_table_id"]
+})
+
 # COMMAND ----------
 
-lines = [f"[{pipeline_name}] run {run_id}: {total} failure(s)"]
+lines = [
+    f"[{pipeline_name}] run {run_id}: "
+    f"distinct_failed_tables={distinct_failed_tables}, "
+    f"table_run_failures={len(table_failures)}, "
+    f"reconciliation_failures={len(recon_failures)}, "
+    f"dq_rule_failures={len(dq_failures)}, "
+    f"job_failures={len(job_failures)}"
+]
 for r in table_failures[:50]:
     lines.append(
         f"- TABLE {r['source_schema']}.{r['source_table']} "
@@ -67,10 +83,10 @@ for r in table_failures[:50]:
         f"stage={r['failure_stage']} cat={r['error_category']} "
         f"retry={r['retry_eligible']}: {failcls.sanitize_message(r['error_message'])[:200]}")
 for r in recon_failures[:50]:
-    lines.append(f"- RECON {r['source_table_id'][:12]} {r['check_type']}: "
+    lines.append(f"- RECON {str(r['source_table_id'])[:12]} {r['check_type']}: "
                  f"{failcls.sanitize_message(r['message'])[:160]}")
 for r in dq_failures[:50]:
-    lines.append(f"- DQ {r['source_table_id'][:12]} {r['rule_type']} "
+    lines.append(f"- DQ {str(r['source_table_id'])[:12]} {r['rule_type']} "
                  f"failed={r['failed_count']}")
 for r in job_failures[:20]:
     lines.append(f"- JOB {r['job_name']} {r['status']}: "
@@ -109,5 +125,10 @@ if total > 0 and mode == "TEAMS_WEBHOOK":
 # A notification problem must never hide the underlying pipeline failure.
 dbutils.notebook.exit(json.dumps({
     "status": "SUCCEEDED", "run_id": run_id, "pipeline_name": pipeline_name,
-    "failures": total, "notification_status": notification_status,
+    "distinct_failed_tables": distinct_failed_tables,
+    "failed_table_runs": len(table_failures),
+    "failed_reconciliation_checks": len(recon_failures),
+    "failed_dq_rules": len(dq_failures),
+    "failed_job_runs": len(job_failures),
+    "notification_status": notification_status,
 }))

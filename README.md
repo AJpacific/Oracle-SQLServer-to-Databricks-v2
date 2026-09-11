@@ -248,26 +248,36 @@ com.microsoft.sqlserver.jdbc.SQLServerDriver
 
 The generated direct JDBC URL enables encryption and does not trust the server certificate by default.
 
-## Pipeline 1: onboarding and initial load
+## INGEST onboarding workflow
 
 Run in this order:
 
 ```text
 NB00_ControlTableInit
+NB00A_UpsertAndValidateConnection
+NB01A_SourceAssessment
+NB01B_RegisterSelectedTables
 NB01_SourceInventory
 NB02_TypeNormalization
 NB03_MappingRulesGeneration
 NB04_MappingValidation
 NB07_TableDecisionGeneration
 NB08_TargetProvisioning
-NB09_FullLoad
+NB09_FullLoad            (per table, inside a ForEach)
 NB12_ValidationAndReconciliation with mode=full
 NB10_PostFullLoadState
 ```
 
-NB09 performs an overwrite-only initial snapshot load. NB10 commits initial state only for successfully loaded and reconciled tables.
+NB01–NB08 are **bulk** metadata tasks: each processes the selected active tables
+for the run, optionally scoped by `connection_id`. Only the load stage (NB09) runs
+per table inside a ForEach. NB09 performs an overwrite-only initial snapshot load
+and fails if a supplied `source_table_id` does not resolve to exactly one
+eligible table. NB10 commits initial state only for tables with a passing
+`FULL_SNAPSHOT_COUNT` reconciliation.
 
-## Pipeline 2: recurring synchronization
+See `docs/databricks_job_task_mapping.md` for the exact task keys and parameters.
+
+## INGEST recurring synchronization workflow
 
 Run in this order:
 
@@ -319,7 +329,9 @@ A successfully loaded empty `WATERMARK` or `HYBRID` table receives the adapter-d
 1900-01-01T00:00:00.000000Z
 ```
 
-This permits later inserts to be discovered by Pipeline 2 instead of leaving the table permanently outside incremental processing.
+This permits later inserts to be discovered by the INGEST recurring
+synchronization workflow instead of leaving the table permanently outside
+incremental processing.
 
 ## Column safety policy
 
@@ -403,7 +415,7 @@ Before production use, complete live validation against the intended source plat
 2. Onboard one small table for each intended strategy.
 3. Validate initial row counts and target schema.
 4. Insert and update controlled source rows.
-5. Run Pipeline 2 and verify data, queue state, audit state, and checkpoint movement.
+5. Run the INGEST recurring synchronization workflow and verify data, queue state, audit state, and checkpoint movement.
 6. Restart compute and repeat the relevant connection and synchronization checks.
 7. Validate the final SQL Server deployment against the chosen Azure SQL, Cloud SQL for SQL Server, VM-hosted SQL Server, or on-premises network path.
 

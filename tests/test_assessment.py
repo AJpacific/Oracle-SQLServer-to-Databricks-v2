@@ -60,10 +60,33 @@ class TestSqlServerDiscovery(unittest.TestCase):
         self.assertIn("sys.partitions", q)
         self.assertIn("SUM(pr.rows) AS ROW_COUNT", q)
 
-    def test_table_statistics_labelled_exact(self):
+    def test_table_statistics_not_labelled_exact(self):
+        # Catalog metadata is not a COUNT_BIG(*), so it must not claim EXACT.
         q = ss.table_statistics_query("SourceDb")
-        self.assertIn("'EXACT' AS ROW_COUNT_METHOD", q)
+        self.assertIn("'CATALOG' AS ROW_COUNT_METHOD", q)
+        self.assertNotIn("'EXACT'", q)
         self.assertIn("allocation_units", q)
+
+    def test_row_count_not_multiplied_by_allocation_join(self):
+        # Row count and size are aggregated in separate CTEs and joined by
+        # object_id, so the index/allocation-unit join cannot duplicate rows.
+        q = ss.table_statistics_query("SourceDb")
+        self.assertIn("WITH rc AS", q)
+        self.assertIn("index_id IN (0,1)", q)
+        # The row-count CTE must not join allocation_units.
+        rc_cte = q.split("), sz AS")[0]
+        self.assertNotIn("allocation_units", rc_cte)
+
+    def test_no_table_wide_count_in_broad_assessment(self):
+        for q in (ss.table_statistics_query("SourceDb"),
+                  ss.list_tables_query("SourceDb")):
+            self.assertNotIn("COUNT_BIG", q.upper())
+            self.assertNotIn("COUNT(*)", q.upper())
+
+    def test_system_schemas_excluded(self):
+        q = ss.table_statistics_query("SourceDb")
+        self.assertIn("'sys'", q)
+        self.assertIn("NOT IN", q)
 
     def test_module_definition_uses_sql_modules(self):
         q = ss.module_definition_query("SourceDb", "dbo", "usp_Get")

@@ -53,7 +53,10 @@ connection becomes `VALID`.
 
 ## 6. Run the pipelines
 
-See the README for the INGEST and ETL task order and parameters.
+See the README for the INGEST and ETL workflow order, and
+`docs/databricks_job_task_mapping.md` for the exact job task keys, parameters,
+and retry routing. Real job definitions are intentionally not committed:
+workspace paths, compute, and schedules are deployment-specific.
 
 ## 7. Run the unit tests (optional, local)
 

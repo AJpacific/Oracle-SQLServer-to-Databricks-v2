@@ -5,8 +5,11 @@
 # MAGIC Silver. It NEVER connects to Oracle or SQL Server and NEVER reads a source
 # MAGIC secret scope. It applies configured cleansing + validation rules, separates
 # MAGIC valid and invalid records (quarantining rejects), reconciles the exact
-# MAGIC processed Bronze set against Silver + quarantine BEFORE committing the ETL
-# MAGIC checkpoint, and tracks ETL watermarks separately from source-ingest ones.
+# MAGIC processed Bronze set BEFORE committing the ETL checkpoint, and tracks ETL
+# MAGIC watermarks separately from source-ingest ones.
+# MAGIC
+# MAGIC DUPLICATE_KEY policy: every record in a duplicate-key group is rejected.
+# MAGIC No survivor is kept, because there is no deterministic survivor ordering.
 
 # COMMAND ----------
 
@@ -15,6 +18,8 @@
 # COMMAND ----------
 
 from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+from pyspark.sql.types import DateType, TimestampType
 
 dbutils.widgets.text("source_table_id", "")
 dbutils.widgets.text("run_id", "")
@@ -84,6 +89,12 @@ print(f"ETL {src_id}: bronze={bronze_fqn} silver={silver_fqn} pk={pk} mode={etl_
 
 started = now_utc()
 
+# One table operation produces exactly one final table_run_log failure row,
+# carrying the stage that actually failed.
+current_stage = failcls.ETL_READ
+failure_already_logged = False
+etl_op = "ETL_FULL"
+
 def log_etl(op, status, err, s_count, t_count, extra=None):
     fields = {
         "run_id": run_id, "source_table_id": src_id,
@@ -100,32 +111,120 @@ def log_etl(op, status, err, s_count, t_count, extra=None):
         fields.update(extra)
     repo.log_table_run(fields)
 
+
+def write_dq_results(result_rows):
+    if not result_rows:
+        return
+    (spark.createDataFrame(result_rows, [
+        "run_id", "source_table_id", "rule_id", "rule_type", "input_count",
+        "checked_count", "failed_count", "passed_count", "status", "message"])
+     .withColumn("captured_ts", F.current_timestamp())
+     .write.format("delta").mode("append").option("mergeSchema", "true")
+     .saveAsTable(ctrl("dq_result").replace("`", "")))
+
+
+def write_recon(recon_result):
+    if not recon_result.checks:
+        return
+    (spark.createDataFrame(
+        [(run_id, src_id, d.get("connection_id"), d.get("source_system"),
+          d.get("source_schema"), d.get("source_table"), c["check_type"],
+          c["source_value"], c["target_value"], c["status"], c["message"])
+         for c in recon_result.checks],
+        ["run_id", "source_table_id", "connection_id", "source_system",
+         "source_schema", "source_table", "check_type", "source_value",
+         "target_value", "status", "message"])
+     .withColumn("captured_ts", F.current_timestamp())
+     .write.format("delta").mode("append").option("mergeSchema", "true")
+     .saveAsTable(ctrl("reconciliation_results").replace("`", "")))
+
+
+def fail_etl(stage, category, message, etl_status, s_count=None, t_count=None,
+             extra=None):
+    """Record one specialized ETL failure with its true stage, then raise.
+
+    The ETL checkpoint is never advanced, and the outer handler will not log a
+    second, mislabelled failure row for the same operation.
+    """
+    global failure_already_logged
+    safe = failcls.sanitize_message(message)
+    try:
+        repo.update_control(src_id, {
+            "etl_current_status": etl_status,
+            "etl_error_message": safe[:1000]})
+    except Exception as e:
+        print(f"  [warn] could not record ETL status: {failcls.sanitize_message(e)[:200]}")
+    payload = {"failure_stage": stage, "error_category": category,
+               "retry_eligible": False}
+    if extra:
+        payload.update(extra)
+    try:
+        log_etl(etl_op, "FAILED", safe[:1000], s_count, t_count, extra=payload)
+    except Exception as e:
+        print(f"  [warn] could not write ETL audit: {failcls.sanitize_message(e)[:200]}")
+    failure_already_logged = True
+    raise Exception(safe)
+
 # COMMAND ----------
 
 try:
     # ---- Stage: determine processing mode + freeze the Bronze input slice ----
-    bronze_cols = set(spark.table(bronze_fqn).columns)
+    current_stage = failcls.ETL_READ
+    bronze_schema = spark.table(bronze_fqn).schema
+    bronze_cols = {f.name for f in bronze_schema.fields}
     wm_supported = bool(etl_wm_col) and etl_wm_col in bronze_cols
     effective_mode = etl_mode
     if etl_mode == "AUTO":
         effective_mode = "INCREMENTAL" if (wm_supported and last_etl_wm is not None) else "FULL"
-    if effective_mode == "INCREMENTAL" and not wm_supported:
-        raise ValueError("INCREMENTAL ETL requires a valid etl_watermark_column present in Bronze")
-
     etl_op = "ETL_FULL" if effective_mode == "FULL" else "ETL_INCREMENTAL"
+
+    if effective_mode == "INCREMENTAL" and not wm_supported:
+        fail_etl(failcls.ETL_READ, failcls.CONFIGURATION_ERROR,
+                 "INCREMENTAL ETL requires an etl_watermark_column present in Bronze",
+                 "ETL_CONFIG_ERROR")
+
     upper_etl_wm = None
+    lower_bound_col = upper_bound_col = None
     if effective_mode == "INCREMENTAL":
+        # Typed comparison only: a DATE/TIMESTAMP Bronze column is never compared
+        # against a raw string, which would be a lexical comparison.
+        wm_type = bronze_schema[etl_wm_col].dataType
+        if isinstance(wm_type, TimestampType):
+            cast_to = "timestamp"
+        elif isinstance(wm_type, DateType):
+            cast_to = "date"
+        else:
+            fail_etl(failcls.ETL_READ, failcls.CONFIGURATION_ERROR,
+                     f"ETL watermark column {etl_wm_col!r} has unsupported type "
+                     f"{wm_type.simpleString()}; only DATE and TIMESTAMP are supported",
+                     "ETL_CONFIG_ERROR")
+
         wm_sql = quote_databricks(etl_wm_col)
-        upper_raw = spark.table(bronze_fqn).agg(F.max(F.col(wm_sql)).alias("m")).collect()[0]["m"]
+        upper_raw = spark.table(bronze_fqn).agg(
+            F.max(F.col(wm_sql)).alias("m")).collect()[0]["m"]
         if upper_raw is None:
             print("  no Bronze rows for the ETL watermark; nothing to process.")
             upper_etl_wm = last_etl_wm
             bronze_df = spark.table(bronze_fqn).where(F.lit(False))
         else:
-            upper_etl_wm = sqlb.canonical_watermark_string(upper_raw, strict=False)
-            cond = F.col(wm_sql) <= F.lit(upper_raw)
+            # Freeze the upper bound before any processing; never recomputed later.
+            canonical_upper = sqlb.canonical_watermark_string(upper_raw, strict=True)
+            upper_etl_wm = (canonical_upper[:10] if cast_to == "date"
+                            else canonical_upper)
+            upper_bound_col = F.lit(upper_etl_wm).cast(cast_to)
+            cond = F.col(wm_sql) <= upper_bound_col
             if last_etl_wm is not None:
-                cond = cond & (F.col(wm_sql) > F.lit(last_etl_wm))
+                try:
+                    canonical_lower = sqlb.canonical_watermark_string(
+                        last_etl_wm, strict=True)
+                except ValueError:
+                    fail_etl(failcls.ETL_READ, failcls.CONFIGURATION_ERROR,
+                             f"last_etl_watermark_value {last_etl_wm!r} is not a "
+                             "parseable temporal value", "ETL_CONFIG_ERROR")
+                lower_literal = (canonical_lower[:10] if cast_to == "date"
+                                 else canonical_lower)
+                lower_bound_col = F.lit(lower_literal).cast(cast_to)
+                cond = cond & (F.col(wm_sql) > lower_bound_col)
             bronze_df = spark.table(bronze_fqn).where(cond)
     else:
         bronze_df = spark.table(bronze_fqn)
@@ -133,28 +232,49 @@ try:
     bronze_df = bronze_df.cache()
     input_count = bronze_df.count()
 
-    # ---- Stage: load active rules (validated; no arbitrary SQL accepted) -----
+    # ---- Stage: load + validate active rules (no arbitrary SQL accepted) -----
+    current_stage = failcls.DQ_VALIDATION
     rule_rows = spark.sql(f"""
         SELECT rule_id, rule_type, column_name, rule_value, severity
         FROM {ctrl('dq_rule')}
         WHERE source_table_id = {escape_string_literal(src_id)} AND is_active = true
     """).collect()
-    transforms, validations = [], []
-    for r in rule_rows:
-        try:
-            vr = dqr.validate_rule(r.asDict())
-        except Exception as e:
-            print(f"  [warn] skipping invalid rule {r['rule_id']}: {e}")
-            continue
-        (transforms if dqr.is_transformation(vr["rule_type"]) else validations).append(
-            {**vr, "rule_id": r["rule_id"], "severity": r["severity"]})
 
-    # ---- Stage: cleansing transforms BEFORE validation (Bronze is untouched) --
+    # An invalid ACTIVE rule is never silently skipped: it stops the whole table
+    # before any transform, Silver write, or quarantine write.
+    transforms, validations, invalid_rules = [], [], []
+    seen_rule_ids = set()
+    for r in rule_rows:
+        rd = r.asDict()
+        rid = rd.get("rule_id")
+        try:
+            if rid in seen_rule_ids:
+                raise ValueError(f"duplicate active rule_id {rid!r}")
+            seen_rule_ids.add(rid)
+            vr = dqr.validate_rule(rd, available_columns=bronze_cols,
+                                   primary_key_columns=pk)
+        except Exception as rule_error:
+            invalid_rules.append((rid, rd.get("rule_type"),
+                                  failcls.sanitize_message(rule_error)))
+            continue
+        entry = {**vr, "rule_id": rid, "severity": rd.get("severity")}
+        (transforms if dqr.is_transformation(vr["rule_type"]) else
+         validations).append(entry)
+
+    if invalid_rules:
+        write_dq_results([
+            (run_id, src_id, rid, rtype, input_count, None, input_count, 0,
+             "FAIL", f"invalid rule configuration: {reason}"[:1000])
+            for rid, rtype, reason in invalid_rules])
+        fail_etl(failcls.DQ_VALIDATION, failcls.CONFIGURATION_ERROR,
+                 f"{len(invalid_rules)} active DQ rule(s) are invalid: "
+                 + "; ".join(f"{rid}:{reason}" for rid, _t, reason in invalid_rules[:5]),
+                 "DQ_CONFIG_ERROR", s_count=input_count)
+
+    # ---- Stage: cleansing transforms BEFORE validation (Bronze untouched) ----
     work = bronze_df
     for t in transforms:
         col = t["column_name"]
-        if col not in work.columns:
-            continue
         qc = F.col(f"`{col}`")
         if t["rule_type"] == dqr.TRIM_STRING:
             work = work.withColumn(col, F.trim(qc.cast("string")))
@@ -162,39 +282,46 @@ try:
             mode = dqr.normalize_case_mode(t["rule_value"])
             work = work.withColumn(col, F.upper(qc) if mode == "UPPER" else F.lower(qc))
         elif t["rule_type"] == dqr.DEFAULT_VALUE:
-            work = work.withColumn(
-                col, F.when(qc.isNull(), F.lit(t["rule_value"]).cast(
-                    work.schema[col].dataType)).otherwise(qc))
+            target_type = work.schema[col].dataType
+            default_col = F.lit(t["rule_value"]).cast(target_type)
+            work = work.withColumn(col, F.when(qc.isNull(), default_col).otherwise(qc))
 
     # ---- Stage: validation -> per-row failure-reason array -------------------
     empty_arr = F.array().cast("array<string>")
     failures = empty_arr
-    dq_result_rows = []
-    for v in validations:
+    rule_conditions = []
+    dup_helper_cols = []
+    for idx, v in enumerate(validations):
         rt = v["rule_type"]
         col = v.get("column_name")
         qc = F.col(f"`{col}`") if col else None
         if rt == dqr.NOT_NULL:
             cond = qc.isNull()
             checked = input_count
+            reason_text = dqr.reason(rt, col)
         elif rt == dqr.DATA_TYPE:
+            cast_type = dqr.normalize_cast_type(v["rule_value"])
             cond = qc.isNotNull() & F.expr(
-                f"try_cast(`{col}` AS {v['rule_value']})").isNull()
+                f"try_cast(`{col}` AS {cast_type})").isNull()
             checked = work.where(qc.isNotNull()).count()
+            reason_text = dqr.reason(rt, col)
         elif rt == dqr.ALLOWED_VALUES:
             allowed = dqr.parse_allowed_values(v["rule_value"])
             cond = qc.isNotNull() & (~qc.cast("string").isin([str(a) for a in allowed]))
             checked = work.where(qc.isNotNull()).count()
+            reason_text = dqr.reason(rt, col)
         elif rt == dqr.DUPLICATE_KEY:
-            key_cols = pk if pk else ([col] if col else [])
-            if not key_cols:
-                print(f"  [warn] DUPLICATE_KEY rule {v['rule_id']} has no key; skipped")
-                continue
-            from pyspark.sql.window import Window
+            key_cols = dqr.duplicate_key_columns(v, pk)
+            # A unique helper column per rule so multiple DUPLICATE_KEY rules
+            # never overwrite one another's group counts.
+            helper = f"_dupcount_{idx}"
             w = Window.partitionBy(*[F.col(f"`{c}`") for c in key_cols])
-            work = work.withColumn("_dupcount", F.count(F.lit(1)).over(w))
-            cond = F.col("_dupcount") > 1
+            work = work.withColumn(helper, F.count(F.lit(1)).over(w))
+            dup_helper_cols.append(helper)
+            # Every record of a duplicate group is rejected (documented policy).
+            cond = F.col(helper) > 1
             checked = input_count
+            reason_text = f"{rt}:{'+'.join(key_cols)}"
         else:
             continue
 
@@ -202,11 +329,10 @@ try:
         if rejecting:
             failures = F.concat(
                 failures,
-                F.when(cond, F.array(F.lit(dqr.reason(rt, col)))).otherwise(empty_arr))
-        dq_result_rows.append((v["rule_id"], rt, cond, checked, rejecting))
+                F.when(cond, F.array(F.lit(reason_text))).otherwise(empty_arr))
+        rule_conditions.append((v["rule_id"], rt, cond, checked, rejecting))
 
-    work = work.withColumn("_dq_failures", failures)
-    work = work.cache()
+    work = work.withColumn("_dq_failures", failures).cache()
 
     valid_df = work.where(F.size("_dq_failures") == 0)
     invalid_df = work.where(F.size("_dq_failures") > 0)
@@ -215,30 +341,31 @@ try:
 
     # ---- per-rule dq_result aggregates ---------------------------------------
     result_out = []
-    for rule_id, rt, cond, checked, rejecting in dq_result_rows:
+    for rule_id, rt, cond, checked, rejecting in rule_conditions:
         failed = work.where(cond).count()
         status = "PASS" if failed == 0 else ("FAIL" if rejecting else "WARN")
         result_out.append((run_id, src_id, rule_id, rt, input_count, checked,
-                           failed, max(checked - failed, 0), status,
+                           failed, max((checked or 0) - failed, 0), status,
                            f"rejecting={rejecting}"))
     if not rule_rows:
         # No-rule behavior: still record NO_RULES and reconcile Bronze->Silver.
         result_out.append((run_id, src_id, None, "NO_RULES", input_count, input_count,
                            0, input_count, "PASS", "no active DQ/transform rules"))
-    if result_out:
-        (spark.createDataFrame(result_out, [
-            "run_id", "source_table_id", "rule_id", "rule_type", "input_count",
-            "checked_count", "failed_count", "passed_count", "status", "message"])
-         .withColumn("captured_ts", F.current_timestamp())
-         .write.format("delta").mode("append").option("mergeSchema", "true")
-         .saveAsTable(ctrl("dq_result").replace("`", "")))
+    write_dq_results(result_out)
 
-    # ---- quarantine rejected rows (redact excluded/sensitive columns) --------
-    if quarantine_enabled and rejected_distinct > 0:
+    # ---- quarantine rejected rows (idempotent per run + table) --------------
+    internal_cols = ["_dq_failures"] + dup_helper_cols
+    if rejected_distinct > 0 and quarantine_enabled:
         keep = [c for c in bronze_df.columns if c not in exclude_cols]
-        json_struct = F.to_json(F.struct(*[F.col(f"`{c}`") for c in keep]))
+        # Replace this run/table's quarantine rows so a retry cannot duplicate
+        # them. History for every other run/table is untouched.
+        spark.sql(f"""
+            DELETE FROM {ctrl('dq_quarantine')}
+            WHERE run_id = {escape_string_literal(run_id)}
+              AND source_table_id = {escape_string_literal(src_id)}
+        """)
         (invalid_df
-         .withColumn("record_json", json_struct)
+         .withColumn("record_json", F.to_json(F.struct(*[F.col(f"`{c}`") for c in keep])))
          .withColumn("failure_reason", F.concat_ws(",", F.col("_dq_failures")))
          .select(
              F.lit(run_id).alias("run_id"), F.lit(src_id).alias("source_table_id"),
@@ -247,26 +374,47 @@ try:
          .withColumn("quarantined_ts", F.current_timestamp())
          .write.format("delta").mode("append").option("mergeSchema", "true")
          .saveAsTable(ctrl("dq_quarantine").replace("`", "")))
+    elif rejected_distinct > 0:
+        print(f"  quarantine disabled: {rejected_distinct} rejected record(s) "
+              "counted for reconciliation but NOT persisted.")
 
     # ---- prepare valid output (drop internal technical columns) --------------
-    drop_internal = [c for c in ("_dq_failures", "_dupcount") if c in valid_df.columns]
-    valid_out = valid_df.drop(*drop_internal)
+    valid_out = valid_df.drop(*[c for c in internal_cols if c in valid_df.columns])
 
-    # ---- provision Silver if missing -----------------------------------------
+    # ---- write Silver + ETL reconciliation (before checkpoint) ---------------
+    current_stage = failcls.SILVER_WRITE
     spark.sql(ddl.build_create_schema(silver_catalog, silver_schema, "Silver ETL output"))
     silver_exists = spark.catalog.tableExists(silver_fqn)
 
-    # ---- write Silver + ETL reconciliation (before checkpoint) ---------------
     if effective_mode == "FULL":
         (valid_out.write.format("delta").mode("overwrite")
          .option("overwriteSchema", "true").saveAsTable(silver_fqn))
+        current_stage = failcls.ETL_RECONCILIATION
         silver_count = spark.table(silver_fqn).count()
         recon_result = recon.reconcile_etl_full(
             input_count, valid_count, rejected_distinct, silver_count)
     elif pk:
-        # INCREMENTAL MERGE: duplicate valid keys must fail before merge.
-        dup_valid = valid_out.groupBy(*[F.col(f"`{c}`") for c in pk]).count() \
-            .where(F.col("count") > 1).count()
+        # Duplicate valid keys are detected BEFORE staging and merging: a MERGE
+        # with duplicate source keys is non-deterministic, so it must not run.
+        missing_pk = [c for c in pk if c not in valid_out.columns]
+        if missing_pk:
+            fail_etl(failcls.SILVER_WRITE, failcls.CONFIGURATION_ERROR,
+                     f"primary-key column(s) {missing_pk} are not present in the "
+                     "ETL output; cannot MERGE into Silver", "ETL_CONFIG_ERROR",
+                     s_count=input_count, t_count=valid_count)
+        dup_valid = (valid_out.groupBy(*[F.col(f"`{c}`") for c in pk]).count()
+                     .where(F.col("count") > 1).count())
+        if dup_valid > 0:
+            current_stage = failcls.ETL_RECONCILIATION
+            write_recon(recon.reconcile_etl_incremental_merge(
+                input_count, valid_count, rejected_distinct, dup_valid, 0))
+            fail_etl(failcls.ETL_RECONCILIATION, failcls.RECONCILIATION_ERROR,
+                     f"{dup_valid} duplicate primary-key group(s) in the valid ETL "
+                     "input; MERGE not executed and ETL watermark unchanged",
+                     "ETL_RECONCILIATION_FAILED",
+                     s_count=input_count, t_count=valid_count,
+                     extra={"rejected_row_count": rejected_distinct})
+
         if not silver_exists:
             (valid_out.limit(0).write.format("delta").mode("overwrite")
              .option("overwriteSchema", "true").saveAsTable(silver_fqn))
@@ -275,6 +423,7 @@ try:
          .option("overwriteSchema", "true").saveAsTable(stage_fqn))
         spark.sql(ddl.build_merge_sql(silver_catalog, silver_schema, silver_table,
                                       f"{silver_table}_etl_stage", pk))
+        current_stage = failcls.ETL_RECONCILIATION
         missing_valid = spark.sql(
             f"SELECT COUNT(*) c FROM (SELECT DISTINCT "
             f"{', '.join(quote_databricks(c) for c in pk)} FROM {stage_fqn}) s "
@@ -286,51 +435,35 @@ try:
         recon_result = recon.reconcile_etl_incremental_merge(
             input_count, valid_count, rejected_distinct, dup_valid, missing_valid)
     else:
-        # INCREMENTAL, no reliable key: retry-safe interval replacement.
+        # INCREMENTAL, no reliable key: retry-safe interval replacement using the
+        # exact same typed bounds that selected the Bronze input.
         if not silver_exists:
             (valid_out.limit(0).write.format("delta").mode("overwrite")
              .option("overwriteSchema", "true").saveAsTable(silver_fqn))
-        wm_sql = quote_databricks(etl_wm_col)
-        lower_pred = (f"{wm_sql} > CAST({escape_string_literal(last_etl_wm)} AS TIMESTAMP) AND "
-                      if last_etl_wm is not None else "")
-        spark.sql(
-            f"DELETE FROM {silver_fqn} WHERE {lower_pred}"
-            f"{wm_sql} <= CAST({escape_string_literal(upper_etl_wm)} AS TIMESTAMP)")
+        silver_wm = F.col(f"`{etl_wm_col}`")
+        interval_cond = silver_wm <= upper_bound_col
+        if lower_bound_col is not None:
+            interval_cond = interval_cond & (silver_wm > lower_bound_col)
+        from delta.tables import DeltaTable
+        DeltaTable.forName(spark, silver_fqn).delete(interval_cond)
         (valid_out.write.format("delta").mode("append").saveAsTable(silver_fqn))
-        silver_interval = spark.sql(
-            f"SELECT COUNT(*) c FROM {silver_fqn} WHERE {lower_pred}"
-            f"{wm_sql} <= CAST({escape_string_literal(upper_etl_wm)} AS TIMESTAMP)"
-        ).collect()[0]["c"]
+        current_stage = failcls.ETL_RECONCILIATION
+        silver_interval = spark.table(silver_fqn).where(interval_cond).count()
         recon_result = recon.reconcile_etl_interval(
             input_count, valid_count, rejected_distinct, silver_interval)
 
-    # persist recon checks
-    if recon_result.checks:
-        (spark.createDataFrame(
-            [(run_id, src_id, d.get("connection_id"), d.get("source_system"),
-              d.get("source_schema"), d.get("source_table"), c["check_type"],
-              c["source_value"], c["target_value"], c["status"], c["message"])
-             for c in recon_result.checks],
-            ["run_id", "source_table_id", "connection_id", "source_system",
-             "source_schema", "source_table", "check_type", "source_value",
-             "target_value", "status", "message"])
-         .withColumn("captured_ts", F.current_timestamp())
-         .write.format("delta").mode("append").option("mergeSchema", "true")
-         .saveAsTable(ctrl("reconciliation_results").replace("`", "")))
+    write_recon(recon_result)
 
-    # ---- ETL checkpoint gate --------------------------------------------------
+    # ---- ETL checkpoint gate -------------------------------------------------
     if not recon_result.passed:
-        repo.update_control(src_id, {
-            "etl_current_status": "ETL_RECONCILIATION_FAILED",
-            "etl_error_message": f"ETL reconciliation failed: {recon_result.status}",
-        })
-        log_etl(etl_op, "FAILED", "ETL reconciliation failed", input_count, valid_count,
-                extra={"failure_stage": "ETL_RECONCILIATION",
-                       "error_category": "RECONCILIATION_ERROR",
-                       "extracted_row_count": input_count, "applied_row_count": valid_count,
-                       "rejected_row_count": rejected_distinct})
-        raise Exception(f"ETL reconciliation failed for {src_id}: {recon_result.status}")
+        fail_etl(failcls.ETL_RECONCILIATION, failcls.RECONCILIATION_ERROR,
+                 f"ETL reconciliation failed: {recon_result.status}",
+                 "ETL_RECONCILIATION_FAILED", s_count=input_count, t_count=valid_count,
+                 extra={"extracted_row_count": input_count,
+                        "applied_row_count": valid_count,
+                        "rejected_row_count": rejected_distinct})
 
+    current_stage = failcls.CHECKPOINT
     etl_fields = {
         "last_successful_etl_run_id": run_id,
         "last_successful_etl_run_ts": now_utc().strftime("%Y-%m-%d %H:%M:%S.%f"),
@@ -341,7 +474,8 @@ try:
     repo.update_control(src_id, etl_fields)
     log_etl(etl_op, "SUCCEEDED", None, input_count, valid_count,
             extra={"extracted_row_count": input_count, "applied_row_count": valid_count,
-                   "rejected_row_count": rejected_distinct})
+                   "rejected_row_count": rejected_distinct,
+                   "lower_watermark": last_etl_wm, "upper_watermark": upper_etl_wm})
     print(f"  ETL SUCCEEDED: input={input_count} valid={valid_count} "
           f"rejected={rejected_distinct} recon={recon_result.status}")
     result = {"status": "SUCCEEDED", "source_table_id": src_id, "run_id": run_id,
@@ -349,27 +483,30 @@ try:
               "rejected": rejected_distinct}
 
 except Exception as e:
-    msg = failcls.sanitize_message(e)
-    try:
-        cur = (repo.get_control_row(src_id).asDict().get("etl_current_status")
-               if repo.get_control_row(src_id) else None)
-    except Exception:
-        cur = None
-    if cur != "ETL_RECONCILIATION_FAILED":
-        cls = failcls.classify_failure(e, failcls.SILVER_WRITE, idempotent=True)
+    # A specialized handler already recorded the accurate stage; never relabel it
+    # and never write a second failure row for the same operation.
+    if not failure_already_logged:
+        msg = failcls.sanitize_message(e)
+        cls = failcls.classify_failure(e, current_stage, idempotent=True)
+        etl_status = {
+            failcls.DQ_VALIDATION: "DQ_FAILED",
+            failcls.ETL_RECONCILIATION: "ETL_RECONCILIATION_FAILED",
+            failcls.CHECKPOINT: "ETL_CHECKPOINT_FAILED",
+        }.get(current_stage, "ETL_WRITE_FAILED")
         try:
             repo.update_control(src_id, {
-                "etl_current_status": "ETL_WRITE_FAILED",
+                "etl_current_status": etl_status,
                 "etl_error_message": msg[:1000]})
-        except Exception:
-            pass
+        except Exception as update_error:
+            print(f"  [warn] could not record ETL status: {update_error}")
         try:
-            log_etl("ETL_FULL", "FAILED", msg[:1000], None, None,
+            log_etl(etl_op, "FAILED", msg[:1000], None, None,
                     extra={"failure_stage": cls.stage, "error_category": cls.category,
                            "retry_eligible": cls.retry_eligible})
-        except Exception:
-            pass
-    print(f"  ETL FAILED {src_id}: {e}")
+        except Exception as log_error:
+            print(f"  [warn] could not write ETL audit: {log_error}")
+    print(f"  ETL FAILED {src_id} at {current_stage}: "
+          f"{failcls.sanitize_message(e)[:300]}")
     raise
 
 # COMMAND ----------

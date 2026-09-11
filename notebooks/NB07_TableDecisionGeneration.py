@@ -23,21 +23,23 @@ def ctrl(t):
 # COMMAND ----------
 
 maps = spark.sql(
-    f"SELECT source_table_id, source_system, source_schema, source_table, "
-    f"mapping_status FROM {ctrl('resolved_column_mappings')} "
+    f"SELECT source_table_id, connection_id, source_system, source_schema, "
+    f"source_table, mapping_status FROM {ctrl('resolved_column_mappings')} "
     f"WHERE run_id = {escape_string_literal(run_id)}"
 ).collect()
 
 # Aggregate by the source-qualified id so two sources that share a schema.table
 # are decided independently and never merged together.
 agg = defaultdict(lambda: {"total": 0, "blocked": 0, "review": 0,
-                           "system": None, "schema": None, "table": None})
+                           "system": None, "schema": None, "table": None,
+                           "connection_id": None})
 for r in maps:
     key = r["source_table_id"]
     agg[key]["total"] += 1
     agg[key]["system"] = r["source_system"]
     agg[key]["schema"] = r["source_schema"]
     agg[key]["table"] = r["source_table"]
+    agg[key]["connection_id"] = r["connection_id"]
     st = (r["mapping_status"] or "").upper()
     if st == "BLOCKED":
         agg[key]["blocked"] += 1
@@ -61,8 +63,8 @@ for src_id, c in agg.items():
         decision = "AUTO_MIGRATE"
         reason = "All columns map safely"
 
-    decisions.append((run_id, src_id, c["system"], schema, table, decision, reason,
-                      c["blocked"], c["review"], c["total"]))
+    decisions.append((run_id, src_id, c["connection_id"], c["system"], schema, table,
+                      decision, reason, c["blocked"], c["review"], c["total"]))
 
     # Write the decision back to the master control table (keyed by id).
     repo.update_control(src_id, {
@@ -91,6 +93,7 @@ if decisions:
     table_decisions_schema = StructType([
         StructField("run_id", StringType(), True),
         StructField("source_table_id", StringType(), True),
+        StructField("connection_id", StringType(), True),
         StructField("source_system", StringType(), True),
         StructField("source_schema", StringType(), True),
         StructField("source_table", StringType(), True),
@@ -111,6 +114,7 @@ if decisions:
 
     df.write.format("delta") \
         .mode("append") \
+        .option("mergeSchema", "true") \
         .saveAsTable(
             ctrl("table_load_decisions").replace("`", "")
         )
@@ -123,6 +127,7 @@ if decisions:
         df.filter(F.col("decision") != "AUTO_MIGRATE")
           .select(
               "source_table_id",
+              "connection_id",
               "source_system",
               "source_schema",
               "source_table",

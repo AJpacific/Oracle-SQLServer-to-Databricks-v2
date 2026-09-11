@@ -57,6 +57,16 @@ def _q(query):
     return read_source_jdbc(adapter, query, source_server=src_server,
                             source_database=src_db).collect()
 
+
+_ORACLE_TYPES = {"PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY"}
+
+
+def _oracle_type_requested(norm_type):
+    """PACKAGE_BODY is assessed whenever PACKAGE is requested (documented)."""
+    if norm_type in include_types:
+        return True
+    return norm_type == "PACKAGE_BODY" and "PACKAGE" in include_types
+
 # COMMAND ----------
 
 # ---- resolve schemas -------------------------------------------------------
@@ -67,8 +77,12 @@ print(f"Schemas: {len(schemas)}")
 # ---- collect (schema, object, type, definition) ----------------------------
 objects = []
 
-_SS_TYPE = {"V": "VIEW", "P": "PROCEDURE", "FN": "FUNCTION", "IF": "FUNCTION",
-            "TF": "FUNCTION", "AF": "FUNCTION"}
+# Only these SQL Server module types are supported. An unknown code (trigger,
+# rule, CLR module, ...) is never silently relabelled as a PROCEDURE.
+_SS_TYPE = {"V": "VIEW", "P": "PROCEDURE", "PC": "PROCEDURE",
+            "FN": "FUNCTION", "IF": "FUNCTION", "TF": "FUNCTION",
+            "FS": "FUNCTION", "FT": "FUNCTION"}
+skipped_types = []
 
 for schema in schemas:
     if src_system == "oracle":
@@ -84,8 +98,13 @@ for schema in schemas:
         try:
             for rt in _q(adapter.list_routines_query(src_db, schema)):
                 otype = (rt["OBJECT_TYPE"] or "").upper()
+                # ALL_OBJECTS reports 'PACKAGE BODY'; keep PACKAGE and
+                # PACKAGE_BODY as distinct assessed object types.
                 norm = otype.replace(" ", "_")
-                if norm.split("_")[0] not in include_types and norm not in include_types:
+                if norm not in _ORACLE_TYPES:
+                    skipped_types.append((schema, rt["OBJECT_NAME"], otype))
+                    continue
+                if not _oracle_type_requested(norm):
                     continue
                 try:
                     lines = _q(adapter.object_source_query(src_db, schema,
@@ -94,14 +113,19 @@ for schema in schemas:
                                   if lines else None)
                 except Exception as e:
                     definition = None
-                    print(f"  [warn] Oracle source {schema}.{rt['OBJECT_NAME']}: {str(e)[:150]}")
+                    print(f"  [warn] Oracle source {schema}.{rt['OBJECT_NAME']}: "
+                          f"{failcls.sanitize_message(e)[:150]}")
                 objects.append((schema, rt["OBJECT_NAME"], norm, definition))
         except Exception as e:
             print(f"  [warn] Oracle routine discovery {schema}: {str(e)[:200]}")
     else:
         try:
             for m in _q(adapter.module_definition_query(src_db, schema)):
-                otype = _SS_TYPE.get((m["OBJECT_TYPE"] or "").strip(), "PROCEDURE")
+                code = (m["OBJECT_TYPE"] or "").strip().upper()
+                otype = _SS_TYPE.get(code)
+                if otype is None:
+                    skipped_types.append((schema, m["OBJECT_NAME"], code))
+                    continue
                 if otype not in include_types:
                     continue
                 objects.append((schema, m["OBJECT_NAME"], otype, m["DEFINITION_TEXT"]))
@@ -109,6 +133,9 @@ for schema in schemas:
             print(f"  [warn] SQL Server module discovery {schema}: {str(e)[:200]}")
 
 print(f"Collected {len(objects)} object definition(s).")
+if skipped_types:
+    print(f"Skipped {len(skipped_types)} unsupported object type(s); "
+          f"examples: {skipped_types[:5]}")
 
 # COMMAND ----------
 
@@ -120,9 +147,15 @@ for schema, name, otype, definition in objects:
     complexity, reason = sqlconv.classify_sql_object(src_system, otype, definition)
     converted, language, conv_status = None, None, "NOT_STARTED"
     review_status = "NOT_REVIEWED"
-    error_message = None if definition else "definition inaccessible or encrypted"
+    error_message = None
 
-    if mode == "CONVERT" and definition:
+    if not definition:
+        # Inaccessible or encrypted: never labelled MANUAL merely for missing text.
+        complexity = "UNABLE_TO_ASSESS"
+        conv_status = "NOT_STARTED"
+        error_message = ("definition text is not accessible (encrypted module, "
+                         "missing SELECT/VIEW DEFINITION grant, or no source rows)")
+    elif mode == "CONVERT":
         converted, language, conv_status = sqlconv.convert_sql_object_deterministic(
             src_system, otype, definition)
         if conv_status == "GENERATED":
@@ -147,8 +180,34 @@ if rows:
     df = (spark.createDataFrame(rows)
           .withColumn("captured_ts", F.current_timestamp())
           .withColumn("updated_ts", F.current_timestamp()))
-    df.write.format("delta").mode("append").option("mergeSchema", "true").saveAsTable(
-        ctrl("sql_object_assessment").replace("`", ""))
+    df.createOrReplaceTempView("_sql_objects")
+    # Retry-safe for the same assessment identity. An existing human decision
+    # (APPROVED / REJECTED) is preserved; use a new assessment_id to start over.
+    spark.sql(f"""
+        MERGE INTO {ctrl('sql_object_assessment')} t
+        USING _sql_objects s
+          ON t.assessment_id = s.assessment_id
+         AND t.connection_id = s.connection_id
+         AND t.source_schema = s.source_schema
+         AND t.object_type   = s.object_type
+         AND t.object_name   = s.object_name
+        WHEN MATCHED THEN UPDATE SET
+            t.run_id = s.run_id,
+            t.source_system = s.source_system,
+            t.source_database = s.source_database,
+            t.source_definition = s.source_definition,
+            t.complexity_category = s.complexity_category,
+            t.classification_reason = s.classification_reason,
+            t.converted_definition = s.converted_definition,
+            t.conversion_language = s.conversion_language,
+            t.conversion_status = s.conversion_status,
+            t.review_status = CASE
+                WHEN t.review_status IN ('APPROVED','REJECTED') THEN t.review_status
+                ELSE s.review_status END,
+            t.error_message = s.error_message,
+            t.updated_ts = s.updated_ts
+        WHEN NOT MATCHED THEN INSERT *
+    """)
     summary = {r["complexity_category"]: r["count"]
                for r in df.groupBy("complexity_category").count().collect()}
     print("Complexity summary:", summary)

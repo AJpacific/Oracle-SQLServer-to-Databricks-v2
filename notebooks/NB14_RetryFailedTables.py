@@ -25,10 +25,18 @@ original_run_id = dbutils.widgets.get("original_run_id").strip()
 operation_filter = dbutils.widgets.get("operation").strip()
 only_id = dbutils.widgets.get("source_table_id").strip()
 try:
+    # max_retries = the number of ADDITIONAL attempts allowed after the first.
+    # With max_retries=3 an initial attempt_number=1 may be retried as attempts
+    # 2, 3, and 4; a further failure becomes MANUAL_REVIEW.
     max_retries = int(dbutils.widgets.get("max_retries").strip() or "3")
 except ValueError:
     max_retries = 3
 include_non_retryable = dbutils.widgets.get("include_non_retryable") == "true"
+
+# Safe recovery actions only re-commit state; they never reapply data, so they
+# stay selectable even though a checkpoint/finalization error is not classified
+# as automatically retry-eligible.
+SAFE_RECOVERY_ACTIONS = {"RETRY_CHECKPOINT_ONLY", "RETRY_QUEUE_FINALIZATION_ONLY"}
 
 if not original_run_id:
     raise ValueError("original_run_id is required")
@@ -73,14 +81,16 @@ for r in latest:
     eligible = bool(r["retry_eligible"]) if r["retry_eligible"] is not None else False
     prev_attempt = int(r["attempt_number"]) if r["attempt_number"] is not None else 1
     next_attempt = prev_attempt + 1
+    retry_count = prev_attempt - 1        # retries already consumed
 
     action = failcls.recovery_action(operation, stage)
-    if not eligible and not include_non_retryable:
-        manual.append((src_id, operation, r["error_category"]))
+    selectable = eligible or action in SAFE_RECOVERY_ACTIONS
+    if not selectable and not include_non_retryable:
+        manual.append((src_id, operation, r["error_category"], "not retry eligible"))
         continue
-    if not eligible:
+    if not selectable:
         action = "MANUAL_REVIEW"
-    if next_attempt > max_retries:
+    if retry_count >= max_retries:
         action = "MANUAL_REVIEW"
 
     item = {
@@ -90,7 +100,8 @@ for r in latest:
         "recovery_action": action,
     }
     if action == "MANUAL_REVIEW":
-        manual.append((src_id, operation, r["error_category"]))
+        manual.append((src_id, operation, r["error_category"],
+                       f"retry_count={retry_count} max_retries={max_retries}"))
     worklist.append(item)
 
 print(f"Retry worklist: {len(worklist)}; manual review: {len(manual)}")

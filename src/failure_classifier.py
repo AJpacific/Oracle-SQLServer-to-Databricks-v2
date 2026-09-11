@@ -73,14 +73,43 @@ class FailureClassification:
 
 
 def sanitize_message(message) -> str:
-    """Strip credentials from an error message before it is stored or logged."""
+    """Strip credentials from an error message before it is stored or logged.
+
+    Covers JDBC/connection-string properties, query-string tokens, HTTP
+    Authorization headers (Basic/Bearer), and URL userinfo. Non-sensitive text
+    such as host, database, schema, and table names is left readable.
+    """
     if message is None:
         return ""
     s = str(message)
-    s = re.sub(r"(?i)(password|pwd|user|username|token|secret)=[^;&\s]*",
-               r"\1=***", s)
+    # key=value and key: value connection/query properties.
+    s = re.sub(
+        r"(?i)\b(password|pwd|passwd|user|username|uid|token|access_token|"
+        r"refresh_token|id_token|secret|client_secret|clientsecret|"
+        r"secret_value|apikey|api_key|sas|signature|sig|key|credential)\b"
+        r"(\s*[=:]\s*)[^;&,\s\"']+",
+        r"\1\2***", s)
+    # HTTP Authorization headers.
+    s = re.sub(r"(?i)\b(Authorization\s*:\s*)(Basic|Bearer)\s+\S+",
+               r"\1\2 ***", s)
+    s = re.sub(r"(?i)\b(Basic|Bearer)\s+[A-Za-z0-9\-._~+/=]{8,}",
+               r"\1 ***", s)
+    # URL userinfo (scheme://user:pass@host).
     s = re.sub(r"//[^/@\s]*@", "//***@", s)
+    # Webhook URLs: keep the host and the recognizable path segment, drop the
+    # token-bearing remainder.
+    s = re.sub(r"(?i)(https?://\S*?/(?:webhook|incomingwebhook|services|hooks)/)"
+               r"[^\s]*", r"\1***", s)
     return s[:2000]
+
+
+def redact_url(url) -> str:
+    """Return a log-safe URL with credentials and query tokens removed."""
+    if not url:
+        return ""
+    s = sanitize_message(url)
+    # Drop a query string entirely: it can carry an unnamed webhook token.
+    return re.sub(r"\?\S*", "?***", s)
 
 
 # Ordered (pattern, category) rules. First match wins.

@@ -416,12 +416,28 @@ def now_utc():
 
 
 def get_run_id():
-    """Reuse a run_id from an upstream job task, otherwise create one."""
+    """Resolve this task's run_id deterministically.
+
+    Priority: the explicit run_id widget (how a job task should pass it), then an
+    approved upstream task value, then a newly generated id. A retry child run
+    supplies its own run_id widget, so it is never overwritten by the parent's.
+    """
+
+    try:
+        widget_run_id = dbutils.widgets.get("run_id").strip()
+    except Exception:
+        widget_run_id = ""
+
+    if widget_run_id:
+        return widget_run_id
 
     upstream_tasks = (
         "T00_Init_Control",
+        "T01_Upsert_Validate_Connection",
         "T11a_DeltaSyncPrep",
         "T11a_Delta_Prep",
+        "T20_Delta_Prep",
+        "T40_Select_Retries",
     )
 
     for task_key in upstream_tasks:

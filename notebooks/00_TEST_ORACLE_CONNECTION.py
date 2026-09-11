@@ -24,10 +24,12 @@
 # MAGIC %md
 # MAGIC ## Oracle connection (secret-backed)
 # MAGIC
-# MAGIC This notebook uses the shared `get_jdbc_url_and_props()` from `_common`,
-# MAGIC which reads the connection from the `oracle-migration` secret scope. It does
-# MAGIC not redefine or hard-code any connection details. Set the `test_schema` /
-# MAGIC `test_table` widgets below before running the source-table tests.
+# MAGIC This notebook resolves its Oracle connection from the `connection_id`
+# MAGIC widget when one is supplied (using that connection's own secret scope), and
+# MAGIC otherwise falls back to the documented legacy `oracle-migration` scope. It
+# MAGIC does not redefine or hard-code any connection details. Set the
+# MAGIC `test_schema` / `test_table` widgets below to run the optional
+# MAGIC source-object tests.
 
 # COMMAND ----------
 
@@ -125,13 +127,48 @@ print(
     f"{test_schema}.{test_table}"
 )
 
+# Optional table diagnostics are skipped when no schema/table is supplied, so
+# these counters must always be defined for the final summary.
+sample_count = 0
+meta_count = 0
+pk_count = 0
+
+# COMMAND ----------
+
+# MAGIC %md ### 1b. Resolve the adapter (connection_id preferred)
+
+# COMMAND ----------
+
+# A registered connection is preferred: it selects that connection's own secret
+# scope instead of the global legacy scope. The legacy scope remains a
+# documented fallback for environments not yet onboarded.
+if CONNECTION_ID:
+    connection = get_connection(CONNECTION_ID)
+    if connection is None:
+        raise ValueError(f"connection_id {CONNECTION_ID!r} not found in source_connection")
+    if normalize_source_system(connection["source_system"]) != "oracle":
+        raise ValueError(
+            f"connection_id {CONNECTION_ID!r} is "
+            f"{connection['source_system']!r}; this diagnostic requires an Oracle connection")
+    adapter = get_source_adapter_for_connection(connection, require_valid=False)
+    print(f"Using registered connection {CONNECTION_ID} (scope from source_connection).")
+else:
+    adapter = get_source_adapter(
+        "oracle", secret_provider=_secret_provider, secret_scope=SECRET_SCOPE)
+    print(f"[legacy fallback] no connection_id supplied; using the "
+          f"'{SECRET_SCOPE}' secret scope.")
+
+print("JDBC URL (redacted):",
+      adapter.redact_jdbc_url(adapter.get_jdbc_url_and_props()[0]))
+
 # COMMAND ----------
 
 # MAGIC %md ### 2. Oracle DUAL connectivity test
 
 # COMMAND ----------
 
-dual_test = read_jdbc(
+dual_test = read_source_jdbc(
+    adapter,
     "(SELECT 1 AS CONNECTION_OK FROM DUAL) q",
     fetchsize=1
 )
@@ -177,7 +214,8 @@ else:
         f"{test_schema}.{test_table}"
     )
 
-    sample_df = read_jdbc(
+    sample_df = read_source_jdbc(
+        adapter,
         probe,
         fetchsize=5
     )
@@ -201,7 +239,8 @@ else:
 # COMMAND ----------
 
 if test_schema and test_table:
-    meta = read_jdbc(
+    meta = read_source_jdbc(
+        adapter,
         sqlb.columns_metadata_query(
             test_schema,
             test_table
@@ -233,7 +272,8 @@ if test_schema and test_table:
 # COMMAND ----------
 
 if test_schema and test_table:
-    pk = read_jdbc(
+    pk = read_source_jdbc(
+        adapter,
         sqlb.primary_key_query(
             test_schema,
             test_table

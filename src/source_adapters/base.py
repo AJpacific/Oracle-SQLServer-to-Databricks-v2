@@ -66,14 +66,11 @@ class SourceAdapter(ABC):
     @staticmethod
     def redact_jdbc_url(url) -> str:
         """Return a log-safe JDBC URL with any embedded credentials removed."""
-        import re
-        if not url:
-            return ""
-        s = str(url)
-        # Strip user=/password= properties and userinfo in URL authority.
-        s = re.sub(r"(?i)(password|pwd|user|username)=[^;&\s]*", r"\1=***", s)
-        s = re.sub(r"//[^/@]*@", "//***@", s)
-        return s
+        try:
+            from src.failure_classifier import redact_url
+        except ModuleNotFoundError:
+            from failure_classifier import redact_url
+        return redact_url(url)
 
     def read_jdbc(self, spark, dbtable, source_server=None, source_database=None,
                   fetchsize=10000, partition_column=None, lower_bound=None,
@@ -146,7 +143,7 @@ class SourceAdapter(ABC):
     # aliases (SCHEMA_NAME / OBJECT_NAME / OBJECT_TYPE / ROW_COUNT / SIZE_MB /
     # ROW_COUNT_METHOD) so the assessment notebook stays source-independent. A
     # broad assessment never runs COUNT(*) per table; it uses catalog/dictionary
-    # metadata and labels the method EXACT, ESTIMATED, or UNAVAILABLE.
+    # metadata and labels the method CATALOG, ESTIMATED, or UNAVAILABLE.
     @abstractmethod
     def list_schemas_query(self, source_database=None):
         ...

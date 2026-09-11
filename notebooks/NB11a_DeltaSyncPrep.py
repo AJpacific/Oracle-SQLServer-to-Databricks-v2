@@ -1,12 +1,12 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # NB11a_DeltaSyncPrep
-# MAGIC Builds the Pipeline 2 workload queue for every eligible table after the
-# MAGIC initial load. WATERMARK and HYBRID use a bounded temporal extract,
-# MAGIC PRIMARY_KEY uses a complete source extract for MERGE, and FULL_LOAD uses
-# MAGIC a complete source extract for target refresh. SQL Server datetime2
-# MAGIC watermarks use the approved six-fractional-digit AUTO policy: the source
-# MAGIC MAX and incremental predicate are normalized to datetime2(6).
+# MAGIC Builds the INGEST recurring-synchronization workload queue for every
+# MAGIC eligible table after the initial load. WATERMARK and HYBRID use a bounded
+# MAGIC temporal extract, PRIMARY_KEY uses a complete source extract for MERGE, and
+# MAGIC FULL_LOAD uses a complete source extract for target refresh. SQL Server
+# MAGIC datetime2 watermarks use the approved six-fractional-digit AUTO policy: the
+# MAGIC source MAX and incremental predicate are normalized to datetime2(6).
 
 # COMMAND ----------
 
@@ -92,6 +92,7 @@ eligible = spark.sql(f"""
       AND initial_load_completed = true
       AND table_decision = 'AUTO_MIGRATE'
       AND load_strategy IN ('WATERMARK','PRIMARY_KEY','HYBRID','FULL_LOAD')
+      {f"AND connection_id = {escape_string_literal(CONNECTION_ID)}" if CONNECTION_ID else ""}
 """).collect()
 print("Eligible tables for delta:", len(eligible))
 
@@ -118,7 +119,7 @@ for r in eligible:
     upper_wm = None
 
     try:
-        adapter = get_source_adapter_for_row(r)
+        adapter = get_source_adapter_routed(r)
 
         # Use only the latest approved AUTO target columns. For SQL Server
         # DATETIME2 this lets the builder project the watermark itself as
@@ -226,7 +227,8 @@ for r in eligible:
                 last_wm, upper_wm, columns=approved_columns)
 
         queue_row = Row(
-            run_id=run_id, source_table_id=src_id, source_system=src_system,
+            run_id=run_id, source_table_id=src_id,
+            connection_id=d.get("connection_id"), source_system=src_system,
             source_server=src_server, source_database=src_db,
             source_schema=s_schema, source_table=s_table,
             target_catalog=t_catalog, target_schema=t_schema, target_table=t_table,
@@ -263,6 +265,7 @@ if queue:
     queue_schema = StructType([
         StructField("run_id", StringType(), False),
         StructField("source_table_id", StringType(), False),
+        StructField("connection_id", StringType(), True),
         StructField("source_system", StringType(), False),
         StructField("source_server", StringType(), True),
         StructField("source_database", StringType(), True),
@@ -286,7 +289,8 @@ if queue:
               [row.asDict() for row in queue],
               schema=queue_schema)
           .withColumn("captured_ts", F.current_timestamp()))
-    df.write.format("delta").mode("append").saveAsTable(
+    df.write.format("delta").mode("append").option(
+        "mergeSchema", "true").saveAsTable(
         ctrl("delta_sync_queue").replace("`", ""))
     print(f"Queued {len(queue)} tables.")
 else:
