@@ -8,7 +8,7 @@
 #
 # NOTES:
 #   * decimal / numeric are resolved in code from precision/scale
-#     (crosssourcetypemapper._map_sqlserver_decimal); precision > 38 is BLOCKED.
+#     (SqlServerTypeMapper._map_decimal); precision > 38 is BLOCKED.
 #     They are intentionally omitted here.
 #   * SQL Server `timestamp` is *rowversion* (an 8-byte binary change token),
 #     NOT a datetime. Both `timestamp` and `rowversion` map to BINARY and are

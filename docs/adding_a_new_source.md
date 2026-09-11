@@ -13,7 +13,8 @@ this repository.
 | Layer | Owns | Location |
 |---|---|---|
 | Shared notebooks | Registration, normalization, mapping orchestration, validation, decisions, Bronze provisioning, full + delta loading, reconciliation, checkpoints, ETL, quarantine, retries, notifications, dashboards, control DDL | `notebooks/shared/` |
-| Shared pure modules | Record/row normalization, reconciliation rules, DQ rules, failure classification, ETL work unit, watermark serialization | `src/` |
+| Shared pure modules | Record/row normalization, reconciliation rules, DQ rules, failure classification, ETL work unit, watermark serialization, source-neutral mapper contract | `src/` and `src/type_mappers/base.py` |
+| Source type mapper | Built-in datatype rules, family normalization, precision/scale policy, source-qualified YAML loading | `src/type_mappers/<source>.py` |
 | Source adapter | Dialect SQL, connection probe, type-rules filename, column policy, watermark policy, partition policy, SQL-object typing | `src/source_adapters/<source>.py` |
 | Source notebooks | Connection onboarding, broad assessment, metadata inventory, SQL-object assessment, diagnostics | `notebooks/sources/<source>/` |
 
@@ -55,7 +56,8 @@ All metadata queries must return the **neutral aliases** shared code expects
   `watermark_type_rank()`, `initial_watermark_value()`
 - `resolve_partition_plan()`
 - `load_type_mapper()` and **`type_rules_file()`** — the filename only; shared
-  code locates it under `config/` and fails loudly if it is missing
+  code locates it under `config/` and fails loudly if it is missing. The loader
+  must instantiate this source's concrete mapper, not the compatibility facade
 - `apply_column_policy(column_metadata, proposed_mapping)` — return a
   `ColumnPolicyResult`. Override only if the source has non-writable, hidden,
   generated, or version columns; otherwise inherit the base behavior. Map your
@@ -72,14 +74,47 @@ All metadata queries must return the **neutral aliases** shared code expects
   `normalize_sql_object_type()`. An unrecognized code must normalize to `""` so
   it is skipped explicitly rather than mislabelled.
 
-### 2. Add the type rules
+### 2. Add the source type mapper and rules
+
+Create `src/type_mappers/postgresql.py` with a class implementing
+`SourceTypeMapper`:
+
+```python
+from src.type_mappers.base import ColumnMappingResult, SourceTypeMapper
+
+
+class PostgreSqlTypeMapper(SourceTypeMapper):
+  def __init__(self, rules=None):
+    self._rules = rules or {}
+
+  def map_column(self, source_type, precision=None, scale=None,
+           length=None, is_nullable=True):
+    # Apply PostgreSQL policy only; return ColumnMappingResult.
+    ...
+```
+
+Keep every PostgreSQL family name, fallback rule, and numeric/temporal special
+case in this module. Do not edit the Oracle or SQL Server mapper.
 
 Create `config/type_rules_postgresql.yaml` with `source_dialect: postgresql` and
-the type mappings. The filename must match `type_rules_file()`.
+the type mappings. The filename must match `type_rules_file()`. Validate that
+`source_dialect` matches the adapter, `target` is `databricks_delta`, every
+mapping status is `AUTO`/`REVIEW`/`BLOCKED`, and every fidelity is
+`EXACT`/`WIDENED`/`LOSSY`/`UNKNOWN`.
+
+The adapter should load its mapper explicitly:
+
+```python
+def load_type_mapper(self):
+  return PostgreSqlTypeMapper.from_yaml_path(self._type_rules_path())
+```
+
+`src/crosssourcetypemapper.py` is compatibility-only. Do not add rules or a
+source branch to it.
 
 ### 3. Register the source
 
-Two explicit entries — no dynamic discovery, no directory scanning, no
+Three explicit entries — no dynamic discovery, no directory scanning, no
 `eval`/`exec`:
 
 ```python
@@ -88,6 +123,15 @@ _ADAPTERS = {
     "oracle": OracleSourceAdapter,
     "sqlserver": SqlServerSourceAdapter,
     "postgresql": PostgreSqlSourceAdapter,
+}
+```
+
+```python
+# src/type_mappers/factory.py
+_MAPPERS = {
+  "oracle": OracleTypeMapper,
+  "sqlserver": SqlServerTypeMapper,
+  "postgresql": PostgreSqlTypeMapper,
 }
 ```
 
@@ -113,7 +157,8 @@ SOURCE_DEFINITIONS["postgresql"] = {
 
 Also add the token to `src/source_identity.py` (`normalize_source_system` must
 recognize it) and, if the source requires an explicit database, to
-`SOURCES_REQUIRING_DATABASE`.
+`SOURCES_REQUIRING_DATABASE`. Never add a fallback token: a missing or unknown
+`source_system` must continue to fail.
 
 ### 4. Write the five source notebooks
 
@@ -123,7 +168,7 @@ Copy the shape of `notebooks/sources/sqlserver/`. Each begins with
 | Notebook | Must do | Must NOT do |
 |---|---|---|
 | `NB00A_UpsertAndValidateConnection` | Fix `SOURCE_SYSTEM` internally, call `normalize_connection_input()`, `repo.upsert_connection()`, `probe_connection()`; sanitize failures with `failcls.sanitize_message` | Accept a `source_system` widget; return or print a secret |
-| `NB01_SourceInventory` | Call adapter metadata queries, `inv_common.normalize_inventory_row()`, `inv_common.build_strategy_payload()`, `persist_inventory_rows()` | Write `source_inventory` directly |
+| `NB01_SourceInventory` | Call adapter metadata queries, build one complete table batch with `inv_common.normalize_inventory_row()`, then call `persist_inventory_rows()` before updating control state | Write `source_inventory` directly; mark `INVENTORIED` before persistence |
 | `NB01A_SourceAssessment` | Discover objects, call `assess_common.build_assessment_record()` and `summarize_table_compatibility()`, `persist_assessment_records()` | Run a per-table `COUNT(*)`; claim an exact row count |
 | `NB13_SQLObjectAssessmentAndConversion` | Extract definitions, call `sqlobj_common.build_sql_object_record()`, `persist_sql_object_records()` | Execute or deploy generated SQL |
 | `TEST_CONNECTION` | Treat a registered `connection_id` as authoritative for server/database/scope | Let a widget override a registered connection |
@@ -139,14 +184,16 @@ In your Databricks job definition, set the source-specific tasks (`T01`, `T02`,
 `tests/test_modularity.py` contains a test-only `_FakeAdapter` demonstrating
 that a third source satisfies the contract and flows through
 `assessment_common`, `inventory_common`, and `sql_object_assessment_common`
-without shared code learning about it. Extend the contract-parity tests to
-include your source so its inventory, assessment, and SQL-object records are
-verified to match the existing shapes.
+without shared code learning about it. Its test-only mapper is returned directly
+from `load_type_mapper()` without changing either existing concrete mapper.
+Extend the contract-parity and datatype regression tests to include your source
+so inventory, assessment, SQL-object records, and mapping outcomes are verified.
 
 ## What is still required beyond unit tests
 
 Pure Python tests validate query construction and policy. They do **not**
 validate JDBC connectivity, driver behavior, catalog permissions, Spark
 execution, or Databricks job orchestration. Run the live checklist in
-`docs/supported_features_and_limitations.md` before using a new source in
-production.
+`docs/production_readiness_checklist.md` before using a new source in
+production. Runtime rows start as `NOT_EXECUTED`; never infer a pass from pure
+tests.

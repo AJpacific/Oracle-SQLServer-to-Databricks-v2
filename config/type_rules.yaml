@@ -6,7 +6,7 @@
 #
 # NOTE ON NUMBER: Oracle reports almost every numeric column as data_type
 # 'NUMBER' with the real shape held in precision/scale. The mapper resolves
-# NUMBER(p,s) in code (crosssourcetypemapper._map_number), so the entry below is
+# NUMBER(p,s) in code (OracleTypeMapper._map_number), so the entry below is
 # only a documented fallback:
 #   scale 0/None -> SMALLINT/INT/BIGINT by precision, else DECIMAL(p,0)
 #   scale > 0    -> DECIMAL(p,s); precision > 38 is BLOCKED

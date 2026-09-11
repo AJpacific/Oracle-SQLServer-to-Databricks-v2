@@ -47,6 +47,11 @@ src/
     factory.py
     oracle.py
     sqlserver.py
+  type_mappers/
+    base.py
+    factory.py
+    oracle.py
+    sqlserver.py
   assessment_common.py
   control_repository.py
   crosssourcetypemapper.py
@@ -65,9 +70,13 @@ src/
   sqlserver_sql_builder.py
   strategy.py
 docs/
+  adding_a_new_source.md
   installation.md
   supported_features_and_limitations.md
   databricks_job_task_mapping.md
+  production_readiness_checklist.md
+artifacts/
+  test-results/                  # captured repository-test evidence
 tests/
   _fakes.py
   _nbsource.py
@@ -78,8 +87,11 @@ tests/
   test_sql_object_converter.py
   test_etl_dq.py
   test_defect_fixes.py
+  test_inventory_idempotency.py
   test_modularity.py
   test_notebook_wiring.py
+  test_release_documentation.py
+  test_type_mappers.py
 requirements-dev.txt
 ```
 
@@ -100,6 +112,11 @@ The adapter owns, and shared code asks for:
 - its **type-rules file** (`type_rules_file()`) - shared code locates the named
   file under `config/` and fails loudly if it is missing, instead of inferring a
   filename from the source system
+- its **type mapper** (`load_type_mapper()`) - Oracle and SQL Server mapping
+  algorithms live in `src/type_mappers/oracle.py` and
+  `src/type_mappers/sqlserver.py`; `src/type_mappers/base.py` contains only the
+  source-neutral result, status/fidelity constants, interface, and table-level
+  compatibility classifier
 - its **column policy** (`apply_column_policy()`) - hidden, generated,
   non-writable, and version columns are expressed as canonical policy codes
   (`SOURCE_HIDDEN_COLUMN`, `SOURCE_GENERATED_COLUMN`,
@@ -119,8 +136,11 @@ checkpoints, ETL, quarantine, retries, dashboards, notifications, and
 control-table DDL - is shared and never duplicated per source.
 
 Adding a future source requires a new adapter, one factory registration, one
-`src/source_registry.py` entry, a type-rules YAML, and those five notebooks. No
-shared notebook changes. See `docs/adding_a_new_source.md`.
+`src/source_registry.py` entry, its own mapper plus one explicit mapper-factory
+registration, a type-rules YAML, and those five notebooks. No existing Oracle
+or SQL Server mapper and no shared mapping notebook changes. The legacy
+`src/crosssourcetypemapper.py` module is a compatibility-only constructor
+facade. See `docs/adding_a_new_source.md`.
 
 Source notebooks bootstrap with `%run ../../shared/_common`; shared notebooks
 use `%run ./_common`. Every notebook exists in exactly one place - there are no
@@ -222,6 +242,10 @@ source_table
 
 A deterministic `source_table_id` is derived from that identity. This keeps Oracle and SQL Server tables separate even when schema and table names match.
 
+`source_system` is mandatory on every registered connection and operational
+row. A missing, blank, or unknown value fails explicitly before identity
+generation or adapter routing; it never defaults to Oracle or SQL Server.
+
 Supported `source_system` values:
 
 ```text
@@ -232,6 +256,18 @@ mssql
 ```
 
 Aliases normalize to `sqlserver`. Unknown systems fail explicitly.
+
+Legacy rows with a blank `source_system` are intentionally skipped by the NB00
+identity backfill and require reviewed manual classification. Repair only a row
+whose source is known; do not infer it from names, schemas, databases, or secret
+keys. Example (documentation only, never run automatically):
+
+```sql
+UPDATE <catalog>.<control_schema>.source_table_control
+SET source_system = 'oracle'
+WHERE source_table_id = '<reviewed legacy source_table_id>'
+  AND (source_system IS NULL OR trim(source_system) = '');
+```
 
 ## Unity Catalog organization
 
@@ -298,8 +334,8 @@ sqlserver-port
 Run the matching connection notebook before onboarding tables:
 
 ```text
-00_TEST_ORACLE_CONNECTION.py
-00_TEST_SQLSERVER_CONNECTION.py
+notebooks/sources/oracle/TEST_CONNECTION.py
+notebooks/sources/sqlserver/TEST_CONNECTION.py
 ```
 
 The SQL Server adapter uses the Microsoft JDBC driver:
@@ -337,6 +373,14 @@ for the run, scoped by `connection_id`. Only the load stage (NB09) runs per
 table inside a ForEach, and it fails if a supplied `source_table_id` does not
 resolve to exactly one eligible table. NB10 commits initial state only for
 tables with a passing `FULL_SNAPSHOT_COUNT` reconciliation.
+
+Source inventory is retry-safe at the exact `run_id + source_table_id` scope.
+Each successfully discovered table is validated as one complete incoming
+snapshot, duplicate `(run_id, source_table_id, column_name)` keys fail before
+any write, then that table's existing same-run snapshot is deleted and replaced.
+A dropped source column therefore disappears on retry, while older run history
+and every other table remain untouched. The table is marked `INVENTORIED` only
+after persistence succeeds.
 
 See `docs/databricks_job_task_mapping.md` for the exact task keys and parameters.
 
@@ -434,7 +478,10 @@ rowversion/timestamp -> BINARY
 sql_variant, hierarchyid, geometry, geography -> BLOCKED
 ```
 
-The YAML rules and `crosssourcetypemapper.py` are the source of truth for mapping behavior.
+The source-qualified YAML and concrete mapper are the source of truth for each
+source. Shared NB03 calls `adapter.load_type_mapper().map_column(...)` and has no
+dialect branch. `crosssourcetypemapper.py` is retained only for compatible
+construction through `CrossSourceTypeMapper(rules, dialect=...)`.
 
 ## Delete policy
 
@@ -458,8 +505,9 @@ Install development dependencies and run:
 
 ```bash
 python -m pip install -r requirements-dev.txt
-python -m compileall src tests
+python -m compileall -q src tests
 python -m pytest tests -q
+python -m unittest discover -s tests -v
 ```
 
 The repository unit tests are pure Python (no Spark or JDBC). They cover the
@@ -469,6 +517,20 @@ reconciliation rules, failure classification and retry recovery mapping, SQL-obj
 classification/conversion, and DQ-rule parsing. `tests/_fakes.py` provides a Spark
 double for query-building assertions. Always run the suite after changing adapter
 contracts, query builders, mappings, reconciliation, or notebook wiring.
+
+Final command output and machine-readable status are written to:
+
+```text
+artifacts/test-results/compileall-output.txt
+artifacts/test-results/pytest-output.txt
+artifacts/test-results/unittest-output.txt
+artifacts/test-results/test-summary.json
+```
+
+These files report repository checks only. They do not constitute Spark, Delta,
+JDBC, Unity Catalog, source-system, or Databricks Job validation. The release
+checklist uses `NOT_EXECUTED`, `PASSED`, `FAILED`, `BLOCKED`, and
+`NOT_APPLICABLE`; no runtime item is treated as passed without live evidence.
 
 ## Deployment validation
 
@@ -483,3 +545,6 @@ Before production use, complete live validation against the intended source plat
 7. Validate the final SQL Server deployment against the chosen Azure SQL, Cloud SQL for SQL Server, VM-hosted SQL Server, or on-premises network path.
 
 Unit tests validate pure logic and static wiring. They do not replace live JDBC, permissions, TLS, networking, source-dialect, or Databricks job validation.
+Track those results separately in
+`docs/production_readiness_checklist.md`. Production readiness must not be
+claimed while required live checks remain `NOT_EXECUTED`.

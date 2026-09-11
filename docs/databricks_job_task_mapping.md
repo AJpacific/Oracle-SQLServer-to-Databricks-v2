@@ -14,6 +14,9 @@ Rules that apply to every workflow:
 
 - No secret is ever passed as a task parameter. Downstream tasks receive only
   `connection_id`, `source_table_id`, and `run_id`.
+- Every registered and operational row must carry a nonblank, registered
+  `source_system`. A missing or unknown value fails and is never routed to a
+  default source.
 - Every task in one workflow receives the **same** `run_id`, passed explicitly
   as a task parameter (`get_run_id()` prefers the widget over a task value).
 - Every shared task from `T03` onward receives `connection_id` where relevant,
@@ -55,6 +58,11 @@ processes the selected rows for the run, scoped by `connection_id`. They are
 per-table; `shared/NB09_FullLoad` fails if a supplied `source_table_id` does not
 resolve to exactly one eligible AUTO_MIGRATE table.
 
+`T04` persists each table independently. Repeating it with the same `run_id`
+replaces that table's exact inventory snapshot after duplicate-key validation;
+it does not append duplicate columns or delete another run/table. A new
+`run_id` creates new history.
+
 ---
 
 ## INGEST — recurring synchronization workflow
@@ -64,7 +72,7 @@ resolve to exactly one eligible AUTO_MIGRATE table.
 | `T20_Delta_Prep` | `shared/NB11a_DeltaSyncPrep` | `run_id`, `connection_id` (optional scope) |
 | `T21_Delta_Apply` | `shared/NB11b_DeltaSyncApply` | `run_id`, `source_table_id`, `attempt_number`, `parent_run_id`, `recovery_action` |
 | `T22_Delta_Summary` | `shared/NB12_ValidationAndReconciliation` | `run_id`, `mode=delta` |
-| `T23_Notify_Delta_Failures` | `shared/NB16_NotifyFailures` | `run_id`, `pipeline_name=INGEST_DELTA` |
+| `T23_Notify_Delta_Failures` | `shared/NB16_NotifyFailures` (run_if: ALL_DONE) | `run_id`, `pipeline_name=INGEST_DELTA` |
 
 `NB11b` performs extract → apply → reconcile → checkpoint → finalize per queue
 item, so reconciliation always precedes the checkpoint. When `source_table_id`
@@ -78,7 +86,7 @@ is supplied the task must resolve exactly one QUEUED row.
 |---|---|---|
 | `T30_Get_ETL_Eligible_Tables` | shared query on `source_table_control` | – |
 | `T31_ForEach_Bronze_Table` | `shared/NB15_BronzeToSilverETL` | `source_table_id`, `run_id`, `etl_mode`, `attempt_number`, `quarantine_enabled`, `exclude_quarantine_columns` |
-| `T32_Notify_ETL_Failures` | `shared/NB16_NotifyFailures` | `run_id`, `pipeline_name=ETL` |
+| `T32_Notify_ETL_Failures` | `shared/NB16_NotifyFailures` (run_if: ALL_DONE) | `run_id`, `pipeline_name=ETL` |
 
 `NB15` performs transform → validate → quarantine → reconcile → ETL checkpoint
 in one per-table task. It never builds a source adapter and never reads a source
@@ -122,6 +130,19 @@ and never replace an interval.
 `vw_assessment_summary`, `vw_ingest_status`, `vw_etl_status`, and
 `vw_validation_status`. It takes no pipeline parameters.
 
+Optional connection diagnostics use the current modular paths:
+
+```text
+sources/oracle/TEST_CONNECTION
+sources/sqlserver/TEST_CONNECTION
+```
+
+Before release, verify the deployed Job's exact notebook paths, dependencies,
+task parameters, ForEach isolation, retry routing, child lineage, retry policy,
+and `ALL_DONE` failure-notification conditions. Record actual workspace evidence
+in `docs/production_readiness_checklist.md`; repository tests cannot validate a
+deployed Databricks Job.
+
 ---
 
 ## Adding a future source (template only — not implemented)
@@ -132,6 +153,9 @@ Adding, for example, PostgreSQL would require:
 src/source_adapters/postgresql.py        # new adapter
 src/source_adapters/factory.py           # one registration line
 src/source_registry.py                   # one manifest entry
+src/type_mappers/postgresql.py           # source-owned mapping policy
+src/type_mappers/factory.py              # one explicit mapper registration
+config/type_rules_postgresql.yaml        # source-qualified rules
 notebooks/sources/postgresql/
     NB00A_UpsertAndValidateConnection.py
     NB01_SourceInventory.py

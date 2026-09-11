@@ -4,9 +4,9 @@
 # MAGIC Builds the INGEST recurring-synchronization workload queue for every
 # MAGIC eligible table after the initial load. WATERMARK and HYBRID use a bounded
 # MAGIC temporal extract, PRIMARY_KEY uses a complete source extract for MERGE, and
-# MAGIC FULL_LOAD uses a complete source extract for target refresh. SQL Server
-# MAGIC datetime2 watermarks use the approved six-fractional-digit AUTO policy: the
-# MAGIC source MAX and incremental predicate are normalized to datetime2(6).
+# MAGIC FULL_LOAD uses a complete source extract for target refresh. Temporal
+# MAGIC precision and predicate policy are supplied by each row's registered
+# MAGIC source adapter.
 
 # COMMAND ----------
 
@@ -33,11 +33,10 @@ from datetime import datetime, date, timezone
 def coerce_watermark(value, watermark_type, adapter):
     """Return a timezone-aware (UTC) datetime for temporal watermark values.
 
-    Any temporal type supported by this row's source adapter (Oracle DATE/
-    TIMESTAMP families, SQL Server DATE/DATETIME/DATETIME2/DATETIMEOFFSET/
-    SMALLDATETIME) parses to an aware UTC datetime so ordering is chronological
-    and naive/ISO/offset checkpoints compare consistently - never a lexical
-    string compare. Non-temporal types (e.g. SQL Server rowversion) are rejected.
+    Any temporal type supported by this row's source adapter parses to an aware
+    UTC datetime so ordering is chronological and naive/ISO/offset checkpoints
+    compare consistently, never as lexical strings. Unsupported non-temporal
+    types are rejected by the adapter contract.
     """
     if value is None:
         return None
@@ -72,11 +71,7 @@ def coerce_watermark(value, watermark_type, adapter):
 
 
 def capture_upper_watermark(adapter, database, schema, table, wm_col, wm_type, server):
-    """Capture MAX once and return (raw, canonical_utc).
-
-    For SQL Server datetime2, the adapter's query builder normalizes MAX to
-    datetime2(6) before JDBC returns the value, matching Databricks microseconds.
-    """
+    """Capture adapter-normalized MAX once and return (raw, canonical_utc)."""
     rows = read_source_jdbc(
         adapter, adapter.upper_watermark_query(database, schema, table, wm_col, wm_type),
         source_server=server, source_database=database).collect()
@@ -122,9 +117,8 @@ for r in eligible:
     try:
         adapter = get_source_adapter_routed(r)
 
-        # Use only the latest approved AUTO target columns. For SQL Server
-        # DATETIME2 this lets the builder project the watermark itself as
-        # datetime2(6), matching the predicate and Delta target representation.
+        # Use only the latest approved AUTO target columns. The adapter projects
+        # source values according to its approved target and watermark policy.
         approved_columns = [
             x["column_name"]
             for x in spark.sql(f"""

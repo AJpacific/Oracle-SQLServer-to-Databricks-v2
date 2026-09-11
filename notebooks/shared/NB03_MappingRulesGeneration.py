@@ -1,9 +1,9 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # NB03_MappingRulesGeneration
-# MAGIC Applies the source-specific Oracle or SQL Server rules to every normalized
-# MAGIC column and writes resolved_column_mappings. SQL Server computed columns are
-# MAGIC REVIEW and hidden columns are BLOCKED before target provisioning.
+# MAGIC Resolves each column through its registered source adapter's type mapper
+# MAGIC and column policy, then writes resolved_column_mappings for validation and
+# MAGIC target provisioning.
 
 # COMMAND ----------
 
@@ -16,9 +16,9 @@ from pyspark.sql import functions as F
 run_id = get_run_id()
 print("run_id:", run_id)
 
-# One adapter per source dialect, resolved through the factory. The adapter
+# One adapter per registered source, resolved through the factory. The adapter
 # supplies both the type rules and the column policy, so this notebook contains
-# no dialect branch.
+# no source-specific branch.
 _adapter_cache = {}
 
 def adapter_for(source_system):

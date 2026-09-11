@@ -2,8 +2,8 @@
 # MAGIC %md
 # MAGIC # NB15_BronzeToSilverETL
 # MAGIC ETL-pipeline task: transform one successfully ingested Bronze table into
-# MAGIC Silver. It NEVER connects to Oracle or SQL Server and NEVER reads a source
-# MAGIC secret scope. It applies configured cleansing + validation rules, separates
+# MAGIC Silver. It NEVER connects to a source and NEVER reads a source secret
+# MAGIC scope. It applies configured cleansing + validation rules, separates
 # MAGIC valid and invalid records (quarantining rejects), reconciles the exact
 # MAGIC processed Bronze set BEFORE committing the ETL checkpoint, and tracks ETL
 # MAGIC watermarks separately from source-ingest ones.

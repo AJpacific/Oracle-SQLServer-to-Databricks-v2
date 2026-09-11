@@ -1,8 +1,8 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # NB02_TypeNormalization
-# MAGIC Converts Oracle or SQL Server column metadata into a target-neutral
-# MAGIC representation, preserves source-specific safety flags, and computes a
+# MAGIC Converts normalized source column metadata into the shared target-neutral
+# MAGIC representation, preserves adapter-supplied safety flags, and computes a
 # MAGIC per-table schema hash. Idempotent per run_id.
 
 # COMMAND ----------

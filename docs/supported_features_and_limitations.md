@@ -6,6 +6,8 @@
 - Oracle and Microsoft SQL Server only, via shared source adapters.
 - Secret-backed JDBC; one Databricks secret scope per registered connection.
 - Deterministic five-part `source_table_id` identity.
+- Mandatory explicit `source_system`; missing, blank, and unknown values fail
+  before routing or identity generation.
 
 ### INGEST pipeline (source -> Bronze)
 - Pipeline-driven multi-connection onboarding (`source_connection` registry,
@@ -31,6 +33,11 @@
 - Source assessment and SQL-object assessment are retry-safe: re-running the
   same `assessment_id` updates its own rows instead of duplicating them, and an
   existing `APPROVED`/`REJECTED` review decision is preserved.
+- Source inventory is an exact replacement per `run_id + source_table_id`.
+  Incoming duplicate `(run_id, source_table_id, column_name)` keys fail before
+  persistence. A same-run retry replaces the full table snapshot, so a dropped
+  source column is removed; older run history and unrelated tables remain.
+  `INVENTORIED` is set only after the inventory write succeeds.
 - Assessment-based, collision-safe registration (`NB01B`). New rows are inactive
   (`REGISTERED`); `MANUAL` / `UNABLE_TO_ASSESS` are never auto-activated.
 - Full load (`NB09`, overwrite) and delta sync (`NB11a`/`NB11b`) with
@@ -58,6 +65,43 @@
   `failure_stage` + `error_category` carry the precise meaning.
 - SQL-object assessment and limited deterministic conversion drafts (`NB13`);
   every generated draft is `PENDING_REVIEW` and is never executed.
+
+### Datatype mapper ownership
+- Shared mapping calls `adapter.load_type_mapper().map_column(...)` and consumes
+  the adapter's source-neutral column policy result.
+- `src/type_mappers/base.py` contains only the mapper interface, immutable
+  result, common status/fidelity constants, YAML contract validation, and table
+  compatibility classification.
+- Oracle rules and precision/scale behavior live only in
+  `src/type_mappers/oracle.py`; SQL Server rules and decimal behavior live only
+  in `src/type_mappers/sqlserver.py`.
+- `src/type_mappers/factory.py` uses an explicit registry. There is no dynamic
+  discovery or directory scan. `src/crosssourcetypemapper.py` is a deprecated
+  compatibility facade and contains no dialect rules.
+
+### Oracle mapping policy
+- Oracle `NUMBER` uses Oracle-owned precision/scale resolution. Whole-number
+  precisions select `SMALLINT`, `INT`, `BIGINT`, or `DECIMAL`; unconstrained
+  `NUMBER` retains the approved `DECIMAL(38,0)` AUTO policy; precision over 38
+  remains BLOCKED.
+- Oracle `DATE`, `TIMESTAMP`, LOB, JSON, BOOLEAN, VECTOR, interval, spatial, and
+  user-defined behavior remains in `OracleTypeMapper` and the Oracle adapter.
+  JSON and timezone-sensitive mappings retain their existing review policy;
+  VECTOR and unsupported types remain BLOCKED.
+
+### SQL Server mapping and column policy
+- SQL Server `decimal`/`numeric` precision and scale, unsigned `tinyint`
+  widening, money families, `uniqueidentifier`, CLR/unsupported types, and
+  temporal mappings are owned by `SqlServerTypeMapper`.
+- `datetime2` maps to Delta `TIMESTAMP` with the existing AUTO/LOSSY
+  microsecond policy. Source projection and watermark predicates normalize the
+  selected `datetime2` value to six fractional digits in the SQL Server query
+  builder; `datetime2(7)` loses its seventh digit.
+- SQL Server `timestamp` and `rowversion` are binary change tokens, map to
+  `BINARY`, and are never temporal watermarks.
+- The SQL Server adapter marks computed columns `REVIEW`, hidden/system columns
+  `BLOCKED` and excluded, and rowversion columns non-writable while preserving
+  their binary type mapping. Identity metadata is retained.
 
 ### ETL pipeline (Bronze -> Silver)
 - Processes only successfully ingested Bronze tables; never connects to a source
@@ -111,6 +155,18 @@
   compatibility path and are named by the adapter, not by shared code.
 - An unregistered source fails explicitly. It never falls through to Oracle or
   SQL Server behavior.
+- Legacy control rows with missing `source_system` no longer run. NB00 skips
+  and counts them; an operator must classify each reviewed row explicitly. For
+  example, only after confirming the source is Oracle:
+
+  ```sql
+  UPDATE <catalog>.<control_schema>.source_table_control
+  SET source_system = 'oracle'
+  WHERE source_table_id = '<reviewed legacy source_table_id>'
+    AND (source_system IS NULL OR trim(source_system) = '');
+  ```
+
+  The accelerator never executes this repair or guesses the source.
 - SQL Server uses `encrypt=true`; `trustServerCertificate` defaults to `false`.
 - Error messages are sanitized **before** printing and before every persistence
   path (`update_control`, `update_connection_status`, `log_job_run`,
@@ -122,9 +178,12 @@
 
 ## Validation status
 
-**Executed:** pure Python unit tests (`compileall`, `pytest`, `unittest`) over
-query construction, policy, reconciliation, retry boundaries, sanitization, and
-static notebook/modularity contracts.
+Repository command evidence is captured under `artifacts/test-results/`. The
+machine-readable `test-summary.json` is authoritative for command, timestamp,
+exit code, and runner-reported counts. Pure tests cover query construction,
+policy, reconciliation, retry boundaries, sanitization, inventory identities,
+mapping regressions, and static notebook/modularity contracts. They do not
+establish runtime production readiness.
 
 **NOT executed** (requires a live environment; nothing below is claimed as
 passing): Spark execution, Delta MERGE/DELETE, Unity Catalog permissions, JDBC
@@ -132,3 +191,9 @@ authentication and networking, Oracle dictionary and SQL Server catalog grants,
 Databricks job/ForEach orchestration, task-value propagation, secret-scope
 resolution, and the numeric accuracy of SQL Server `SIZE_MB` and `ROW_COUNT`
 against a real instance.
+
+Use `docs/production_readiness_checklist.md` for repository and live evidence.
+Allowed statuses are `NOT_EXECUTED`, `PASSED`, `FAILED`, `BLOCKED`, and
+`NOT_APPLICABLE`. Required live rows default to `NOT_EXECUTED`; do not claim
+production readiness from repository tests alone or SQL Server `SIZE_MB`
+accuracy until the live comparison passes.

@@ -1,10 +1,10 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # NB09_FullLoad
-# MAGIC Reads each AUTO_MIGRATE Oracle or SQL Server table through its source
-# MAGIC adapter and writes it to the target Delta table (overwrite). Records source/target counts to
-# MAGIC table_run_log. Designed to run per-table inside a ForEach Job task, or
-# MAGIC loop over all AUTO_MIGRATE tables when run standalone.
+# MAGIC Reads each AUTO_MIGRATE source table through its registered source adapter
+# MAGIC and writes it to the target Delta table (overwrite). Records source/target
+# MAGIC counts to table_run_log. Designed to run per-table inside a ForEach Job
+# MAGIC task, or loop over all AUTO_MIGRATE tables when run standalone.
 
 # COMMAND ----------
 

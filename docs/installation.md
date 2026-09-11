@@ -32,6 +32,14 @@ Every notebook exists in exactly one place; job definitions must reference the
 `shared/` or `sources/<source>/` path. Verify the relative `%run` paths resolve
 after import before running any job.
 
+Datatype mapping follows the same ownership boundary:
+
+- `src/type_mappers/base.py` - source-neutral result and mapper contract
+- `src/type_mappers/oracle.py` - Oracle mapping policy
+- `src/type_mappers/sqlserver.py` - SQL Server mapping policy
+- `src/type_mappers/factory.py` - explicit registrations only
+- `src/crosssourcetypemapper.py` - deprecated compatibility facade only
+
 ## 3. Create secret scopes (per connection)
 
 Credentials never live in Delta or in Git. Create one Databricks secret scope per
@@ -54,6 +62,20 @@ creates the control schema, all control/audit tables, the `source_connection`,
 `dq_quarantine` tables, and idempotently adds the `connection_id`, ETL, retry,
 and reconciliation columns to existing tables.
 
+NB00 does not guess a source for legacy rows. Rows with a missing or blank
+`source_system` are counted and skipped during `source_table_id` backfill. After
+reviewing the real source, repair each row explicitly. Example only:
+
+```sql
+UPDATE <catalog>.<control_schema>.source_table_control
+SET source_system = 'oracle'
+WHERE source_table_id = '<reviewed legacy source_table_id>'
+  AND (source_system IS NULL OR trim(source_system) = '');
+```
+
+Do not run a broad update and do not infer a source from a schema, database,
+table name, or secret key.
+
 ## 5. Onboard a connection
 
 Run the connection notebook for your source:
@@ -62,7 +84,14 @@ Run the connection notebook for your source:
 `connection_name`, `secret_scope`, and (for SQL Server) `source_database`.
 `source_system` is fixed by the notebook, not a widget. It stores only
 non-secret metadata and runs the source's own connectivity probe; on success the
-connection becomes `VALID`.
+connection becomes `VALID`. Missing, blank, or unregistered `source_system`
+values fail; shared routing has no Oracle fallback.
+
+Inventory retries replace the complete snapshot for one
+`run_id + source_table_id`. Duplicate incoming column keys fail before any
+write. A successful retry removes stale columns from that same run/table while
+preserving older runs and unrelated tables. Control status becomes
+`INVENTORIED` only after the replacement write succeeds.
 
 ## 6. Run the pipelines
 
@@ -75,9 +104,17 @@ workspace paths, compute, and schedules are deployment-specific.
 
 ```bash
 python -m pip install -r requirements-dev.txt   # pytest + PyYAML only
-python -m compileall src tests
+python -m compileall -q src tests
 python -m pytest tests -q
+python -m unittest discover -s tests -v
 ```
 
 The tests are pure Python (no Spark/JDBC). Do not install Ruff, yamllint,
 gitleaks, or other blocked tooling.
+
+Captured output belongs under `artifacts/test-results/` in
+`compileall-output.txt`, `pytest-output.txt`, `unittest-output.txt`, and
+`test-summary.json`. These results validate repository logic and static wiring
+only. Record live Spark, Delta, Oracle, SQL Server, and Databricks Job evidence
+separately in `docs/production_readiness_checklist.md`; required live checks
+default to `NOT_EXECUTED` and cannot be inferred from unit tests.
