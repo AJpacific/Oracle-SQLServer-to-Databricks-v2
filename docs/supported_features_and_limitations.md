@@ -17,13 +17,17 @@
   (Oracle `ALL_TABLES.NUM_ROWS` optimizer statistics), or `UNAVAILABLE`. A broad
   assessment never executes a per-table `COUNT(*)` / `COUNT_BIG(*)`, so no label
   claims an executed exact count.
-- **SQL Server `SIZE_MB` is a conservative lower bound**, not a verified
-  complete reserved size: it sums `total_pages` over allocation units reached
-  from each partition through `container_id = partition_id`, which covers
-  IN_ROW_DATA and ROW_OVERFLOW_DATA but not LOB_DATA units keyed by an
-  allocation-unit id. Validating the complete relationship requires a live SQL
-  Server check (see the manual validation checklist); it has not been verified
-  by the pure unit tests.
+- **SQL Server `SIZE_MB` is the total reserved size** of the table: heap or
+  clustered base storage plus all nonclustered indexes, summing `total_pages`
+  across every allocation-unit type - IN_ROW_DATA (type 1) and ROW_OVERFLOW_DATA
+  (type 3) reached via `container_id = partitions.hobt_id`, and LOB_DATA
+  (type 2) reached via `container_id = partitions.partition_id`. The two
+  relationships are combined with `UNION ALL` so each allocation unit is counted
+  once, and row counts are aggregated in an independent CTE so they are never
+  multiplied by the allocation join. **Indexes are included.**
+  The query structure is covered by unit tests; the resulting numbers have
+  **not** been compared against a live SQL Server instance (see "Validation
+  status" below).
 - Source assessment and SQL-object assessment are retry-safe: re-running the
   same `assessment_id` updates its own rows instead of duplicating them, and an
   existing `APPROVED`/`REJECTED` review decision is preserved.
@@ -39,6 +43,16 @@
 - Failed-ingest classification and retry worklists (`NB14`) with no-reapply
   checkpoint-only / finalization-only recovery. `max_retries` means the number
   of **additional** attempts allowed after the first.
+- **Frozen retry boundaries.** `RETRY_DELTA_APPLY` copies the parent run's queue
+  row unchanged into a child row, so the source MAX is never recaptured and the
+  interval is never widened. `RETRY_ETL` replays the lower/upper bounds recorded
+  by the failed attempt rather than recomputing the Bronze MAX. A single
+  immutable work unit drives Bronze filtering, interval replacement,
+  reconciliation, the success audit, **every** failure audit, and the
+  checkpoint - so a second retry receives exactly the same interval and the
+  recorded interval always equals the processed one.
+- State-only recoveries write a child audit row and never read the source or
+  reapply data.
 - `table_run_log.status` is normalized to `SUCCEEDED` / `FAILED`; the detailed
   operational state lives on `source_table_control` / `delta_sync_queue`, and
   `failure_stage` + `error_category` carry the precise meaning.
@@ -91,6 +105,30 @@
 ## Security
 - No username, password, token, secret value, or credential-bearing JDBC URL is
   ever stored in Delta, returned by a task, or written to logs.
+- The registered `source_connection.secret_scope` is **authoritative**. Shared
+  code never infers a scope from the source system; a blank registered scope
+  fails clearly. Legacy global scope widgets remain only as a documented
+  compatibility path and are named by the adapter, not by shared code.
+- An unregistered source fails explicitly. It never falls through to Oracle or
+  SQL Server behavior.
 - SQL Server uses `encrypt=true`; `trustServerCertificate` defaults to `false`.
-- Error messages and JDBC URLs are sanitized/redacted before logging.
-- The Teams webhook is read only from a secret scope and is never logged.
+- Error messages are sanitized **before** printing and before every persistence
+  path (`update_control`, `update_connection_status`, `log_job_run`,
+  `log_table_run`) and before notification. Coverage includes `password`/`pwd`,
+  `user`/`username`, `token`/`access_token`/`refresh_token`, `secret`/
+  `client_secret`, SAS `sig`, `Authorization: Bearer`/`Basic`, URL and JDBC
+  userinfo, and webhook path tokens. Safe identifiers (schema, table, database,
+  host, error codes) are deliberately preserved.
+
+## Validation status
+
+**Executed:** pure Python unit tests (`compileall`, `pytest`, `unittest`) over
+query construction, policy, reconciliation, retry boundaries, sanitization, and
+static notebook/modularity contracts.
+
+**NOT executed** (requires a live environment; nothing below is claimed as
+passing): Spark execution, Delta MERGE/DELETE, Unity Catalog permissions, JDBC
+authentication and networking, Oracle dictionary and SQL Server catalog grants,
+Databricks job/ForEach orchestration, task-value propagation, secret-scope
+resolution, and the numeric accuracy of SQL Server `SIZE_MB` and `ROW_COUNT`
+against a real instance.

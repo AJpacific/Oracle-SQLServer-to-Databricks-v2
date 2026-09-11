@@ -88,8 +88,29 @@ requirements-dev.txt
 Logic that is identical for every source lives in `notebooks/shared/` and
 `src/`. Logic that changes with the source dialect, catalog, metadata,
 connectivity, or SQL lives in `notebooks/sources/<source>/` and in that source's
-adapter. Shared notebooks never branch on `source_system` for a source-specific
-operation - dialect SQL always arrives through the adapter.
+adapter. Shared notebooks never compare `source_system` to a source literal - an
+AST-based test parses the shared code and fails the build if a source branch, a
+dialect catalog string, a source credential key, a dialect query-builder import,
+or a direct concrete-adapter construction appears.
+
+The adapter owns, and shared code asks for:
+
+- its **connection probe** (`connection_probe_query()`) - shared code never
+  hard-codes `SELECT 1 FROM DUAL` or `SELECT 1`
+- its **type-rules file** (`type_rules_file()`) - shared code locates the named
+  file under `config/` and fails loudly if it is missing, instead of inferring a
+  filename from the source system
+- its **column policy** (`apply_column_policy()`) - hidden, generated,
+  non-writable, and version columns are expressed as canonical policy codes
+  (`SOURCE_HIDDEN_COLUMN`, `SOURCE_GENERATED_COLUMN`,
+  `SOURCE_NON_WRITABLE_COLUMN`, `SOURCE_BINARY_VERSION_COLUMN`), so shared
+  mapping and validation consume `include_column` / `is_writable` /
+  `requires_review` / `policy_code` and never interpret a dialect flag
+- its **connection metadata rules** (`validate_connection_metadata()`)
+
+The registered `source_connection.secret_scope` is authoritative; shared code
+never infers a scope from the source system, and an unregistered source fails
+explicitly rather than falling through to Oracle or SQL Server.
 
 Each source folder provides exactly five thin notebooks: connection validation,
 broad assessment, metadata inventory, SQL-object assessment, and a connection
@@ -98,8 +119,8 @@ checkpoints, ETL, quarantine, retries, dashboards, notifications, and
 control-table DDL - is shared and never duplicated per source.
 
 Adding a future source requires a new adapter, one factory registration, one
-`src/source_registry.py` entry, and those five notebooks. No shared notebook
-changes. See `docs/databricks_job_task_mapping.md` for the template.
+`src/source_registry.py` entry, a type-rules YAML, and those five notebooks. No
+shared notebook changes. See `docs/adding_a_new_source.md`.
 
 Source notebooks bootstrap with `%run ../../shared/_common`; shared notebooks
 use `%run ./_common`. Every notebook exists in exactly one place - there are no
@@ -181,8 +202,9 @@ reads a source secret scope.
   Delta, returned by a task, or logged. SQL Server uses `encrypt=true` with
   `trustServerCertificate=false` by default. Errors and URLs are sanitized.
 
-See `docs/installation.md` and `docs/supported_features_and_limitations.md` for
-details and manual validation steps.
+See `docs/installation.md`, `docs/supported_features_and_limitations.md`,
+`docs/databricks_job_task_mapping.md`, and `docs/adding_a_new_source.md` for
+details, validation status, and manual validation steps.
 
 Pipeline JSON files may be maintained separately. Confirm notebook paths, task order, compute, and parameters before importing any job definition.
 
