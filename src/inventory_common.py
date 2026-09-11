@@ -23,6 +23,17 @@ INVENTORY_FIELDS = (
     "is_rowversion", "source_type_schema",
 )
 
+INVENTORY_MERGE_KEYS = (
+    "run_id",
+    "source_table_id",
+    "column_name",
+)
+
+INVENTORY_IDENTITY_FIELDS = (
+    "connection_id", "source_system", "source_server", "source_database",
+    "source_schema", "source_table",
+)
+
 # Neutral column aliases every adapter's columns_metadata_query must return.
 REQUIRED_COLUMN_ALIASES = (
     "COLUMN_NAME", "ORDINAL_POSITION", "IS_NULLABLE", "DATA_TYPE",
@@ -34,6 +45,71 @@ REQUIRED_COLUMN_ALIASES = (
 # False rather than an error.
 OPTIONAL_COLUMN_ALIASES = ("IS_IDENTITY", "IS_COMPUTED", "IS_HIDDEN",
                            "IS_ROWVERSION", "SOURCE_TYPE_SCHEMA")
+
+
+def inventory_record_dict(record):
+    """Return one inventory record as a field-keyed dictionary."""
+    if hasattr(record, "asDict"):
+        return record.asDict(recursive=True)
+    if isinstance(record, dict):
+        return dict(record)
+    values = tuple(record)
+    if len(values) != len(INVENTORY_FIELDS):
+        raise ValueError(
+            f"inventory record has {len(values)} values; "
+            f"expected {len(INVENTORY_FIELDS)}")
+    return dict(zip(INVENTORY_FIELDS, values))
+
+
+def find_duplicate_inventory_keys(records):
+    """Return duplicate ``(run_id, source_table_id, column_name)`` keys."""
+    seen = set()
+    duplicates = []
+    duplicate_set = set()
+    for record in records or []:
+        item = inventory_record_dict(record)
+        key = tuple(item.get(field) for field in INVENTORY_MERGE_KEYS)
+        if key in seen and key not in duplicate_set:
+            duplicates.append(key)
+            duplicate_set.add(key)
+        seen.add(key)
+    return duplicates
+
+
+def validate_inventory_batch(records):
+    """Validate one complete run/table inventory and return normalized dicts."""
+    items = [inventory_record_dict(record) for record in (records or [])]
+    if not items:
+        return []
+
+    for item in items:
+        for field in INVENTORY_MERGE_KEYS:
+            if item.get(field) is None or not str(item.get(field)).strip():
+                raise ValueError(f"inventory record requires {field}")
+
+    duplicates = find_duplicate_inventory_keys(items)
+    if duplicates:
+        run_id, source_table_id, column_name = duplicates[0]
+        raise ValueError(
+            "duplicate inventory key: "
+            f"run_id={run_id!r}, source_table_id={source_table_id!r}, "
+            f"column_name={column_name!r}")
+
+    scopes = {(item["run_id"], item["source_table_id"]) for item in items}
+    if len(scopes) != 1:
+        raise ValueError(
+            "persist_inventory_rows requires exactly one run_id and "
+            "source_table_id scope")
+
+    identity = tuple(items[0].get(field) for field in INVENTORY_IDENTITY_FIELDS)
+    for item in items[1:]:
+        current = tuple(item.get(field) for field in INVENTORY_IDENTITY_FIELDS)
+        if current != identity:
+            raise ValueError(
+                f"inventory rows for source_table_id "
+                f"{items[0]['source_table_id']!r} disagree on connection or "
+                "source identity")
+    return items
 
 
 def validate_metadata_aliases(available_aliases):

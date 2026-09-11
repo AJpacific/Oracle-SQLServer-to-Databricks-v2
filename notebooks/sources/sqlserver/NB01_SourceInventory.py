@@ -33,7 +33,7 @@ print(f"Active SQL Server tables to inventory: {len(active)}")
 
 # COMMAND ----------
 
-inventory_rows = []
+written = 0
 succeeded, failed = 0, 0
 
 for r in active:
@@ -91,14 +91,17 @@ for r in active:
                     "connection_id": conn_id, "source_system": SOURCE_SYSTEM,
                     "source_server": src_server, "source_database": src_db,
                     "source_schema": src_schema, "source_table": src_table}
-        inventory_rows.extend(
-            inv_common.normalize_inventory_row(c, identity) for c in col_dicts)
+        table_inventory_rows = [
+            inv_common.normalize_inventory_row(c, identity) for c in col_dicts
+        ]
 
         decision = adapter.resolve_watermark_decision(
             inv_common.strategy_columns(col_dicts), pk_cols,
             d.get("watermark_column"))
+        table_written = persist_inventory_rows(table_inventory_rows)
         repo.update_control(
             src_id, inv_common.build_strategy_payload(src_id, decision, pk_cols))
+        written += table_written
         succeeded += 1
         print(f"  [sqlserver] {src_schema}.{src_table}: {len(cols)} cols, "
               f"strategy={decision['strategy']}, wm={decision['watermark_column']}; "
@@ -114,9 +117,6 @@ for r in active:
             print(f"  [warn] control update failed: {safe_ctrl_error[:300]}")
         print(f"  FAILED sqlserver {src_schema}.{src_table}: {safe[:300]}")
 
-# COMMAND ----------
-
-written = persist_inventory_rows(inventory_rows)
 print(f"Wrote {written} inventory rows. succeeded={succeeded} failed={failed}")
 
 dbutils.notebook.exit(json.dumps({

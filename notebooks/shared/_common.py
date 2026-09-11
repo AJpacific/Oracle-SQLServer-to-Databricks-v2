@@ -542,12 +542,31 @@ def persist_assessment_records(records):
 
 
 def persist_inventory_rows(rows):
-    """Append normalized inventory rows using the shared inventory schema."""
+    """Replace one run/table inventory snapshot after validating the full set."""
     from pyspark.sql import functions as F
     from pyspark.sql.types import (
         StructType, StructField, StringType, IntegerType, BooleanType)
     if not rows:
         return 0
+    records = inv_common.validate_inventory_batch(rows)
+    run_id = records[0]["run_id"]
+    source_table_id = records[0]["source_table_id"]
+    connection_id = records[0].get("connection_id")
+
+    prior_connections = {
+        row["connection_id"]
+        for row in spark.sql(f"""
+            SELECT DISTINCT connection_id
+            FROM {ctrl_table('source_inventory')}
+            WHERE source_table_id = {escape_string_literal(source_table_id)}
+              AND connection_id IS NOT NULL
+        """).collect()
+    }
+    if prior_connections and prior_connections != {connection_id}:
+        raise ValueError(
+            f"source_table_id {source_table_id!r} is already associated with "
+            f"connection_id value(s) {sorted(prior_connections)!r}; received "
+            f"{connection_id!r}")
     int_cols = {"ordinal_position", "character_maximum_length",
                 "numeric_precision", "numeric_scale", "datetime_precision"}
     bool_cols = {"is_identity", "is_computed", "is_hidden", "is_rowversion"}
@@ -559,11 +578,22 @@ def persist_inventory_rows(rows):
             True)
         for name in inv_common.INVENTORY_FIELDS
     ])
-    (spark.createDataFrame(rows, schema=schema)
-     .withColumn("captured_ts", F.current_timestamp())
-     .write.format("delta").mode("append").option("mergeSchema", "true")
-     .saveAsTable(_plain(ctrl_table("source_inventory"))))
-    return len(rows)
+    values = [tuple(record.get(name) for name in inv_common.INVENTORY_FIELDS)
+              for record in records]
+    snapshot = (spark.createDataFrame(values, schema=schema)
+                .withColumn("captured_ts", F.current_timestamp()))
+
+    # Exact replacement removes stale columns from a retry while preserving
+    # every other run and source table. Validation completes before this write.
+    spark.sql(f"""
+        DELETE FROM {ctrl_table('source_inventory')}
+        WHERE run_id = {escape_string_literal(run_id)}
+          AND source_table_id = {escape_string_literal(source_table_id)}
+    """)
+    (snapshot.write.format("delta").mode("append").option(
+        "mergeSchema", "true").saveAsTable(
+            _plain(ctrl_table("source_inventory"))))
+    return len(records)
 
 
 def persist_sql_object_records(records):
