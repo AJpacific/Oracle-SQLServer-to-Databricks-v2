@@ -16,6 +16,34 @@ imports ``dbutils`` or ``pyspark`` at module load.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+
+
+# Canonical, source-neutral policy codes. A source maps its own metadata to
+# these so shared notebooks never interpret a dialect concept.
+SOURCE_GENERATED_COLUMN = "SOURCE_GENERATED_COLUMN"
+SOURCE_HIDDEN_COLUMN = "SOURCE_HIDDEN_COLUMN"
+SOURCE_NON_WRITABLE_COLUMN = "SOURCE_NON_WRITABLE_COLUMN"
+SOURCE_BINARY_VERSION_COLUMN = "SOURCE_BINARY_VERSION_COLUMN"
+
+POLICY_CODES = (SOURCE_GENERATED_COLUMN, SOURCE_HIDDEN_COLUMN,
+                SOURCE_NON_WRITABLE_COLUMN, SOURCE_BINARY_VERSION_COLUMN)
+
+
+@dataclass(frozen=True)
+class ColumnPolicyResult:
+    """Normalized outcome of a source's column policy.
+
+    Shared code consumes only these fields; it never inspects source_system.
+    """
+
+    include_column: bool
+    mapping_status: str
+    mapping_fidelity: str
+    notes: str
+    is_writable: bool
+    requires_review: bool
+    policy_code: str = None
 
 
 class SourceAdapter(ABC):
@@ -230,3 +258,58 @@ class SourceAdapter(ABC):
     @abstractmethod
     def load_type_mapper(self):
         ...
+
+    @abstractmethod
+    def type_rules_file(self) -> str:
+        """Filename of this source's type-rules YAML (not a full path).
+
+        Shared mapping code asks the adapter instead of branching on the source
+        system, so a future source supplies its own rules file unchanged.
+        """
+
+    def legacy_secret_scope_widget(self):
+        """Name of this source's legacy global secret-scope widget, or None.
+
+        COMPATIBILITY ONLY. Production routing uses the registered
+        ``source_connection.secret_scope``; shared code never infers a scope.
+        """
+        return None
+
+    def validate_connection_metadata(self, connection) -> None:
+        """Raise ValueError when non-secret connection metadata is unusable.
+
+        Never inspects or reports a credential.
+        """
+        c = dict(connection or {})
+        if not (c.get("secret_scope") or "").strip():
+            raise ValueError(
+                f"connection {c.get('connection_id')!r} has no secret_scope; "
+                f"register a secret scope for this {self.source_system} connection")
+
+    # ---------------------------------------------------------- column policy
+    def apply_column_policy(self, column_metadata, proposed_mapping):
+        """Normalize a proposed type mapping through this source's column policy.
+
+        The base behavior preserves the proposed mapping, includes the column,
+        and treats it as writable. A concrete adapter overrides this to express
+        its own dialect rules, returning the same normalized result so shared
+        notebooks stay source-neutral.
+        """
+        return ColumnPolicyResult(
+            include_column=True,
+            mapping_status=proposed_mapping.status,
+            mapping_fidelity=proposed_mapping.fidelity,
+            notes=proposed_mapping.notes or "",
+            is_writable=True,
+            requires_review=(proposed_mapping.status or "").upper() == "REVIEW",
+            policy_code=None,
+        )
+
+    @staticmethod
+    def _flag(value) -> bool:
+        """Interpret a source metadata flag (int, bool, or string) as boolean."""
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "y")
+        return bool(value)

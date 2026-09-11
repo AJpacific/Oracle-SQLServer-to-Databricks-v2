@@ -19,7 +19,6 @@
 
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
-from pyspark.sql.types import DateType, TimestampType
 
 dbutils.widgets.text("source_table_id", "")
 dbutils.widgets.text("run_id", "")
@@ -105,6 +104,8 @@ started = now_utc()
 current_stage = failcls.ETL_READ
 failure_already_logged = False
 etl_op = "ETL_FULL"
+# Resolved before any data is touched; every audit path reads its boundaries.
+work_unit = None
 
 def log_etl(op, status, err, s_count, t_count, extra=None):
     fields = {
@@ -167,6 +168,14 @@ def fail_etl(stage, category, message, etl_status, s_count=None, t_count=None,
         print(f"  [warn] could not record ETL status: {failcls.sanitize_message(e)[:200]}")
     payload = {"failure_stage": stage, "error_category": category,
                "retry_eligible": False}
+    # A failed attempt must hand the SAME frozen interval to the next retry.
+    if work_unit is not None:
+        payload.update(work_unit.audit_fields(attempt_number))
+    elif is_etl_retry:
+        payload.update({"lower_watermark": retry_lower_wm,
+                        "upper_watermark": retry_upper_wm,
+                        "parent_run_id": parent_run_id,
+                        "attempt_number": attempt_number})
     if extra:
         payload.update(extra)
     try:
@@ -194,66 +203,56 @@ try:
                  "INCREMENTAL ETL requires an etl_watermark_column present in Bronze",
                  "ETL_CONFIG_ERROR")
 
-    upper_etl_wm = None
+    # One authoritative execution boundary. Bronze filtering, interval
+    # replacement, reconciliation, the success audit, every failure audit, and
+    # the checkpoint all read from this single work unit, so the processed and
+    # the recorded interval can never disagree.
     lower_bound_col = upper_bound_col = None
-    if effective_mode == "INCREMENTAL":
-        # Typed comparison only: a DATE/TIMESTAMP Bronze column is never compared
-        # against a raw string, which would be a lexical comparison.
-        wm_type = bronze_schema[etl_wm_col].dataType
-        if isinstance(wm_type, TimestampType):
-            cast_to = "timestamp"
-        elif isinstance(wm_type, DateType):
-            cast_to = "date"
-        else:
+    if effective_mode == "FULL":
+        work_unit = etlwu.build_full_work_unit()
+        bronze_df = spark.table(bronze_fqn)
+    else:
+        cast_to = etlwu.resolve_cast(
+            bronze_schema[etl_wm_col].dataType.simpleString())
+        if cast_to is None:
             fail_etl(failcls.ETL_READ, failcls.CONFIGURATION_ERROR,
                      f"ETL watermark column {etl_wm_col!r} has unsupported type "
-                     f"{wm_type.simpleString()}; only DATE and TIMESTAMP are supported",
-                     "ETL_CONFIG_ERROR")
+                     f"{bronze_schema[etl_wm_col].dataType.simpleString()}; "
+                     "only DATE and TIMESTAMP are supported", "ETL_CONFIG_ERROR")
 
         wm_sql = quote_databricks(etl_wm_col)
         if is_etl_retry:
-            # Replay the ORIGINAL frozen interval: never recompute Bronze MAX,
-            # never widen or move the boundaries.
-            if not retry_upper_wm:
-                fail_etl(failcls.ETL_READ, failcls.CONFIGURATION_ERROR,
-                         "RETRY_ETL for an incremental table requires "
-                         "retry_upper_watermark from the failed attempt",
-                         "ETL_CONFIG_ERROR")
-            upper_raw = retry_upper_wm
-            effective_lower = retry_lower_wm
+            # Replay the ORIGINAL frozen interval: Bronze MAX is never recomputed,
+            # so rows arriving after the failed attempt are not swept in.
+            raw_lower, raw_upper = retry_lower_wm, retry_upper_wm
             print(f"  RETRY_ETL: replaying frozen interval "
-                  f"({effective_lower}, {retry_upper_wm}]")
+                  f"({raw_lower}, {raw_upper}]")
         else:
-            upper_raw = spark.table(bronze_fqn).agg(
+            raw_lower = last_etl_wm
+            raw_upper = spark.table(bronze_fqn).agg(
                 F.max(F.col(wm_sql)).alias("m")).collect()[0]["m"]
-            effective_lower = last_etl_wm
 
-        if upper_raw is None:
+        if raw_upper is None and not is_etl_retry:
             print("  no Bronze rows for the ETL watermark; nothing to process.")
-            upper_etl_wm = last_etl_wm
+            work_unit = etlwu.EtlWorkUnit(
+                mode="INCREMENTAL", lower_watermark=raw_lower,
+                upper_watermark=raw_lower, watermark_column=etl_wm_col,
+                watermark_cast=cast_to, is_retry=False)
             bronze_df = spark.table(bronze_fqn).where(F.lit(False))
         else:
-            # Freeze the upper bound before any processing; never recomputed later.
-            canonical_upper = sqlb.canonical_watermark_string(upper_raw, strict=True)
-            upper_etl_wm = (canonical_upper[:10] if cast_to == "date"
-                            else canonical_upper)
-            upper_bound_col = F.lit(upper_etl_wm).cast(cast_to)
+            try:
+                work_unit = etlwu.build_incremental_work_unit(
+                    etl_wm_col, cast_to, raw_lower, raw_upper,
+                    is_retry=is_etl_retry, parent_run_id=parent_run_id)
+            except ValueError as bound_error:
+                fail_etl(failcls.ETL_READ, failcls.CONFIGURATION_ERROR,
+                         str(bound_error), "ETL_CONFIG_ERROR")
+            upper_bound_col = F.lit(work_unit.upper_watermark).cast(cast_to)
             cond = F.col(wm_sql) <= upper_bound_col
-            if effective_lower is not None:
-                try:
-                    canonical_lower = sqlb.canonical_watermark_string(
-                        effective_lower, strict=True)
-                except ValueError:
-                    fail_etl(failcls.ETL_READ, failcls.CONFIGURATION_ERROR,
-                             f"ETL lower watermark {effective_lower!r} is not a "
-                             "parseable temporal value", "ETL_CONFIG_ERROR")
-                lower_literal = (canonical_lower[:10] if cast_to == "date"
-                                 else canonical_lower)
-                lower_bound_col = F.lit(lower_literal).cast(cast_to)
+            if work_unit.lower_watermark is not None:
+                lower_bound_col = F.lit(work_unit.lower_watermark).cast(cast_to)
                 cond = cond & (F.col(wm_sql) > lower_bound_col)
             bronze_df = spark.table(bronze_fqn).where(cond)
-    else:
-        bronze_df = spark.table(bronze_fqn)
 
     bronze_df = bronze_df.cache()
     input_count = bronze_df.count()
@@ -520,18 +519,24 @@ try:
         "last_successful_etl_run_ts": now_utc().strftime("%Y-%m-%d %H:%M:%S.%f"),
         "etl_current_status": "ETL_SUCCEEDED", "etl_error_message": None,
     }
-    if effective_mode == "INCREMENTAL" and upper_etl_wm is not None:
-        etl_fields["last_etl_watermark_value"] = upper_etl_wm
+    # Advances only to the frozen upper bound, and only after reconciliation.
+    committed_watermark = etlwu.checkpoint_value(work_unit, recon_result.passed)
+    if committed_watermark is not None:
+        etl_fields["last_etl_watermark_value"] = committed_watermark
     repo.update_control(src_id, etl_fields)
     log_etl(etl_op, "SUCCEEDED", None, input_count, valid_count,
-            extra={"extracted_row_count": input_count, "applied_row_count": valid_count,
+            extra={"extracted_row_count": input_count,
+                   "applied_row_count": valid_count,
                    "rejected_row_count": rejected_distinct,
-                   "lower_watermark": last_etl_wm, "upper_watermark": upper_etl_wm})
+                   **work_unit.audit_fields(attempt_number)})
     print(f"  ETL SUCCEEDED: input={input_count} valid={valid_count} "
-          f"rejected={rejected_distinct} recon={recon_result.status}")
+          f"rejected={rejected_distinct} recon={recon_result.status} "
+          f"interval=({work_unit.lower_watermark}, {work_unit.upper_watermark}]")
     result = {"status": "SUCCEEDED", "source_table_id": src_id, "run_id": run_id,
               "mode": effective_mode, "input": input_count, "valid": valid_count,
-              "rejected": rejected_distinct}
+              "rejected": rejected_distinct,
+              "lower_watermark": work_unit.lower_watermark,
+              "upper_watermark": work_unit.upper_watermark}
 
 except Exception as e:
     # A specialized handler already recorded the accurate stage; never relabel it
@@ -553,7 +558,9 @@ except Exception as e:
         try:
             log_etl(etl_op, "FAILED", msg[:1000], None, None,
                     extra={"failure_stage": cls.stage, "error_category": cls.category,
-                           "retry_eligible": cls.retry_eligible})
+                           "retry_eligible": cls.retry_eligible,
+                           **(work_unit.audit_fields(attempt_number)
+                              if work_unit is not None else {})})
         except Exception as log_error:
             print(f"  [warn] could not write ETL audit: {log_error}")
     print(f"  ETL FAILED {src_id} at {current_stage}: "

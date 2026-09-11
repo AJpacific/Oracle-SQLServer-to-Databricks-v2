@@ -81,7 +81,7 @@ def capture_upper_watermark(adapter, database, schema, table, wm_col, wm_type, s
         adapter, adapter.upper_watermark_query(database, schema, table, wm_col, wm_type),
         source_server=server, source_database=database).collect()
     raw = rows[0]["UPPER_WATERMARK"] if rows else None
-    canonical = None if raw is None else sqlb.canonical_watermark_string(raw, strict=True)
+    canonical = None if raw is None else wm.canonical_watermark_string(raw, strict=True)
     return raw, canonical
 
 # COMMAND ----------

@@ -115,7 +115,7 @@ for schema in schemas:
                     for c in cols
                 ]
                 col_count = len(cols)
-                comp = classify_table_compatibility(statuses)
+                comp = assess_common.summarize_table_compatibility(statuses)
                 complexity = assess_common.classify_complexity(row_count, col_count)
             except Exception as e:
                 msg = f"column assessment failed: {failcls.sanitize_message(e)[:400]}"

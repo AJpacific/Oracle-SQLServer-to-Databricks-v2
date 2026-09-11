@@ -30,14 +30,14 @@ try:
         sqlserver_fqn,
         escape_string_literal,
     )
-    from src.sql_builder import canonical_watermark_string
+    from src.watermark import canonical_watermark_string
 except ModuleNotFoundError:
     from identifiers import (
         quote_sqlserver,
         sqlserver_fqn,
         escape_string_literal,
     )
-    from sql_builder import canonical_watermark_string
+    from watermark import canonical_watermark_string
 
 
 # Eligible SQL Server temporal watermark families (upper-cased, precision
@@ -382,41 +382,52 @@ def table_statistics_query(database: str = None, owner: str = None) -> str:
     """SQL Server table statistics from catalog metadata (ROW_COUNT_METHOD=CATALOG).
 
     ROW_COUNT is the catalog row count of the heap/clustered partitions
-    (``index_id IN (0,1)``) - it is catalog metadata, not a ``COUNT_BIG(*)``
+    (``index_id IN (0,1)``). It is catalog metadata, not a ``COUNT_BIG(*)``
     executed against the table, so it is labelled CATALOG rather than EXACT.
 
-    SIZE_MB sums ``total_pages`` over the allocation units reached from each
-    partition via ``allocation_units.container_id = partitions.partition_id``.
-    That container relationship covers IN_ROW_DATA and ROW_OVERFLOW_DATA units;
-    LOB_DATA units whose container is an allocation-unit id rather than a
-    partition id are NOT counted. SIZE_MB is therefore a conservative
-    lower bound on reserved size across the base table and its indexes, not a
-    complete reserved-size figure. Confirming the complete relationship requires
-    a live SQL Server check and is documented as a manual validation step.
+    SIZE_MB is the total **reserved** size of the table: base heap or clustered
+    storage plus all nonclustered indexes, covering every allocation-unit type:
 
-    Row count and size are aggregated in separate CTEs and joined by object_id so
-    the row count is never multiplied by the index/allocation-unit join.
+      * IN_ROW_DATA (type 1) and ROW_OVERFLOW_DATA (type 3) are reached through
+        ``allocation_units.container_id = partitions.hobt_id``
+      * LOB_DATA (type 2) is reached through
+        ``allocation_units.container_id = partitions.partition_id``
+
+    The two relationships are collected with UNION ALL rather than an OR join, so
+    each allocation unit contributes exactly once and neither branch duplicates
+    the other's rows. Row count and size are aggregated in independent CTEs and
+    joined by object_id, so the row count is never multiplied by the allocation
+    join.
     """
     p = _ss_prefix(database)
     return (
-        "(WITH rc AS ("
+        "(WITH row_counts AS ("
         "SELECT pr.object_id, SUM(pr.rows) AS ROW_COUNT "
         f"FROM {p}partitions pr WHERE pr.index_id IN (0,1) "
         "GROUP BY pr.object_id"
-        "), sz AS ("
-        "SELECT pr.object_id, SUM(au.total_pages) AS total_pages "
+        "), allocation_pages AS ("
+        "SELECT pr.object_id, au.total_pages AS total_pages "
         f"FROM {p}partitions pr "
-        f"JOIN {p}allocation_units au ON au.container_id = pr.partition_id "
-        "GROUP BY pr.object_id"
+        f"JOIN {p}allocation_units au "
+        "ON au.container_id = pr.hobt_id AND au.type IN (1,3) "
+        "UNION ALL "
+        "SELECT pr.object_id, au.total_pages AS total_pages "
+        f"FROM {p}partitions pr "
+        f"JOIN {p}allocation_units au "
+        "ON au.container_id = pr.partition_id AND au.type = 2"
+        "), size_pages AS ("
+        "SELECT object_id, SUM(total_pages) AS total_pages "
+        "FROM allocation_pages GROUP BY object_id"
         ") "
         "SELECT s.name AS SCHEMA_NAME, t.name AS OBJECT_NAME, "
-        "rc.ROW_COUNT AS ROW_COUNT, "
-        "CAST(sz.total_pages * 8.0 / 1024 AS DECIMAL(18,2)) AS SIZE_MB, "
+        "COALESCE(row_counts.ROW_COUNT, 0) AS ROW_COUNT, "
+        "CAST(COALESCE(size_pages.total_pages, 0) * 8.0 / 1024 "
+        "AS DECIMAL(18,2)) AS SIZE_MB, "
         "'CATALOG' AS ROW_COUNT_METHOD "
         f"FROM {p}tables t "
         f"JOIN {p}schemas s ON t.schema_id = s.schema_id "
-        "LEFT JOIN rc ON rc.object_id = t.object_id "
-        "LEFT JOIN sz ON sz.object_id = t.object_id "
+        "LEFT JOIN row_counts ON row_counts.object_id = t.object_id "
+        "LEFT JOIN size_pages ON size_pages.object_id = t.object_id "
         f"WHERE {_ss_schema_filter(owner)}"
         ") q"
     )

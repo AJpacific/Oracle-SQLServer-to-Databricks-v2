@@ -132,17 +132,20 @@ try:
         quote_databricks, quote_oracle, oracle_fqn, databricks_fqn,
         escape_string_literal,
     )
-    from src.crosssourcetypemapper import CrossSourceTypeMapper, ColumnMappingResult
+    from src.crosssourcetypemapper import (
+        CrossSourceTypeMapper, ColumnMappingResult, classify_table_compatibility,
+    )
     from src.strategy import (
         detect_strategy, pick_watermark_column, is_valid_strategy,
         FULL_LOAD, WATERMARK, PRIMARY_KEY, HYBRID, WATERMARK_CANDIDATE_TYPES,
     )
     from src import ddl_builder as ddl
-    from src import sql_builder as sqlb
+    from src import watermark as wm
     from src import reconciliation as recon
     from src import failure_classifier as failcls
     from src import sql_object_converter as sqlconv
     from src import dq_rules as dqr
+    from src import etl_work_unit as etlwu
     from src import assessment_common as assess_common
     from src import inventory_common as inv_common
     from src import sql_object_assessment_common as sqlobj_common
@@ -158,17 +161,20 @@ except ModuleNotFoundError:
         quote_databricks, quote_oracle, oracle_fqn, databricks_fqn,
         escape_string_literal,
     )
-    from crosssourcetypemapper import CrossSourceTypeMapper, ColumnMappingResult
+    from crosssourcetypemapper import (
+        CrossSourceTypeMapper, ColumnMappingResult, classify_table_compatibility,
+    )
     from strategy import (
         detect_strategy, pick_watermark_column, is_valid_strategy,
         FULL_LOAD, WATERMARK, PRIMARY_KEY, HYBRID, WATERMARK_CANDIDATE_TYPES,
     )
     import ddl_builder as ddl
-    import sql_builder as sqlb
+    import watermark as wm
     import reconciliation as recon
     import failure_classifier as failcls
     import sql_object_converter as sqlconv
     import dq_rules as dqr
+    import etl_work_unit as etlwu
     import assessment_common as assess_common
     import inventory_common as inv_common
     import sql_object_assessment_common as sqlobj_common
@@ -202,12 +208,6 @@ def _secret_provider(scope, key):
         return None
 
 
-def _scope_for_system(source_system):
-    "Return the secret scope holding this source system's connection secrets."
-    canonical = normalize_source_system(source_system)
-    return SECRET_SCOPE if canonical == "oracle" else SQLSERVER_SECRET_SCOPE
-
-
 def _config_dir_candidates():
     "Directories that may hold the config/*.yaml type rule files."
     dirs = [os.path.join(repo_root, "config")]
@@ -217,46 +217,84 @@ def _config_dir_candidates():
     return dirs
 
 
-def _type_rules_path_for(source_system):
-    "Resolve the type-rules YAML path for a source system, else None (adapter default)."
-    canonical = normalize_source_system(source_system)
-    if canonical == "sqlserver":
-        names = ["type_rules_sqlserver.yaml"]
-    else:
-        names = ["type_rules_oracle.yaml", "type_rules.yaml"]
-    for d in _config_dir_candidates():
-        for name in names:
-            path = os.path.join(d, name)
-            if os.path.isfile(path):
-                return path
-    return None
+def _resolve_type_rules_path(adapter):
+    """Locate the rules file the ADAPTER names; never inferred from the source.
+
+    A future source supplies its own filename and needs no change here. A
+    missing or unlocatable file fails loudly with the source token and filename
+    (never a credential).
+    """
+    filename = adapter.type_rules_file()
+    if not filename:
+        raise ValueError(
+            f"source {adapter.source_system!r} does not declare a type-rules file")
+    for directory in _config_dir_candidates():
+        path = os.path.join(directory, filename)
+        if os.path.isfile(path):
+            return path
+    raise FileNotFoundError(
+        f"type-rules file {filename!r} for source {adapter.source_system!r} was "
+        f"not found in: {', '.join(_config_dir_candidates())}")
+
+
+def _legacy_scope_for(adapter):
+    """COMPATIBILITY ONLY legacy scope, named by the adapter and read from a widget.
+
+    Returns None when the source declares no legacy widget, so an unregistered
+    source can never fall through to another source's scope.
+    """
+    widget = adapter.legacy_secret_scope_widget()
+    if not widget:
+        return None
+    try:
+        return dbutils.widgets.get(widget).strip() or None
+    except Exception:
+        return None
+
+
+def _build_adapter(source_system, source_server=None, source_database=None,
+                   secret_scope=None, extra_config=None):
+    """Construct an adapter and attach its own type-rules path.
+
+    normalize_source_system (inside the factory) rejects an unregistered source,
+    so an unknown token fails explicitly instead of defaulting to any source.
+    """
+    adapter = get_source_adapter(
+        source_system, source_server=source_server,
+        source_database=source_database, secret_provider=_secret_provider,
+        secret_scope=secret_scope, config=dict(extra_config or {}))
+    config = dict(adapter.config)
+    config["type_rules_path"] = _resolve_type_rules_path(adapter)
+    adapter.config = config
+    return adapter
+
+
+def build_adapter(source_system, source_server=None, source_database=None,
+                  secret_scope=None):
+    "Public helper: a configured adapter for a source token (no secrets logged)."
+    return _build_adapter(source_system, source_server=source_server,
+                          source_database=source_database,
+                          secret_scope=secret_scope)
 
 
 def get_source_adapter_for_row(row):
     """Return the source adapter for one control-table row.
 
-    The adapter is chosen purely from ``source_system`` and carries the row's
-    ``source_server`` / ``source_database`` plus a secret provider bound to the
-    correct scope, so callers issue adapter methods with no source-specific
-    branching.
+    LEGACY FALLBACK ONLY, used when a row predates the connection registry. The
+    scope comes from the source's own declared legacy widget; production routing
+    goes through get_source_adapter_routed() and the registered connection.
     """
     d = row.asDict() if hasattr(row, "asDict") else dict(row)
     source_system = d.get("source_system") or "oracle"
-    source_server = d.get("source_server")
-    source_database = d.get("source_database")
-    scope = _scope_for_system(source_system)
-    config = {}
-    trp = _type_rules_path_for(source_system)
-    if trp:
-        config["type_rules_path"] = trp
-    return get_source_adapter(
-        source_system,
-        source_server=source_server,
-        source_database=source_database,
-        secret_provider=_secret_provider,
-        secret_scope=scope,
-        config=config,
-    )
+    probe = get_source_adapter(source_system)
+    scope = _legacy_scope_for(probe)
+    if not scope:
+        raise ValueError(
+            f"source {source_system!r} has no registered connection and no legacy "
+            "secret-scope widget; supply connection_id")
+    return _build_adapter(
+        source_system, source_server=d.get("source_server"),
+        source_database=d.get("source_database"), secret_scope=scope)
 
 
 def get_connection(connection_id):
@@ -270,10 +308,9 @@ def get_source_adapter_for_connection(connection, source_database=None,
                                       require_valid=True):
     """Build the source adapter described by a source_connection row.
 
-    All connection metadata (system, server, database, secret scope, TLS trust)
-    comes from the registered connection; credentials are read by the adapter
-    from that connection's secret scope. No secret value or credential-bearing
-    URL is ever returned or printed.
+    The registered ``secret_scope`` is authoritative: shared code never replaces
+    it and never infers a scope from the source system. A blank registered scope
+    fails clearly. No secret value or credential-bearing URL is ever returned.
     """
     c = connection.asDict() if hasattr(connection, "asDict") else dict(connection)
     if require_valid and not c.get("is_active"):
@@ -284,22 +321,17 @@ def get_source_adapter_for_connection(connection, source_database=None,
             f"connection {c.get('connection_id')!r} is not VALID "
             f"(status={c.get('connection_status')!r}); validate it first")
     source_system = c.get("source_system") or "oracle"
-    scope = c.get("secret_scope") or _scope_for_system(source_system)
     database = source_database or c.get("source_database")
-    config = {}
-    trp = _type_rules_path_for(source_system)
-    if trp:
-        config["type_rules_path"] = trp
+    extra = {}
     if c.get("trust_server_certificate") is not None:
-        config["trust_server_certificate"] = bool(c.get("trust_server_certificate"))
-    return get_source_adapter(
-        source_system,
-        source_server=c.get("source_server"),
-        source_database=database,
-        secret_provider=_secret_provider,
-        secret_scope=scope,
-        config=config,
-    )
+        extra["trust_server_certificate"] = bool(c.get("trust_server_certificate"))
+    adapter = _build_adapter(
+        source_system, source_server=c.get("source_server"),
+        source_database=database, secret_scope=(c.get("secret_scope") or "").strip()
+        or None, extra_config=extra)
+    # The source states its own metadata requirements (e.g. a mandatory database).
+    adapter.validate_connection_metadata(c)
+    return adapter
 
 
 def get_source_adapter_routed(row, require_valid=True):
@@ -438,14 +470,10 @@ def control_repo():
 
 
 def load_type_mapper(source_system="oracle"):
-    "Load the required source->Delta mapping rules for a source system."
-    trp = _type_rules_path_for(source_system)
-    adapter = get_source_adapter(
-        source_system,
-        config={"type_rules_path": trp} if trp else None,
-    )
-    print(f"[_common] loading {normalize_source_system(source_system)} type rules"
-          + (f" from {trp}" if trp else " (adapter default path)"))
+    "Load a source's Delta mapping rules using the file the adapter names."
+    adapter = build_adapter(source_system)
+    print(f"[_common] loading {adapter.source_system} type rules from "
+          f"{adapter.type_rules_file()}")
     return adapter.load_type_mapper()
 
 # COMMAND ----------

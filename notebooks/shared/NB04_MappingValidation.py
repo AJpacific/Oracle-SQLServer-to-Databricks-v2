@@ -33,6 +33,7 @@ print("Mappings to validate:", len(maps))
 
 results = []
 for r in maps:
+    d = r.asDict()
     src_id = r["source_table_id"]
     src_system = r["source_system"]
     conn_id = r["connection_id"]
@@ -40,17 +41,27 @@ for r in maps:
     status = (r["mapping_status"] or "").upper()
     fidelity = (r["fidelity"] or "").upper()
     dtype = r["databricks_delta_type"] or ""
+    policy_code = d.get("policy_code")
+    include_column = d.get("include_column")
+    is_writable = d.get("is_writable")
+    requires_review = d.get("requires_review")
 
     def _add(severity, rule, message):
         results.append((run_id, src_id, conn_id, src_system, schema, table, col,
                         severity, rule, message))
-    # Source-column safety policy is explicit and source-qualified.
-    if bool(r["is_hidden"]):
-        _add("ERROR", "SQLSERVER_HIDDEN_COLUMN",
-             "SQL Server hidden/system-generated column is blocked from automatic migration")
-    elif bool(r["is_computed"]):
-        _add("WARNING", "SQLSERVER_COMPUTED_COLUMN",
-             "SQL Server computed column requires explicit review before materialization")
+
+    # Canonical policy outcomes decided by the source adapter. This notebook
+    # reports them without interpreting any dialect metadata concept.
+    if include_column is False:
+        _add("ERROR", policy_code or "SOURCE_NON_WRITABLE_COLUMN",
+             "source column policy excludes this column from automatic migration")
+    elif is_writable is False:
+        severity = "WARNING" if requires_review else "INFO"
+        _add(severity, policy_code or "SOURCE_NON_WRITABLE_COLUMN",
+             "source column policy marks this column as not writable")
+    elif requires_review and policy_code:
+        _add("WARNING", policy_code,
+             "source column policy requires explicit review before materialization")
 
     # Contract 1: BLOCKED columns are hard errors - they stop a table migrating.
     if status == "BLOCKED":
@@ -66,7 +77,7 @@ for r in maps:
         _add(sev, f"{fidelity}_CONVERSION",
              f"{r['source_type']} -> {dtype}: {r['notes'] or fidelity.lower()}")
     # Contract 4: sanity - an empty target type is always an error.
-    if not dtype:
+    if not dtype and include_column is not False:
         _add("ERROR", "EMPTY_TARGET_TYPE",
              "resolved databricks_delta_type is empty")
 

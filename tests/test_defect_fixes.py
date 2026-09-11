@@ -233,6 +233,82 @@ class TestRuleValidationHardening(unittest.TestCase):
         dq.validate_rule({"rule_type": "NOT_NULL", "column_name": "anything"})
 
 
+class TestSanitizationCoverage(unittest.TestCase):
+    """Every sensitive form the persistence and notification paths may see."""
+
+    CASES = {
+        "password": "jdbc:sqlserver://h;password=hunter2;",
+        "pwd": "conn;pwd=hunter2;",
+        "user": "conn;user=scott;",
+        "username": "conn;username=scott;",
+        "client_secret": "client_secret=abc123secret",
+        "secret": "secret=abc123secret",
+        "token": "token=abc123secret",
+        "access_token": "access_token=abc123secret",
+        "refresh_token": "refresh_token=abc123secret",
+        "bearer": "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+        "basic": "Authorization: Basic dXNlcjpwYXNzd29yZDEyMw==",
+        "jdbc_userinfo": "jdbc:oracle:thin:@//scott:hunter2@host:1521/svc",
+        "url_userinfo": "https://admin:hunter2@host/path",
+        "sas_sig": "https://acct.blob.core.windows.net/c?sig=abc123secret&se=x",
+    }
+    LEAKS = ("hunter2", "scott", "abc123secret",
+             "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+             "dXNlcjpwYXNzd29yZDEyMw==")
+
+    def test_every_sensitive_form_is_redacted(self):
+        for label, raw in self.CASES.items():
+            out = fc.sanitize_message(raw)
+            for leak in self.LEAKS:
+                self.assertNotIn(leak, out, f"{label}: {out}")
+
+    def test_webhook_token_redacted(self):
+        raw = ("https://outlook.office.com/webhook/abc-def@ghi/IncomingWebhook/"
+               "tok123secret/xyz")
+        for out in (fc.sanitize_message(raw), fc.redact_url(raw)):
+            self.assertNotIn("tok123secret", out)
+
+    def test_databricks_token_redacted(self):
+        out = fc.sanitize_message("Authorization: Bearer dapi1234567890abcdef")
+        self.assertNotIn("dapi1234567890abcdef", out)
+
+    def test_sanitization_is_idempotent(self):
+        for raw in self.CASES.values():
+            once = fc.sanitize_message(raw)
+            self.assertEqual(once, fc.sanitize_message(once))
+
+    def test_safe_diagnostic_context_is_retained(self):
+        out = fc.sanitize_message(
+            "ORA-00942: table or view HR.EMPLOYEES does not exist")
+        self.assertIn("ORA-00942", out)
+        self.assertIn("HR.EMPLOYEES", out)
+
+    def test_safe_identifiers_not_rewritten(self):
+        out = fc.sanitize_message(
+            "target dbo.user_tokens in database AppDb schema sales")
+        self.assertIn("dbo.user_tokens", out)
+        self.assertIn("AppDb", out)
+        self.assertIn("sales", out)
+
+    def test_classification_preserved_through_sanitization(self):
+        classification = fc.classify_failure(
+            Exception("Connection refused; password=hunter2"), fc.CONNECTION)
+        self.assertEqual(classification.category, fc.TRANSIENT_CONNECTION)
+        self.assertNotIn("hunter2", classification.sanitized_message)
+
+    def test_adapter_redaction_uses_the_shared_sanitizer(self):
+        from source_adapters.factory import get_source_adapter
+        adapter = get_source_adapter("oracle")
+        out = adapter.redact_jdbc_url(
+            "jdbc:oracle:thin:@//scott:hunter2@host:1521/svc?token=abc123secret")
+        self.assertNotIn("hunter2", out)
+        self.assertNotIn("abc123secret", out)
+
+    def test_none_and_empty_are_safe(self):
+        self.assertEqual(fc.sanitize_message(None), "")
+        self.assertEqual(fc.redact_url(None), "")
+
+
 class TestDefaultValueConversion(unittest.TestCase):
     """A configured DEFAULT_VALUE that cannot be represented must fail."""
 

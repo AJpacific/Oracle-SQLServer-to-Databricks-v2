@@ -68,14 +68,38 @@ class TestSqlServerDiscovery(unittest.TestCase):
         self.assertIn("allocation_units", q)
 
     def test_row_count_not_multiplied_by_allocation_join(self):
-        # Row count and size are aggregated in separate CTEs and joined by
-        # object_id, so the index/allocation-unit join cannot duplicate rows.
+        # Row count and size are aggregated in independent CTEs and joined by
+        # object_id, so the allocation join cannot duplicate row counts.
         q = ss.table_statistics_query("SourceDb")
-        self.assertIn("WITH rc AS", q)
+        self.assertIn("WITH row_counts AS", q)
+        self.assertIn("allocation_pages AS", q)
+        self.assertIn("size_pages AS", q)
         self.assertIn("index_id IN (0,1)", q)
-        # The row-count CTE must not join allocation_units.
-        rc_cte = q.split("), sz AS")[0]
-        self.assertNotIn("allocation_units", rc_cte)
+        row_cte = q.split("), allocation_pages AS")[0]
+        self.assertNotIn("allocation_units", row_cte)
+
+    def test_allocation_units_use_correct_containers(self):
+        q = ss.table_statistics_query("SourceDb")
+        # IN_ROW_DATA (1) and ROW_OVERFLOW_DATA (3) hang off hobt_id.
+        self.assertIn("au.container_id = pr.hobt_id AND au.type IN (1,3)", q)
+        # LOB_DATA (2) hangs off partition_id.
+        self.assertIn("au.container_id = pr.partition_id AND au.type = 2", q)
+
+    def test_allocation_branches_use_union_all_not_or_join(self):
+        q = ss.table_statistics_query("SourceDb")
+        self.assertIn("UNION ALL", q)
+        allocation = q.split("allocation_pages AS")[1].split("size_pages AS")[0]
+        self.assertNotIn(" OR ", allocation)
+
+    def test_sizes_aggregated_once_before_join(self):
+        q = ss.table_statistics_query("SourceDb")
+        self.assertIn("SELECT object_id, SUM(total_pages) AS total_pages "
+                      "FROM allocation_pages GROUP BY object_id", q)
+
+    def test_zero_allocation_tables_are_not_null(self):
+        q = ss.table_statistics_query("SourceDb")
+        self.assertIn("COALESCE(size_pages.total_pages, 0)", q)
+        self.assertIn("COALESCE(row_counts.ROW_COUNT, 0)", q)
 
     def test_no_table_wide_count_in_broad_assessment(self):
         for q in (ss.table_statistics_query("SourceDb"),

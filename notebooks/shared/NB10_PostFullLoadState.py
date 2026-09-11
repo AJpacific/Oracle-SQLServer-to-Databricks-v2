@@ -75,7 +75,7 @@ for r in loaded:
                 adapter = get_source_adapter_routed(r)
                 new_wm = adapter.initial_watermark_value(r["watermark_data_type"])
             else:
-                new_wm = sqlb.canonical_watermark_string(val, strict=True)
+                new_wm = wm.canonical_watermark_string(val, strict=True)
 
         repo.update_control(src_id, {
             "initial_load_completed": True,

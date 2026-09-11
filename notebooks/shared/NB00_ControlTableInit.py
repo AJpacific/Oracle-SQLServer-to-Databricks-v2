@@ -296,6 +296,9 @@ _ensure_columns("resolved_column_mappings", _SOURCE_ID_ONLY + [
     ("is_identity", "BOOLEAN"), ("is_computed", "BOOLEAN"),
     ("is_hidden", "BOOLEAN"), ("is_rowversion", "BOOLEAN"),
     ("source_type_schema", "STRING"),
+    # Canonical, source-neutral column-policy outcome decided by the adapter.
+    ("include_column", "BOOLEAN"), ("is_writable", "BOOLEAN"),
+    ("requires_review", "BOOLEAN"), ("policy_code", "STRING"),
 ])
 _ensure_columns("mapping_validation_results", _SOURCE_ID_ONLY)
 _ensure_columns("table_load_decisions", _SOURCE_ID_ONLY)

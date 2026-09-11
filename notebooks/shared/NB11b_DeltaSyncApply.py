@@ -98,7 +98,7 @@ if recovery_action in ("RETRY_CHECKPOINT_ONLY", "RETRY_QUEUE_FINALIZATION_ONLY")
                     "error_message": None,
                 }
                 if strategy in ("WATERMARK", "HYBRID"):
-                    fields["last_watermark_value"] = sqlb.canonical_watermark_string(
+                    fields["last_watermark_value"] = wm.canonical_watermark_string(
                         upper_wm, strict=True)
                 repo.update_control(src_id, fields)
                 spark.sql(f"""
@@ -215,7 +215,7 @@ def _delta_wm_literal(value, family, adapter):
         raise ValueError(f"Unsupported non-temporal watermark type: {family!r}")
     if value is None:
         raise ValueError("watermark bound value is required")
-    canonical = sqlb.canonical_watermark_string(value, strict=True)
+    canonical = wm.canonical_watermark_string(value, strict=True)
     escaped = canonical.replace("'", "''")
     return f"CAST('{escaped}' AS TIMESTAMP)"
 
@@ -453,7 +453,7 @@ for q in queue:
         }
         try:
             if strategy in ("WATERMARK", "HYBRID"):
-                control_fields["last_watermark_value"] = sqlb.canonical_watermark_string(
+                control_fields["last_watermark_value"] = wm.canonical_watermark_string(
                     upper_wm, strict=True)
             repo.update_control(src_id, control_fields)
             _update_queue("CHECKPOINT_COMMITTED", {"checkpoint_committed_ts": now_utc()})

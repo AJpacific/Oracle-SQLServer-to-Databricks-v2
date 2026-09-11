@@ -22,12 +22,14 @@ try:
         escape_string_literal,
         oracle_fqn
     )
+    from src.watermark import canonical_watermark_string as _canonical_watermark_string
 except ModuleNotFoundError:
     from identifiers import (
         quote_oracle,
         escape_string_literal,
         oracle_fqn
     )
+    from watermark import canonical_watermark_string as _canonical_watermark_string
 
 
 # --------------------------------------------------------------------- metadata
@@ -156,38 +158,12 @@ def _iso_to_oracle_tz(value) -> str:
 
 
 def canonical_watermark_string(value, strict=False):
-    """Serialize a watermark value to a canonical ISO-8601 UTC string.
+    """Deprecated alias: the canonical serializer is source-neutral.
 
-    Timezone-aware values are converted to UTC and rendered with a trailing 'Z'.
-    Naive datetimes and DATE/TIMESTAMP strings are treated as UTC per policy.
-    Microseconds are always present. None maps to None. With strict=True an
-    unparseable temporal value raises ValueError (use for checkpoint writes);
-    otherwise it is returned unchanged (backward-compatible read tolerance).
+    Kept so existing Oracle-side callers keep working; new code should import
+    from src/watermark.py directly.
     """
-    if value is None:
-        return None
-    from datetime import datetime, date, timezone
-    if isinstance(value, datetime):
-        d = value
-    elif isinstance(value, date):
-        d = datetime(value.year, value.month, value.day)
-    else:
-        s = str(value).strip()
-        if "T" not in s and " " in s:
-            s = s.replace(" ", "T", 1)
-        s = s.replace(" ", "")  # drop any space before a tz offset
-        if s.endswith("Z"):
-            s = s[:-1] + "+00:00"
-        try:
-            d = datetime.fromisoformat(s)
-        except ValueError:
-            if strict:
-                raise ValueError(f"Unparseable temporal watermark: {value!r}")
-            return str(value)
-    if d.tzinfo is None:
-        d = d.replace(tzinfo=timezone.utc)
-    d = d.astimezone(timezone.utc)
-    return d.isoformat(timespec="microseconds").replace("+00:00", "Z")
+    return _canonical_watermark_string(value, strict=strict)
 
 
 def _normalize_family(family) -> str:

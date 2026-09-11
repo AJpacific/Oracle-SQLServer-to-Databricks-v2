@@ -19,13 +19,19 @@ from __future__ import annotations
 import os
 
 try:
-    from src.source_adapters.base import SourceAdapter
+    from src.source_adapters.base import (
+        SourceAdapter, ColumnPolicyResult, SOURCE_HIDDEN_COLUMN,
+        SOURCE_GENERATED_COLUMN, SOURCE_BINARY_VERSION_COLUMN,
+    )
     from src import sqlserver_sql_builder as ssb
     from src import partitioning as part
     from src.identifiers import validate_server, validate_database
     from src.crosssourcetypemapper import CrossSourceTypeMapper
 except ModuleNotFoundError:
-    from source_adapters.base import SourceAdapter
+    from source_adapters.base import (
+        SourceAdapter, ColumnPolicyResult, SOURCE_HIDDEN_COLUMN,
+        SOURCE_GENERATED_COLUMN, SOURCE_BINARY_VERSION_COLUMN,
+    )
     import sqlserver_sql_builder as ssb
     import partitioning as part
     from identifiers import validate_server, validate_database
@@ -227,6 +233,64 @@ class SqlServerSourceAdapter(SourceAdapter):
     # ------------------------------------------------------------ type mapper
     def load_type_mapper(self):
         return CrossSourceTypeMapper.from_yaml_path(self._type_rules_path())
+
+    def type_rules_file(self) -> str:
+        return "type_rules_sqlserver.yaml"
+
+    def legacy_secret_scope_widget(self):
+        return "sqlserver_secret_scope"
+
+    def validate_connection_metadata(self, connection) -> None:
+        super().validate_connection_metadata(connection)
+        c = dict(connection or {})
+        if not (c.get("source_database") or "").strip():
+            raise ValueError(
+                f"connection {c.get('connection_id')!r} has no source_database; "
+                "SQL Server connections require one")
+
+    # ---------------------------------------------------------- column policy
+    def apply_column_policy(self, column_metadata, proposed_mapping):
+        """SQL Server column policy, expressed as canonical policy codes.
+
+        A hidden/system-generated column is excluded from the target write
+        projection; a computed column is not an ordinary writable source column
+        and needs sign-off; a rowversion/timestamp column keeps its existing
+        binary mapping but is flagged as non-writable version metadata.
+        """
+        meta = {str(k).lower(): v for k, v in dict(column_metadata or {}).items()}
+        status = proposed_mapping.status
+        fidelity = proposed_mapping.fidelity
+        notes = proposed_mapping.notes or ""
+
+        if self._flag(meta.get("is_hidden")):
+            return ColumnPolicyResult(
+                include_column=False, mapping_status="BLOCKED",
+                mapping_fidelity="UNKNOWN",
+                notes="hidden/system-generated column is not migrated automatically",
+                is_writable=False, requires_review=True,
+                policy_code=SOURCE_HIDDEN_COLUMN)
+
+        if self._flag(meta.get("is_computed")):
+            return ColumnPolicyResult(
+                include_column=True, mapping_status="REVIEW",
+                mapping_fidelity="UNKNOWN",
+                notes="computed column requires explicit approval before materialization",
+                is_writable=False, requires_review=True,
+                policy_code=SOURCE_GENERATED_COLUMN)
+
+        if self._flag(meta.get("is_rowversion")):
+            return ColumnPolicyResult(
+                include_column=True, mapping_status=status,
+                mapping_fidelity=fidelity,
+                notes=notes or "row-version column is source-maintained binary metadata",
+                is_writable=False, requires_review=False,
+                policy_code=SOURCE_BINARY_VERSION_COLUMN)
+
+        return ColumnPolicyResult(
+            include_column=True, mapping_status=status,
+            mapping_fidelity=fidelity, notes=notes, is_writable=True,
+            requires_review=(status or "").upper() == "REVIEW",
+            policy_code=None)
 
     def _type_rules_path(self):
         override = self.config.get("type_rules_path")

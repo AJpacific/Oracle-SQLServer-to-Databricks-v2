@@ -16,13 +16,13 @@ from __future__ import annotations
 import os
 
 try:
-    from src.source_adapters.base import SourceAdapter
+    from src.source_adapters.base import SourceAdapter, ColumnPolicyResult
     from src import sql_builder as sqlb
     from src import strategy as strat
     from src import partitioning as part
     from src.crosssourcetypemapper import CrossSourceTypeMapper
 except ModuleNotFoundError:
-    from source_adapters.base import SourceAdapter
+    from source_adapters.base import SourceAdapter, ColumnPolicyResult
     import sql_builder as sqlb
     import strategy as strat
     import partitioning as part
@@ -144,6 +144,29 @@ class OracleSourceAdapter(SourceAdapter):
     # ------------------------------------------------------------ type mapper
     def load_type_mapper(self):
         return CrossSourceTypeMapper.from_yaml_path(self._type_rules_path())
+
+    def type_rules_file(self) -> str:
+        return "type_rules_oracle.yaml"
+
+    def legacy_secret_scope_widget(self):
+        return "secret_scope"
+
+    # ---------------------------------------------------------- column policy
+    def apply_column_policy(self, column_metadata, proposed_mapping):
+        """Oracle has no hidden/computed column concept in this contract.
+
+        The proposed mapping is preserved unchanged; only REVIEW requires
+        sign-off, matching the pre-refactor Oracle behavior exactly.
+        """
+        return ColumnPolicyResult(
+            include_column=True,
+            mapping_status=proposed_mapping.status,
+            mapping_fidelity=proposed_mapping.fidelity,
+            notes=proposed_mapping.notes or "",
+            is_writable=True,
+            requires_review=(proposed_mapping.status or "").upper() == "REVIEW",
+            policy_code=None,
+        )
 
     def _type_rules_path(self):
         override = self.config.get("type_rules_path")

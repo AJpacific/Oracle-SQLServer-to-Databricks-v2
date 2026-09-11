@@ -11,6 +11,11 @@ No Oracle or SQL Server SQL belongs in this module. Pure: no Spark, no dbutils.
 
 from __future__ import annotations
 
+try:
+    from src.crosssourcetypemapper import classify_table_compatibility
+except ModuleNotFoundError:
+    from crosssourcetypemapper import classify_table_compatibility
+
 # How a reported row count was obtained. A broad assessment never executes a
 # per-table COUNT(*), so EXACT is deliberately not a member of this set.
 CATALOG = "CATALOG"          # SQL Server catalog metadata (sys.partitions)
@@ -45,6 +50,15 @@ ASSESSMENT_UPDATE_FIELDS = (
     "row_count_method", "size_mb", "column_count", "compatibility_status",
     "complexity", "assessment_message",
 )
+
+
+def summarize_table_compatibility(column_statuses):
+    """Roll per-column mapping statuses up to a table compatibility category.
+
+    Delegates to the single authoritative classifier so source notebooks have an
+    explicit, importable dependency instead of relying on a bootstrap global.
+    """
+    return classify_table_compatibility(column_statuses)
 
 
 def classify_complexity(row_count, column_count):

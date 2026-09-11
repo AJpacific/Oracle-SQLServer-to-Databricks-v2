@@ -7,6 +7,7 @@ that a brand-new source needs no shared-code change) rather than merely checking
 that files exist.
 """
 
+import ast
 import os
 import re
 import sys
@@ -18,17 +19,23 @@ for p in (SRC, HERE, os.path.dirname(HERE)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+import _modscan as modscan  # noqa: E402
+import _nbvalidate as nbvalidate  # noqa: E402
 from _nbsource import (  # noqa: E402
-    SOURCES, SOURCE_TOKENS, REQUIRED_SOURCE_NOTEBOOKS, SHARED_NOTEBOOKS,
-    shared_nb, source_nb, source_nb_path, all_shared_notebooks,
-    all_source_notebooks,
+    SHARED as SHARED_DIR, SOURCES, SOURCE_TOKENS, REQUIRED_SOURCE_NOTEBOOKS,
+    SHARED_NOTEBOOKS, shared_nb, source_nb, source_nb_path,
+    all_shared_notebooks, all_source_notebooks,
 )
 import source_registry  # noqa: E402
 import assessment_common as assess_common  # noqa: E402
 import inventory_common as inv_common  # noqa: E402
 import sql_object_assessment_common as sqlobj_common  # noqa: E402
+from crosssourcetypemapper import ColumnMappingResult  # noqa: E402
 from source_adapters.factory import get_source_adapter  # noqa: E402
-from source_adapters.base import SourceAdapter  # noqa: E402
+from source_adapters.base import (  # noqa: E402
+    SourceAdapter, ColumnPolicyResult, SOURCE_HIDDEN_COLUMN,
+    SOURCE_GENERATED_COLUMN, SOURCE_BINARY_VERSION_COLUMN,
+)
 
 
 def _strip_markdown(src):
@@ -47,52 +54,56 @@ def _strip_markdown(src):
 
 
 class TestSharedNotebookNeutrality(unittest.TestCase):
-    """Shared notebooks must contain no source dialect or credential names."""
+    """Shared executable code must contain no source dialect or credential."""
 
-    FORBIDDEN = (
-        "SELECT 1 FROM DUAL",
-        "all_tables",
-        "all_tab_columns",
-        "all_source",
-        "all_views",
-        "sys.tables",
-        "sys.columns",
-        "sys.sql_modules",
-        "oracle-user",
-        "oracle-password",
-        "sqlserver-user",
-        "sqlserver-password",
-        'source_system == "oracle"',
-        'source_system == "sqlserver"',
-    )
-
-    def test_no_source_dialect_or_credentials(self):
+    def test_shared_notebooks_have_no_modularity_findings(self):
         for name in SHARED_NOTEBOOKS:
-            code = _strip_markdown(shared_nb(name)).lower()
-            for needle in self.FORBIDDEN:
-                self.assertNotIn(needle.lower(), code,
-                                 f"{name} contains prohibited token {needle!r}")
+            path = os.path.join(SHARED_DIR, name)
+            findings = modscan.scan(path, is_notebook=True)
+            self.assertEqual(findings, [], f"{name}: {findings}")
 
-    def test_shared_notebooks_do_not_import_dialect_builders(self):
-        # Dialect SQL must arrive through the adapter, never a direct import of
-        # the Oracle or SQL Server builder.
-        for name in SHARED_NOTEBOOKS:
-            code = _strip_markdown(shared_nb(name))
-            self.assertNotIn("sqlserver_sql_builder", code, name)
-            self.assertIsNone(
-                re.search(r"^\s*import\s+sql_builder", code, re.M), name)
+    def test_shared_common_has_no_modularity_findings(self):
+        path = os.path.join(SHARED_DIR, "_common.py")
+        findings = modscan.scan(path, is_notebook=True)
+        self.assertEqual(findings, [], f"_common.py: {findings}")
 
-    def test_shared_notebooks_do_not_branch_on_source_system(self):
-        for name in SHARED_NOTEBOOKS:
-            code = _strip_markdown(shared_nb(name))
-            self.assertIsNone(
-                re.search(r"if\s+.*source_system\s*==", code), name)
+    def test_scanner_detects_normalize_source_system_comparison(self):
+        # Guard the guard: the AST scan must catch the wrapped-call form that a
+        # plain substring search for 'source_system ==' would miss.
+        tree = ast.parse(
+            'if normalize_source_system(src_system) == "sqlserver":\n    pass\n')
+        findings = modscan.find_source_branches(tree, "<synthetic>")
+        self.assertEqual(len(findings), 1)
+        self.assertIn("sqlserver", findings[0].construct)
 
-    def test_common_owns_no_dialect_sql(self):
-        code = _strip_markdown(shared_nb("_common.py")).lower()
-        for needle in ("from dual", "sys.tables", "all_tables",
-                       "sys.sql_modules"):
-            self.assertNotIn(needle, code)
+    def test_scanner_detects_row_key_comparison(self):
+        tree = ast.parse('if row["source_system"] == "oracle":\n    pass\n')
+        self.assertEqual(len(modscan.find_source_branches(tree, "<synthetic>")), 1)
+
+    def test_scanner_detects_membership_branch(self):
+        tree = ast.parse('if src_system in ("oracle", "db2"):\n    pass\n')
+        self.assertEqual(len(modscan.find_source_branches(tree, "<synthetic>")), 1)
+
+    def test_scanner_detects_dialect_sql_and_credentials(self):
+        tree = ast.parse('q = "SELECT * FROM sys.tables"\nk = "oracle-password"\n')
+        findings = modscan.find_dialect_strings(tree, "<synthetic>")
+        self.assertEqual(len(findings), 2)
+
+    def test_scanner_detects_forbidden_builder_import(self):
+        tree = ast.parse("import sqlserver_sql_builder as ssb\n")
+        self.assertEqual(len(modscan.find_forbidden_imports(tree, "<synthetic>")), 1)
+
+    def test_scanner_detects_concrete_adapter_construction(self):
+        tree = ast.parse("a = OracleSourceAdapter()\n")
+        self.assertEqual(
+            len(modscan.find_concrete_adapter_use(tree, "<synthetic>")), 1)
+
+    def test_findings_report_file_line_and_owner(self):
+        tree = ast.parse('x = 1\nif source_system == "oracle":\n    pass\n')
+        finding = modscan.find_source_branches(tree, "/tmp/NBx.py")[0]
+        self.assertEqual(finding.line, 2)
+        self.assertIn("NBx.py:2", str(finding))
+        self.assertIn("adapter", str(finding))
 
     def test_probe_sql_comes_from_the_adapter(self):
         # _common exposes a probe helper but must not hold the probe SQL.
@@ -115,6 +126,216 @@ class TestSharedNotebookNeutrality(unittest.TestCase):
 
     def test_legacy_scope_widget_is_marked_compatibility_only(self):
         self.assertIn("COMPATIBILITY ONLY", shared_nb("_common.py"))
+
+    def test_common_does_not_route_scope_or_rules_by_source(self):
+        code = _strip_markdown(shared_nb("_common.py"))
+        self.assertNotIn("def _scope_for_system(", code)
+        self.assertNotIn("def _type_rules_path_for(", code)
+        # Both now come from the adapter.
+        self.assertIn("adapter.type_rules_file()", code)
+        self.assertIn("legacy_secret_scope_widget()", code)
+
+
+class TestColumnPolicy(unittest.TestCase):
+    """Column policy is owned by the adapter, not by shared notebooks."""
+
+    @staticmethod
+    def _mapping(status="AUTO", fidelity="EXACT", notes="", dtype="STRING"):
+        return ColumnMappingResult(
+            source_type="varchar", databricks_delta_type=dtype, status=status,
+            fidelity=fidelity, notes=notes, is_nullable=True)
+
+    def _oracle(self):
+        return get_source_adapter("oracle")
+
+    def _sqlserver(self):
+        return get_source_adapter("sqlserver", source_database="Db")
+
+    def test_base_policy_preserves_mapping(self):
+        policy = SourceAdapter.apply_column_policy(
+            self._oracle(), {"column_name": "C"}, self._mapping())
+        self.assertTrue(policy.include_column)
+        self.assertTrue(policy.is_writable)
+        self.assertFalse(policy.requires_review)
+        self.assertEqual(policy.mapping_status, "AUTO")
+
+    def test_base_policy_marks_review(self):
+        policy = SourceAdapter.apply_column_policy(
+            self._oracle(), {"column_name": "C"}, self._mapping(status="REVIEW"))
+        self.assertTrue(policy.requires_review)
+
+    def test_oracle_policy_ignores_other_source_flags(self):
+        # Oracle must not acquire SQL Server metadata semantics.
+        policy = self._oracle().apply_column_policy(
+            {"column_name": "C", "is_hidden": 1, "is_computed": 1},
+            self._mapping())
+        self.assertTrue(policy.include_column)
+        self.assertTrue(policy.is_writable)
+        self.assertIsNone(policy.policy_code)
+
+    def test_sqlserver_hidden_column_excluded(self):
+        policy = self._sqlserver().apply_column_policy(
+            {"column_name": "C", "is_hidden": 1}, self._mapping())
+        self.assertFalse(policy.include_column)
+        self.assertFalse(policy.is_writable)
+        self.assertEqual(policy.mapping_status, "BLOCKED")
+        self.assertEqual(policy.policy_code, SOURCE_HIDDEN_COLUMN)
+
+    def test_sqlserver_computed_column_requires_review(self):
+        policy = self._sqlserver().apply_column_policy(
+            {"column_name": "C", "is_computed": 1}, self._mapping())
+        self.assertTrue(policy.include_column)
+        self.assertFalse(policy.is_writable)
+        self.assertEqual(policy.mapping_status, "REVIEW")
+        self.assertTrue(policy.requires_review)
+        self.assertEqual(policy.policy_code, SOURCE_GENERATED_COLUMN)
+
+    def test_sqlserver_rowversion_keeps_mapping_but_not_writable(self):
+        policy = self._sqlserver().apply_column_policy(
+            {"column_name": "V", "is_rowversion": 1},
+            self._mapping(dtype="BINARY"))
+        self.assertTrue(policy.include_column)
+        self.assertFalse(policy.is_writable)
+        self.assertEqual(policy.mapping_status, "AUTO")
+        self.assertEqual(policy.policy_code, SOURCE_BINARY_VERSION_COLUMN)
+
+    def test_sqlserver_ordinary_column_unchanged(self):
+        policy = self._sqlserver().apply_column_policy(
+            {"column_name": "C"}, self._mapping())
+        self.assertTrue(policy.include_column)
+        self.assertTrue(policy.is_writable)
+        self.assertIsNone(policy.policy_code)
+
+    def test_hidden_takes_precedence_over_computed(self):
+        policy = self._sqlserver().apply_column_policy(
+            {"column_name": "C", "is_hidden": 1, "is_computed": 1},
+            self._mapping())
+        self.assertEqual(policy.policy_code, SOURCE_HIDDEN_COLUMN)
+
+    def test_flags_accept_string_and_int_forms(self):
+        for raw in (1, True, "1", "true", "YES"):
+            policy = self._sqlserver().apply_column_policy(
+                {"column_name": "C", "is_hidden": raw}, self._mapping())
+            self.assertFalse(policy.include_column, raw)
+        for raw in (0, False, "0", "false", None):
+            policy = self._sqlserver().apply_column_policy(
+                {"column_name": "C", "is_hidden": raw}, self._mapping())
+            self.assertTrue(policy.include_column, raw)
+
+    def test_policy_result_is_immutable(self):
+        policy = self._sqlserver().apply_column_policy(
+            {"column_name": "C"}, self._mapping())
+        with self.assertRaises(Exception):
+            policy.include_column = False
+
+    def test_shared_mapping_consumes_adapter_policy(self):
+        code = shared_nb("NB03_MappingRulesGeneration.py")
+        self.assertIn("adapter.apply_column_policy(", code)
+        self.assertIn("policy.mapping_status", code)
+        self.assertIn("policy.policy_code", code)
+
+    def test_shared_validation_uses_canonical_fields(self):
+        code = shared_nb("NB04_MappingValidation.py")
+        for field in ("include_column", "is_writable", "requires_review",
+                      "policy_code"):
+            self.assertIn(field, code)
+        self.assertNotIn("SQLSERVER_HIDDEN_COLUMN", code)
+        self.assertNotIn("SQLSERVER_COMPUTED_COLUMN", code)
+
+
+class TestTypeRulesResolution(unittest.TestCase):
+    def test_oracle_names_its_rules_file(self):
+        self.assertEqual(get_source_adapter("oracle").type_rules_file(),
+                         "type_rules_oracle.yaml")
+
+    def test_sqlserver_names_its_rules_file(self):
+        adapter = get_source_adapter("sqlserver", source_database="Db")
+        self.assertEqual(adapter.type_rules_file(), "type_rules_sqlserver.yaml")
+
+    def test_named_rules_files_exist(self):
+        config = os.path.join(os.path.dirname(HERE), "config")
+        for token, database in (("oracle", None), ("sqlserver", "Db")):
+            adapter = get_source_adapter(token, source_database=database)
+            self.assertTrue(
+                os.path.isfile(os.path.join(config, adapter.type_rules_file())),
+                adapter.type_rules_file())
+
+    def test_unknown_source_fails_and_never_defaults(self):
+        for unknown in ("postgresql", "db2", "", None):
+            with self.assertRaises(ValueError):
+                get_source_adapter(unknown)
+
+    def test_sqlserver_requires_database_metadata(self):
+        adapter = get_source_adapter("sqlserver", source_database="Db")
+        with self.assertRaises(ValueError):
+            adapter.validate_connection_metadata(
+                {"connection_id": "c1", "secret_scope": "s", "source_database": ""})
+
+    def test_blank_secret_scope_fails_without_leaking(self):
+        adapter = get_source_adapter("oracle")
+        with self.assertRaises(ValueError) as ctx:
+            adapter.validate_connection_metadata(
+                {"connection_id": "c1", "secret_scope": "  "})
+        message = str(ctx.exception)
+        self.assertIn("secret_scope", message)
+        self.assertNotIn("password", message.lower())
+
+
+class TestNotebookValidation(unittest.TestCase):
+    """Static notebook checks that compileall cannot perform."""
+
+    def test_every_notebook_cell_compiles(self):
+        for path in nbvalidate.all_notebook_paths():
+            errors = nbvalidate.compile_cells(path)
+            self.assertEqual(errors, [], f"{os.path.basename(path)}: {errors}")
+
+    def test_every_run_target_exists(self):
+        for path in nbvalidate.all_notebook_paths():
+            for directive, resolved in nbvalidate.run_targets(path):
+                self.assertTrue(
+                    os.path.isfile(resolved),
+                    f"{os.path.relpath(path)}: %run {directive} -> missing "
+                    f"{os.path.relpath(resolved)}")
+
+    def test_source_notebooks_resolve_shared_bootstrap(self):
+        for token, name in all_source_notebooks():
+            path = source_nb_path(token, name)
+            targets = nbvalidate.run_targets(path)
+            self.assertTrue(targets, f"{token}/{name} has no %run")
+            self.assertTrue(any(t.endswith("_common") for t, _ in targets),
+                            f"{token}/{name} does not bootstrap shared/_common")
+
+    def test_assessment_notebooks_resolve_the_classifier(self):
+        # The exact defect class: a symbol used but never provided anywhere.
+        import builtins
+        common_exports = nbvalidate.exported_names(
+            os.path.join(SHARED_DIR, "_common.py"))
+        self.assertIn("classify_table_compatibility", common_exports)
+        self.assertIn("assess_common", common_exports)
+        ambient = set(dir(builtins)) | {"spark", "dbutils", "display", "sc"}
+        for token in SOURCE_TOKENS:
+            path = source_nb_path(token, "NB01A_SourceAssessment.py")
+            undefined = (nbvalidate.referenced_names(path)
+                         - common_exports - ambient)
+            self.assertEqual(
+                undefined, set(),
+                f"{token}/NB01A references names no shared symbol provides: "
+                f"{sorted(undefined)}")
+
+    def test_single_authoritative_classifier(self):
+        definitions = []
+        for dirpath, dirnames, filenames in os.walk(os.path.dirname(HERE)):
+            dirnames[:] = [d for d in dirnames
+                           if d not in ("__pycache__", ".git", "tests")]
+            for name in filenames:
+                if not name.endswith(".py"):
+                    continue
+                full = os.path.join(dirpath, name)
+                with open(full, "r", encoding="utf-8") as fh:
+                    if "def classify_table_compatibility(" in fh.read():
+                        definitions.append(full)
+        self.assertEqual(len(definitions), 1,
+                         f"expected one classifier definition, found {definitions}")
 
 
 class TestSourceFolderCompleteness(unittest.TestCase):
@@ -349,6 +570,8 @@ class TestAdapterContract(unittest.TestCase):
         "min_max_query", "normalize_watermark_type",
         "is_supported_watermark_type", "watermark_type_rank",
         "initial_watermark_value", "resolve_partition_plan", "load_type_mapper",
+        "type_rules_file", "legacy_secret_scope_widget",
+        "validate_connection_metadata", "apply_column_policy",
         "normalize_sql_object_type", "supports_sql_object_type",
         "redact_jdbc_url", "read_jdbc",
     )
@@ -422,6 +645,9 @@ class _FakeAdapter(SourceAdapter):
 
     source_system = "fakedb"
     SQL_OBJECT_TYPES = ("VIEW",)
+
+    def type_rules_file(self):
+        return "type_rules_fakedb.yaml"
 
     def get_jdbc_url_and_props(self, source_server=None, source_database=None):
         return "jdbc:fake://host/db", {"user": "u", "password": "p",
@@ -535,13 +761,39 @@ class TestFutureSourceExtension(unittest.TestCase):
     def test_shared_modules_never_name_a_specific_source(self):
         for module_file in ("assessment_common.py", "inventory_common.py",
                             "sql_object_assessment_common.py"):
-            with open(os.path.join(SRC, module_file), "r", encoding="utf-8") as fh:
-                code = fh.read()
-            body = "\n".join(l for l in code.splitlines()
-                             if not l.strip().startswith("#"))
-            body = body.split('"""')[-1] if body.count('"""') >= 2 else body
-            for needle in ("all_tables", "sys.tables", "FROM DUAL"):
-                self.assertNotIn(needle.lower(), body.lower(), module_file)
+            findings = modscan.scan(os.path.join(SRC, module_file),
+                                    is_notebook=False)
+            self.assertEqual(findings, [], f"{module_file}: {findings}")
+
+    def test_fake_adapter_provides_its_own_type_rules(self):
+        # A new source names its rules file; shared code never infers it.
+        self.assertEqual(self.adapter.type_rules_file(), "type_rules_fakedb.yaml")
+        self.assertIsNone(self.adapter.legacy_secret_scope_widget())
+
+    def test_fake_adapter_uses_base_column_policy(self):
+        mapping = ColumnMappingResult(
+            source_type="text", databricks_delta_type="STRING", status="AUTO",
+            fidelity="EXACT", notes="", is_nullable=True)
+        policy = self.adapter.apply_column_policy(
+            {"column_name": "C", "is_hidden": 1, "is_computed": 1}, mapping)
+        # The base policy does not interpret another source's metadata flags.
+        self.assertTrue(policy.include_column)
+        self.assertTrue(policy.is_writable)
+        self.assertEqual(policy.mapping_status, "AUTO")
+        self.assertIsNone(policy.policy_code)
+
+    def test_fake_adapter_builds_extractions_generically(self):
+        self.assertIn("SELECT", self.adapter.full_extract_query("db", "S", "T"))
+        self.assertIn("SELECT", self.adapter.incremental_extract_query(
+            "db", "S", "T", "wm", "TIMESTAMP", "a", "b"))
+        self.assertIn("CONNECTION_OK", self.adapter.connection_probe_query())
+
+    def test_fake_adapter_connection_metadata_validation(self):
+        self.adapter.validate_connection_metadata(
+            {"connection_id": "c1", "secret_scope": "scope"})
+        with self.assertRaises(ValueError):
+            self.adapter.validate_connection_metadata(
+                {"connection_id": "c1", "secret_scope": ""})
 
 
 class TestSqlObjectCommonRules(unittest.TestCase):

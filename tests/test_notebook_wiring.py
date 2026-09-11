@@ -246,8 +246,8 @@ class TestEtlBehavior(unittest.TestCase):
         self.assertIn("if not failure_already_logged:", self.SRC)
 
     def test_typed_watermark_comparison(self):
-        self.assertIn("TimestampType", self.SRC)
-        self.assertIn("DateType", self.SRC)
+        # Typed bounds are resolved once by the work unit, never lexically.
+        self.assertIn("etlwu.resolve_cast(", self.SRC)
         self.assertIn(".cast(cast_to)", self.SRC)
         self.assertIn("only DATE and TIMESTAMP are supported", self.SRC)
 
@@ -258,12 +258,25 @@ class TestEtlBehavior(unittest.TestCase):
         self.assertIn("RETRY_ETL requires parent_run_id", self.SRC)
 
     def test_retry_does_not_recompute_bronze_max(self):
-        block = self.SRC.split("if is_etl_retry:")[1].split("else:")[0]
+        # The retry branch of boundary resolution must never call Bronze MAX.
+        block = (self.SRC.split("        if is_etl_retry:")[1]
+                 .split("        else:")[0])
         self.assertNotIn("F.max(", block)
-        self.assertIn("upper_raw = retry_upper_wm", block)
+        self.assertIn("raw_lower, raw_upper = retry_lower_wm, retry_upper_wm", block)
 
     def test_incremental_retry_without_bounds_is_configuration_error(self):
-        self.assertIn("RETRY_ETL for an incremental table requires", self.SRC)
+        # Boundary validation lives in the pure work-unit builder and surfaces
+        # as a configuration failure before any data is touched.
+        self.assertIn("etlwu.build_incremental_work_unit(", self.SRC)
+        self.assertIn("ETL_CONFIG_ERROR", self.SRC)
+        self.assertLess(self.SRC.index("etlwu.build_incremental_work_unit("),
+                        self.SRC.index("current_stage = failcls.SILVER_WRITE"))
+
+    def test_all_paths_share_one_work_unit(self):
+        self.assertIn("work_unit.audit_fields(attempt_number)", self.SRC)
+        self.assertIn("etlwu.checkpoint_value(work_unit", self.SRC)
+        # The success audit must not fall back to the control-row watermark.
+        self.assertNotIn('"lower_watermark": last_etl_wm', self.SRC)
 
     def test_quarantine_idempotent_and_counted_when_disabled(self):
         self.assertIn("DELETE FROM", self.SRC)
