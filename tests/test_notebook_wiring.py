@@ -62,6 +62,41 @@ class TestConnectionRouting(unittest.TestCase):
                 f"{token}/{name}")
 
 
+class TestExplicitSourceSystem(unittest.TestCase):
+    def test_shared_executable_code_has_no_oracle_default(self):
+        patterns = (r"\bor\s+[\"']oracle[\"']",
+                    r"\belse\s+[\"']oracle[\"']")
+        for name in all_shared_notebooks():
+            code = shared_nb(name)
+            for pattern in patterns:
+                self.assertIsNone(re.search(pattern, code), f"{name}: {pattern}")
+
+    def test_common_exports_required_source_guard(self):
+        common = shared_nb("_common.py")
+        self.assertIn("require_source_system", common)
+        self.assertIn("source_table_id_for_row", common)
+
+    def test_backfill_skips_and_counts_missing_sources(self):
+        source = shared_nb("NB00_ControlTableInit.py")
+        self.assertIn("_skipped_missing_source", source)
+        self.assertIn("classify this legacy row manually", source)
+        self.assertIn("Skipped {_skipped_missing_source} legacy row(s)", source)
+        missing_guard = source.index("if _r[\"source_system\"] is None")
+        compute = source.index("_sid = compute_source_table_id", missing_guard)
+        self.assertLess(missing_guard, compute)
+
+    def test_runtime_rows_use_required_source_guard(self):
+        for name in (
+                "NB02_TypeNormalization.py", "NB03_MappingRulesGeneration.py",
+                "NB04_MappingValidation.py", "NB07_TableDecisionGeneration.py",
+                "NB08_TargetProvisioning.py", "NB09_FullLoad.py",
+                "NB10_PostFullLoadState.py", "NB11a_DeltaSyncPrep.py",
+                "NB11b_DeltaSyncApply.py",
+                "NB12_ValidationAndReconciliation.py",
+                "NB15_BronzeToSilverETL.py"):
+            self.assertIn("require_source_system(", shared_nb(name), name)
+
+
 class TestConnectionIdPropagationAndScoping(unittest.TestCase):
     def test_inventory_writes_connection_id(self):
         for token in SOURCE_TOKENS:

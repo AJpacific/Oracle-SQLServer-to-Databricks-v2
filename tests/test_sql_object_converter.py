@@ -105,6 +105,18 @@ class TestConvert(unittest.TestCase):
         out, lang, status = sc.convert_sql_object_deterministic("oracle", "VIEW", "")
         self.assertEqual(status, sc.NOT_STARTED)
 
+    def test_unknown_source_never_uses_sqlserver_rewrites(self):
+        source = "CREATE VIEW v AS SELECT ISNULL([value], 0) FROM [dbo].[t]"
+        out, language, status = sc.convert_sql_object_deterministic(
+            "futuredb", "VIEW", source)
+        self.assertEqual(status, sc.NOT_SUPPORTED)
+        self.assertEqual(language, "MANUAL_REDESIGN_GUIDANCE")
+        self.assertNotIn("COALESCE", out)
+
+    def test_missing_source_fails(self):
+        with self.assertRaises(ValueError):
+            sc.convert_sql_object_deterministic(None, "VIEW", "SELECT 1")
+
 
 if __name__ == "__main__":
     unittest.main()

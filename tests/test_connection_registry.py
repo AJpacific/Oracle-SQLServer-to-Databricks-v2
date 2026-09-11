@@ -20,6 +20,9 @@ from control_repository import (  # noqa: E402
     ControlRepository, normalize_connection_input, assert_source_system_match,
 )
 from source_adapters.factory import get_source_adapter  # noqa: E402
+from source_identity import (  # noqa: E402
+    compute_source_table_id, normalize_source_system, require_source_system,
+)
 from _fakes import FakeSpark, FakeRow  # noqa: E402
 
 
@@ -56,6 +59,11 @@ class TestConnectionInput(unittest.TestCase):
         with self.assertRaises(ValueError):
             normalize_connection_input(self._base(source_system="db2"))
 
+    def test_missing_source_system_fails(self):
+        for missing in (None, "", "   "):
+            with self.subTest(missing=missing), self.assertRaises(ValueError):
+                normalize_connection_input(self._base(source_system=missing))
+
     def test_missing_required_fields_fail(self):
         with self.assertRaises(ValueError):
             normalize_connection_input(self._base(connection_id=""))
@@ -84,6 +92,36 @@ class TestSystemConflict(unittest.TestCase):
             assert_source_system_match("oracle", "")
 
 
+class TestRequiredSourceIdentity(unittest.TestCase):
+    def test_missing_source_system_raises_with_field_name(self):
+        for missing in (None, "", "  "):
+            with self.subTest(missing=missing), self.assertRaises(ValueError) as ctx:
+                require_source_system(missing, "pipeline row")
+            self.assertIn("source_system", str(ctx.exception))
+            self.assertNotIn("password", str(ctx.exception).lower())
+
+    def test_unknown_source_system_raises(self):
+        with self.assertRaises(ValueError):
+            require_source_system("postgresql")
+
+    def test_supported_sources_and_aliases_normalize(self):
+        self.assertEqual(require_source_system(" Oracle "), "oracle")
+        self.assertEqual(require_source_system("SQLSERVER"), "sqlserver")
+        self.assertEqual(require_source_system("mssql"), "sqlserver")
+
+    def test_valid_identity_generation_is_stable_across_aliases(self):
+        canonical = compute_source_table_id(
+            "sqlserver", "Host", "Db", "dbo", "Orders")
+        alias = compute_source_table_id(
+            "mssql", "host", "db", "dbo", "Orders")
+        self.assertEqual(canonical, alias)
+        self.assertEqual(len(canonical), 64)
+
+    def test_identity_never_assumes_a_source(self):
+        with self.assertRaises(ValueError):
+            compute_source_table_id(None, "host", "db", "S", "T")
+
+
 class TestUpsertConnectionSQL(unittest.TestCase):
     def _repo(self, results):
         return ControlRepository(FakeSpark(results), "cat", "control")
@@ -110,6 +148,14 @@ class TestUpsertConnectionSQL(unittest.TestCase):
         })
         sqls = repo.spark.executed
         self.assertTrue(any(s.strip().startswith("UPDATE") for s in sqls))
+
+    def test_direct_upsert_rejects_blank_source_system(self):
+        repo = self._repo(results=[])
+        with self.assertRaises(ValueError):
+            repo.upsert_connection({
+                "connection_id": "bad", "connection_name": "Bad",
+                "source_system": "", "secret_scope": "scope",
+            })
 
     def test_no_credential_columns_persisted(self):
         repo = self._repo(results=[[]])

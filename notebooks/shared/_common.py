@@ -1,14 +1,14 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # _common - shared Oracle and SQL Server bootstrap
+# MAGIC # _common - shared source bootstrap
 # MAGIC
 # MAGIC Include this at the top of every accelerator notebook with:
 # MAGIC ```
 # MAGIC %run ./_common
 # MAGIC ```
 # MAGIC It puts the src/ package on the path, imports shared logic, selects the
-# MAGIC Oracle or SQL Server adapter per control-table row, reads credentials from
-# MAGIC source-specific Databricks secret scopes, and exposes shared helpers.
+# MAGIC registered adapter for each control-table row, reads credentials from the
+# MAGIC connection's Databricks secret scope, and exposes shared helpers.
 
 # COMMAND ----------
 
@@ -552,6 +552,21 @@ def persist_inventory_rows(rows):
     run_id = records[0]["run_id"]
     source_table_id = records[0]["source_table_id"]
     connection_id = records[0].get("connection_id")
+
+    control_rows = spark.sql(f"""
+        SELECT connection_id
+        FROM {ctrl_table('source_table_control')}
+        WHERE source_table_id = {escape_string_literal(source_table_id)}
+    """).collect()
+    if len(control_rows) != 1:
+        raise ValueError(
+            f"source_table_id {source_table_id!r} resolves to "
+            f"{len(control_rows)} control rows; expected exactly one")
+    control_connection_id = control_rows[0]["connection_id"]
+    if control_connection_id != connection_id:
+        raise ValueError(
+            f"source_table_id {source_table_id!r} belongs to connection_id "
+            f"{control_connection_id!r}; received {connection_id!r}")
 
     prior_connections = {
         row["connection_id"]

@@ -274,6 +274,9 @@ class ControlRepository:
         connection = dict(connection)
         connection["source_system"] = require_source_system(
             connection.get("source_system"), "registered connection")
+        if connection.get("error_message") is not None:
+            connection["error_message"] = sanitize_error_message(
+                connection["error_message"])
         writable = (
             "connection_name", "source_system", "source_server",
             "source_database", "secret_scope", "trust_server_certificate",
@@ -424,10 +427,12 @@ class ControlRepository:
         """
         source_system = require_source_system(
             source_system, "source table identity")
-        assignments = [
-            f"{quote_databricks(k)} = {self._render_value(v)}"
-            for k, v in fields.items()
-        ]
+        assignments = []
+        for key, value in fields.items():
+            if key in SANITIZED_CONTROL_FIELDS and value is not None:
+                value = sanitize_error_message(value)
+            assignments.append(
+                f"{quote_databricks(key)} = {self._render_value(value)}")
         assignments.append("`updated_ts` = current_timestamp()")
         set_clause = ", ".join(assignments)
         where = (

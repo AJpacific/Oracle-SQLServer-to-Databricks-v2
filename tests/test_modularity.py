@@ -31,6 +31,7 @@ import assessment_common as assess_common  # noqa: E402
 import inventory_common as inv_common  # noqa: E402
 import sql_object_assessment_common as sqlobj_common  # noqa: E402
 from crosssourcetypemapper import ColumnMappingResult  # noqa: E402
+from type_mappers.base import SourceTypeMapper  # noqa: E402
 from source_adapters.factory import get_source_adapter  # noqa: E402
 from source_adapters.base import (  # noqa: E402
     SourceAdapter, ColumnPolicyResult, SOURCE_HIDDEN_COLUMN,
@@ -83,6 +84,12 @@ class TestSharedNotebookNeutrality(unittest.TestCase):
     def test_scanner_detects_membership_branch(self):
         tree = ast.parse('if src_system in ("oracle", "db2"):\n    pass\n')
         self.assertEqual(len(modscan.find_source_branches(tree, "<synthetic>")), 1)
+
+    def test_scanner_detects_implicit_source_default(self):
+        tree = ast.parse('selected = row.get("source_system") or "oracle"\n')
+        findings = modscan.find_source_defaults(tree, "<synthetic>")
+        self.assertEqual(len(findings), 1)
+        self.assertIn("default", findings[0].construct)
 
     def test_scanner_detects_dialect_sql_and_credentials(self):
         tree = ast.parse('q = "SELECT * FROM sys.tables"\nk = "oracle-password"\n')
@@ -640,6 +647,15 @@ class TestSourceRegistration(unittest.TestCase):
             source_registry.supports("oracle", "teleportation")
 
 
+class _FakeTypeMapper(SourceTypeMapper):
+    def map_column(self, source_type, precision=None, scale=None,
+                   length=None, is_nullable=True):
+        return ColumnMappingResult(
+            source_type=source_type or "", databricks_delta_type="STRING",
+            status="AUTO", fidelity="EXACT", notes="test-only mapping",
+            is_nullable=bool(is_nullable))
+
+
 class _FakeAdapter(SourceAdapter):
     """Test-only third source proving shared code needs no dialect knowledge."""
 
@@ -716,7 +732,7 @@ class _FakeAdapter(SourceAdapter):
         return None, None, None, "unsupported"
 
     def load_type_mapper(self):
-        raise NotImplementedError("test adapter has no type rules")
+        return _FakeTypeMapper()
 
 
 class TestFutureSourceExtension(unittest.TestCase):
@@ -769,6 +785,13 @@ class TestFutureSourceExtension(unittest.TestCase):
         # A new source names its rules file; shared code never infers it.
         self.assertEqual(self.adapter.type_rules_file(), "type_rules_fakedb.yaml")
         self.assertIsNone(self.adapter.legacy_secret_scope_widget())
+
+    def test_fake_adapter_provides_its_own_type_mapper(self):
+        mapper = self.adapter.load_type_mapper()
+        self.assertIsInstance(mapper, SourceTypeMapper)
+        result = mapper.map_column("future_text")
+        self.assertEqual(result.databricks_delta_type, "STRING")
+        self.assertEqual(result.status, "AUTO")
 
     def test_fake_adapter_uses_base_column_policy(self):
         mapping = ColumnMappingResult(

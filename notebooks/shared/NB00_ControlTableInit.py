@@ -25,7 +25,8 @@ print("run_id:", run_id)
 
 # The Unity Catalog catalog is expected to already exist; only the control schema
 # is created here, so no CREATE CATALOG privilege is required.
-spark.sql(ddl.build_create_schema(CATALOG, CONTROL_SCHEMA, "Oracle and SQL Server accelerator control & audit"))
+spark.sql(ddl.build_create_schema(
+  CATALOG, CONTROL_SCHEMA, "migration accelerator control & audit"))
 print("Control schema ready.")
 
 # COMMAND ----------
@@ -361,28 +362,28 @@ _existing = spark.sql(f"""
 _backfilled = 0
 _skipped_missing_source = 0
 for _r in _existing:
-  if _r["source_system"] is None or not str(_r["source_system"]).strip():
-    _skipped_missing_source += 1
-    print(f"  [warn] skipped source_table_id backfill for "
-        f"{_r['source_schema']}.{_r['source_table']}: "
-        "source_system is missing; classify this legacy row manually")
-    continue
-    try:
+    if _r["source_system"] is None or not str(_r["source_system"]).strip():
+        _skipped_missing_source += 1
+        print(f"  [warn] skipped source_table_id backfill for "
+              f"{_r['source_schema']}.{_r['source_table']}: "
+              "source_system is missing; classify this legacy row manually")
+        continue
     _source_system = require_source_system(
-      _r["source_system"], "legacy source_table_control row")
+        _r["source_system"], "legacy source_table_control row")
+    try:
         _sid = compute_source_table_id(
-      _source_system, _r["source_server"],
+            _source_system, _r["source_server"],
             _r["source_database"], _r["source_schema"], _r["source_table"])
     except Exception as _e:
         _safe_error = failcls.sanitize_message(_e)
         print(f"  [warn] cannot backfill id for "
-          f"{_r['source_schema']}.{_r['source_table']}: {_safe_error[:300]}")
+              f"{_r['source_schema']}.{_r['source_table']}: {_safe_error[:300]}")
         continue
     # Match the historical row on the full identity (null-safe) to set its id.
     spark.sql(f"""
         UPDATE {ctrl('source_table_control')}
         SET source_table_id = {escape_string_literal(_sid)},
-          source_system = {escape_string_literal(_source_system)},
+            source_system = {escape_string_literal(_source_system)},
             updated_ts = current_timestamp()
         WHERE (source_table_id IS NULL OR source_table_id = '')
           AND source_schema = {escape_string_literal(_r['source_schema'])}

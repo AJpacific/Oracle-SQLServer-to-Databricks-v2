@@ -122,6 +122,23 @@ def find_source_branches(tree, path):
     return findings
 
 
+def find_source_defaults(tree, path):
+    """Implicit source literals selected with ``or`` in shared code."""
+    findings = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or)):
+            continue
+        has_source = any(_is_source_system_expr(value) for value in node.values)
+        literal = next((_source_literal(value) for value in node.values
+                        if _source_literal(value)), None)
+        if has_source and literal:
+            findings.append(Finding(
+                path, node.lineno,
+                f"implicit source-system default to {literal!r}",
+                "explicit source identity validation"))
+    return findings
+
+
 def _docstring_nodes(tree):
     """Constant nodes that are docstrings; documentation may name a source."""
     docstrings = set()
@@ -227,6 +244,7 @@ def scan(path, is_notebook=True):
     """Return every modularity finding for one shared file."""
     tree = parse_notebook(path) if is_notebook else parse_module(path)
     return (find_source_branches(tree, path)
+            + find_source_defaults(tree, path)
             + find_dialect_strings(tree, path)
             + find_forbidden_imports(tree, path)
             + find_concrete_adapter_use(tree, path))

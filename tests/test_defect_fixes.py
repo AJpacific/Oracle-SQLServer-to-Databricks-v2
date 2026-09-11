@@ -6,19 +6,24 @@ Covered here: full table_run_log persistence (Fix 1), strengthened sanitization
 hardening used by the ETL fixes (Fix 10/11/21).
 """
 
+import ast
 import os
 import sys
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SRC = os.path.join(os.path.dirname(HERE), "src")
-for p in (SRC, os.path.dirname(HERE)):
+ROOT = os.path.dirname(HERE)
+SRC = os.path.join(ROOT, "src")
+for p in (SRC, ROOT):
     if p not in sys.path:
         sys.path.insert(0, p)
 
 import control_repository as cr  # noqa: E402
 import failure_classifier as fc  # noqa: E402
 import dq_rules as dq  # noqa: E402
+import _modscan as modscan  # noqa: E402
+import _nbvalidate as nbvalidate  # noqa: E402
+from _nbsource import shared_nb  # noqa: E402
 
 
 class _CapturingSpark:
@@ -104,6 +109,13 @@ class TestTableRunLogSchema(unittest.TestCase):
             "error_message": "login failed for user=sa;password=Secret123!"})
         self.assertNotIn("Secret123", v["error_message"])
         self.assertIn("***", v["error_message"])
+
+    def test_log_table_run_uses_sanitized_row_builder(self):
+        with open(cr.__file__, encoding="utf-8") as stream:
+            source = stream.read()
+        method = source.split("def log_table_run(self, fields: dict):", 1)[1]
+        method = method.split("def log_job_run", 1)[0]
+        self.assertIn("build_table_run_row(fields)", method)
 
     def test_bool_coercion_preserves_null(self):
         self.assertIsNone(cr._to_bool(None))
@@ -309,6 +321,74 @@ class TestSanitizationCoverage(unittest.TestCase):
         self.assertEqual(fc.redact_url(None), "")
 
 
+class TestNotebookExceptionOutput(unittest.TestCase):
+    def test_no_caught_exception_is_printed_directly(self):
+        class UnsafeExceptionUse(ast.NodeVisitor):
+            def __init__(self, exception_name):
+                self.exception_name = exception_name
+                self.found = False
+
+            def visit_Call(self, node):
+                function_name = (getattr(node.func, "id", None)
+                                 or getattr(node.func, "attr", None))
+                if function_name in ("sanitize_message", "type"):
+                    return
+                self.generic_visit(node)
+
+            def visit_Name(self, node):
+                if node.id == self.exception_name:
+                    self.found = True
+
+        findings = []
+        for path in nbvalidate.all_notebook_paths():
+            tree = modscan.parse_notebook(path)
+            for handler in (node for node in ast.walk(tree)
+                            if isinstance(node, ast.ExceptHandler) and node.name):
+                for call in (node for node in ast.walk(handler)
+                             if isinstance(node, ast.Call)
+                             and isinstance(node.func, ast.Name)
+                             and node.func.id == "print"):
+                    visitor = UnsafeExceptionUse(handler.name)
+                    visitor.visit(call)
+                    if visitor.found:
+                        findings.append(
+                            f"{os.path.relpath(path, ROOT)}:{call.lineno}:"
+                            f" print({handler.name})")
+        self.assertEqual(findings, [])
+
+    def test_no_raw_exception_conversion_in_notebooks(self):
+        forbidden = ("str(e)", "str(exc)", "repr(e)", "repr(exc)",
+                     "print(e)", "print(exc)", "traceback.print_exc",
+                     "traceback.format_exc")
+        for path in nbvalidate.all_notebook_paths():
+            source = nbvalidate.read_notebook(path)
+            for token in forbidden:
+                self.assertNotIn(token, source, f"{path}: {token}")
+
+    def test_nb03_reuses_one_sanitized_mapping_error(self):
+        source = shared_nb("NB03_MappingRulesGeneration.py")
+        self.assertEqual(
+            source.count("safe_error = failcls.sanitize_message(exc)"), 1)
+        self.assertNotIn("str(exc)", source)
+        self.assertIn("type(exc).__name__, safe_error[:500]", source)
+        self.assertIn('"BLOCKED", "UNKNOWN"', source)
+        self.assertIn("r['source_schema']", source)
+        self.assertIn("r['source_table']", source)
+        self.assertIn("r['column_name']", source)
+
+    def test_nb08_sanitizes_before_persisting_and_printing(self):
+        source = shared_nb("NB08_TargetProvisioning.py")
+        handler = source.split("except Exception as e:", 1)[1]
+        self.assertIn("safe_error = failcls.sanitize_message(e)", handler)
+        self.assertIn('"current_status": "PROVISION_FAILED"', handler)
+        self.assertIn('"error_message": safe_error[:1000]', handler)
+        self.assertIn("type(e).__name__", handler)
+        self.assertIn("safe_error[:300]", handler)
+        self.assertNotIn("str(e)", handler)
+        self.assertIn("if failed > 0:", source)
+        self.assertIn("raise Exception", source)
+
+
 class TestDefaultValueConversion(unittest.TestCase):
     """A configured DEFAULT_VALUE that cannot be represented must fail."""
 
@@ -373,6 +453,22 @@ class TestControlRepositorySanitization(unittest.TestCase):
         sql = spark.executed[-1]
         self.assertNotIn("hunter2", sql)
         self.assertIn("FAILED", sql)
+
+    def test_upsert_connection_sanitizes_error_message(self):
+        repo, spark = self._repo()
+        repo.upsert_connection({
+            "connection_id": "c1", "connection_name": "Connection",
+            "source_system": "oracle", "secret_scope": "scope",
+            "error_message": "login failed; password=hunter2",
+        })
+        self.assertNotIn("hunter2", " ".join(spark.executed))
+
+    def test_identity_update_sanitizes_error_message(self):
+        repo, spark = self._repo()
+        repo.update_control_by_identity(
+            "oracle", None, None, "HR", "EMPLOYEES",
+            {"error_message": "Authorization: Bearer abcdef123456"})
+        self.assertNotIn("abcdef123456", spark.executed[-1])
 
     def test_log_job_run_sanitizes_message(self):
         repo, spark = self._repo()
