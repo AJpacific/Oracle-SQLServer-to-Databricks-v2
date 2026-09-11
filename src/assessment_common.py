@@ -12,9 +12,9 @@ No Oracle or SQL Server SQL belongs in this module. Pure: no Spark, no dbutils.
 from __future__ import annotations
 
 try:
-    from src.crosssourcetypemapper import classify_table_compatibility
+    from src.type_mappers.base import classify_table_compatibility
 except ModuleNotFoundError:
-    from crosssourcetypemapper import classify_table_compatibility
+    from type_mappers.base import classify_table_compatibility
 
 # How a reported row count was obtained. A broad assessment never executes a
 # per-table COUNT(*), so EXACT is deliberately not a member of this set.

@@ -132,8 +132,8 @@ try:
         quote_databricks, quote_oracle, oracle_fqn, databricks_fqn,
         escape_string_literal,
     )
-    from src.crosssourcetypemapper import (
-        CrossSourceTypeMapper, ColumnMappingResult, classify_table_compatibility,
+    from src.type_mappers.base import (
+        ColumnMappingResult, classify_table_compatibility,
     )
     from src.strategy import (
         detect_strategy, pick_watermark_column, is_valid_strategy,
@@ -163,8 +163,8 @@ except ModuleNotFoundError:
         quote_databricks, quote_oracle, oracle_fqn, databricks_fqn,
         escape_string_literal,
     )
-    from crosssourcetypemapper import (
-        CrossSourceTypeMapper, ColumnMappingResult, classify_table_compatibility,
+    from type_mappers.base import (
+        ColumnMappingResult, classify_table_compatibility,
     )
     from strategy import (
         detect_strategy, pick_watermark_column, is_valid_strategy,

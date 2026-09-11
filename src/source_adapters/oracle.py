@@ -20,13 +20,13 @@ try:
     from src import sql_builder as sqlb
     from src import strategy as strat
     from src import partitioning as part
-    from src.crosssourcetypemapper import CrossSourceTypeMapper
+    from src.type_mappers.oracle import OracleTypeMapper
 except ModuleNotFoundError:
     from source_adapters.base import SourceAdapter, ColumnPolicyResult
     import sql_builder as sqlb
     import strategy as strat
     import partitioning as part
-    from crosssourcetypemapper import CrossSourceTypeMapper
+    from type_mappers.oracle import OracleTypeMapper
 
 
 class OracleSourceAdapter(SourceAdapter):
@@ -143,7 +143,7 @@ class OracleSourceAdapter(SourceAdapter):
 
     # ------------------------------------------------------------ type mapper
     def load_type_mapper(self):
-        return CrossSourceTypeMapper.from_yaml_path(self._type_rules_path())
+        return OracleTypeMapper.from_yaml_path(self._type_rules_path())
 
     def type_rules_file(self) -> str:
         return "type_rules_oracle.yaml"

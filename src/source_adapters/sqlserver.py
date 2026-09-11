@@ -26,7 +26,7 @@ try:
     from src import sqlserver_sql_builder as ssb
     from src import partitioning as part
     from src.identifiers import validate_server, validate_database
-    from src.crosssourcetypemapper import CrossSourceTypeMapper
+    from src.type_mappers.sqlserver import SqlServerTypeMapper
 except ModuleNotFoundError:
     from source_adapters.base import (
         SourceAdapter, ColumnPolicyResult, SOURCE_HIDDEN_COLUMN,
@@ -35,7 +35,7 @@ except ModuleNotFoundError:
     import sqlserver_sql_builder as ssb
     import partitioning as part
     from identifiers import validate_server, validate_database
-    from crosssourcetypemapper import CrossSourceTypeMapper
+    from type_mappers.sqlserver import SqlServerTypeMapper
 
 
 class SqlServerSourceAdapter(SourceAdapter):
@@ -232,7 +232,7 @@ class SqlServerSourceAdapter(SourceAdapter):
 
     # ------------------------------------------------------------ type mapper
     def load_type_mapper(self):
-        return CrossSourceTypeMapper.from_yaml_path(self._type_rules_path())
+        return SqlServerTypeMapper.from_yaml_path(self._type_rules_path())
 
     def type_rules_file(self) -> str:
         return "type_rules_sqlserver.yaml"
