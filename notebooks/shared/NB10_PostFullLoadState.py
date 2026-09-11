@@ -53,6 +53,7 @@ print("Tables eligible for state commit:", len(loaded))
 committed, failed = 0, 0
 for r in loaded:
     src_id = r["source_table_id"]
+    require_source_system(r["source_system"], "source_table_control row")
     s_schema, s_table = r["source_schema"], r["source_table"]
     strategy = r["load_strategy"]
     wm_col = r["watermark_column"]

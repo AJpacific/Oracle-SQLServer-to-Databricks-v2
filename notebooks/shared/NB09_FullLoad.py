@@ -78,7 +78,9 @@ elif only_schema or only_table or only_system or only_server or only_database:
         raise ValueError("Manual filtering requires both only_source_schema and only_source_table")
     def _matches_manual_filter(r):
         d = r.asDict()
-        if only_system and normalize_source_system(d.get("source_system") or "oracle") != normalize_source_system(only_system):
+        row_system = require_source_system(
+            d.get("source_system"), "source_table_control row")
+        if only_system and row_system != normalize_source_system(only_system):
             return False
         if only_server and (d.get("source_server") or "").lower() != only_server.lower():
             return False
@@ -123,7 +125,8 @@ succeeded, failed = 0, 0
 for r in auto:
     d = r.asDict()
     src_id = d["source_table_id"]
-    src_system = d.get("source_system") or "oracle"
+    src_system = require_source_system(
+        d.get("source_system"), "source_table_control row")
     src_server = d.get("source_server")
     src_db = d.get("source_database")
     s_schema, s_table = r["source_schema"], r["source_table"]

@@ -273,7 +273,8 @@ succeeded, failed = 0, 0
 for q in queue:
     qd = q.asDict()
     src_id = qd["source_table_id"]
-    src_system = qd.get("source_system") or "oracle"
+    src_system = require_source_system(
+        qd.get("source_system"), "delta_sync_queue row")
     src_server = qd.get("source_server")
     src_db = qd.get("source_database")
     s_schema, s_table = q["source_schema"], q["source_table"]

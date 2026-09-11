@@ -154,7 +154,9 @@ try:
         ControlRepository, new_run_id,
         normalize_connection_input, assert_source_system_match,
     )
-    from src.source_identity import compute_source_table_id, normalize_source_system
+    from src.source_identity import (
+        compute_source_table_id, normalize_source_system, require_source_system,
+    )
     from src.source_adapters.factory import get_source_adapter
 except ModuleNotFoundError:
     from identifiers import (
@@ -183,7 +185,9 @@ except ModuleNotFoundError:
         ControlRepository, new_run_id,
         normalize_connection_input, assert_source_system_match,
     )
-    from source_identity import compute_source_table_id, normalize_source_system
+    from source_identity import (
+        compute_source_table_id, normalize_source_system, require_source_system,
+    )
     from source_adapters.factory import get_source_adapter
 
 # COMMAND ----------
@@ -285,7 +289,7 @@ def get_source_adapter_for_row(row):
     goes through get_source_adapter_routed() and the registered connection.
     """
     d = row.asDict() if hasattr(row, "asDict") else dict(row)
-    source_system = d.get("source_system") or "oracle"
+    source_system = require_source_system(d.get("source_system"))
     probe = get_source_adapter(source_system)
     scope = _legacy_scope_for(probe)
     if not scope:
@@ -320,7 +324,8 @@ def get_source_adapter_for_connection(connection, source_database=None,
         raise ValueError(
             f"connection {c.get('connection_id')!r} is not VALID "
             f"(status={c.get('connection_status')!r}); validate it first")
-    source_system = c.get("source_system") or "oracle"
+    source_system = require_source_system(
+        c.get("source_system"), "registered connection")
     database = source_database or c.get("source_database")
     extra = {}
     if c.get("trust_server_certificate") is not None:
@@ -380,7 +385,7 @@ def source_table_id_for_row(row):
     "Compute the deterministic source_table_id for a control/queue row."
     d = row.asDict() if hasattr(row, "asDict") else dict(row)
     return compute_source_table_id(
-        d.get("source_system") or "oracle",
+        require_source_system(d.get("source_system")),
         d.get("source_server"),
         d.get("source_database"),
         d.get("source_schema"),
@@ -469,7 +474,7 @@ def control_repo():
     return ControlRepository(spark, CATALOG, CONTROL_SCHEMA)
 
 
-def load_type_mapper(source_system="oracle"):
+def load_type_mapper(source_system):
     "Load a source's Delta mapping rules using the file the adapter names."
     adapter = build_adapter(source_system)
     print(f"[_common] loading {adapter.source_system} type rules from "

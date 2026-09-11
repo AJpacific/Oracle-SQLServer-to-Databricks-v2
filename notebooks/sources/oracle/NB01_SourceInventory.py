@@ -24,7 +24,8 @@ print("run_id:", run_id, "| connection_id:", connection_id or "(all Oracle rows)
 
 active = [
     r for r in repo.active_tables(connection_id=(connection_id or None)).collect()
-    if normalize_source_system(r.asDict().get("source_system") or SOURCE_SYSTEM)
+    if require_source_system(
+        r.asDict().get("source_system"), "source_table_control row")
     == SOURCE_SYSTEM
 ]
 print(f"Active Oracle tables to inventory: {len(active)}")

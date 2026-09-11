@@ -72,6 +72,13 @@ def normalize_source_system(value) -> str:
     )
 
 
+def require_source_system(value, context="source row") -> str:
+    """Return a canonical source token or raise for missing source metadata."""
+    if value is None or not str(value).strip():
+        raise ValueError(f"{context} requires source_system")
+    return normalize_source_system(value)
+
+
 def _normalize_identity_component(value) -> str:
     """Case-insensitive normalization for a system/server/database identity part.
 
@@ -97,7 +104,7 @@ def compute_source_table_id(source_system, source_server, source_database,
     is preserved. source_schema and source_table are mandatory; a missing
     server/database is allowed (normalizes to '').
     """
-    system = normalize_source_system(source_system)
+    system = require_source_system(source_system, "source table identity")
     server = _normalize_identity_component(source_server)
     database = _normalize_identity_component(source_database)
     schema = _require(source_schema, "source_schema")

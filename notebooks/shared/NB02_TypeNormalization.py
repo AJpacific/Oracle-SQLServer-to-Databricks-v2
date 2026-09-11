@@ -52,7 +52,8 @@ for r in rows:
     length = _to_int(r["character_maximum_length"])
     nullable = (str(r["is_nullable"]).upper() == "YES")
     src_id = r["source_table_id"]
-    src_system = r["source_system"]
+    src_system = require_source_system(
+        r["source_system"], "source_inventory row")
     conn_id = r["connection_id"]
     # Group by the source-qualified id so the same schema.table on two sources
     # never share a signature or collide.

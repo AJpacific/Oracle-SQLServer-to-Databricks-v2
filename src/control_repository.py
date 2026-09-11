@@ -27,10 +27,10 @@ except ModuleNotFoundError:
 
 try:
     from src.source_identity import (
-        normalize_source_system, SOURCES_REQUIRING_DATABASE)
+        require_source_system, SOURCES_REQUIRING_DATABASE)
 except ModuleNotFoundError:
     from source_identity import (
-        normalize_source_system, SOURCES_REQUIRING_DATABASE)
+        require_source_system, SOURCES_REQUIRING_DATABASE)
 
 try:
     from src.failure_classifier import sanitize_message as sanitize_error_message
@@ -163,7 +163,8 @@ def normalize_connection_input(raw: dict) -> dict:
         raise ValueError("connection_name is required")
     if not secret_scope:
         raise ValueError("secret_scope is required")
-    source_system = normalize_source_system(raw.get("source_system"))
+    source_system = require_source_system(
+        raw.get("source_system"), "registered connection")
     source_server = (raw.get("source_server") or "").strip() or None
     source_database = (raw.get("source_database") or "").strip() or None
     if source_system in SOURCES_REQUIRING_DATABASE and not source_database:
@@ -182,9 +183,10 @@ def normalize_connection_input(raw: dict) -> dict:
 
 def assert_source_system_match(row_system, connection_system) -> None:
     """Raise when a control-row source_system conflicts with its connection's."""
-    if row_system and connection_system and (
-            normalize_source_system(row_system)
-            != normalize_source_system(connection_system)):
+    row_token = require_source_system(row_system, "source row")
+    connection_token = require_source_system(
+        connection_system, "registered connection")
+    if row_token != connection_token:
         raise ValueError(
             f"source_system conflict: row={row_system!r} "
             f"connection={connection_system!r}")
@@ -269,6 +271,9 @@ class ControlRepository:
         connection_id = connection.get("connection_id")
         if not connection_id:
             raise ValueError("upsert_connection requires connection_id")
+        connection = dict(connection)
+        connection["source_system"] = require_source_system(
+            connection.get("source_system"), "registered connection")
         writable = (
             "connection_name", "source_system", "source_server",
             "source_database", "secret_scope", "trust_server_certificate",
@@ -417,6 +422,8 @@ class ControlRepository:
         source_table_id on rows registered before the id existed; steady-state
         updates use :meth:`update_control` keyed by source_table_id.
         """
+        source_system = require_source_system(
+            source_system, "source table identity")
         assignments = [
             f"{quote_databricks(k)} = {self._render_value(v)}"
             for k, v in fields.items()

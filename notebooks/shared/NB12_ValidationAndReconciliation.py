@@ -52,7 +52,8 @@ any_fail = False
 for r in loaded:
     src_id = r["source_table_id"]
     conn_id = r["connection_id"]
-    src_system = r["source_system"]
+    src_system = require_source_system(
+        r["source_system"], "reconciliation source row")
     src_server = r["source_server"]
     src_db = r["source_database"]
     s_schema, s_table = r["source_schema"], r["source_table"]

@@ -66,6 +66,8 @@ row = repo.get_control_row(src_id)
 if row is None:
     raise ValueError(f"source_table_id {src_id!r} not found in source_table_control")
 d = row.asDict()
+source_system = require_source_system(
+    d.get("source_system"), "source_table_control row")
 
 SUCCESS_INGEST_STATUSES = {"LOADED", "DELTA_SYNCED", "DELTA_FULL_REFRESH_SUCCEEDED",
                            "FULL_LOADED", "NO_CHANGES"}
@@ -110,7 +112,7 @@ work_unit = None
 def log_etl(op, status, err, s_count, t_count, extra=None):
     fields = {
         "run_id": run_id, "source_table_id": src_id,
-        "connection_id": d.get("connection_id"), "source_system": d.get("source_system"),
+        "connection_id": d.get("connection_id"), "source_system": source_system,
         "source_server": d.get("source_server"), "source_database": d.get("source_database"),
         "source_schema": d.get("source_schema"), "source_table": d.get("source_table"),
         "operation": op, "target_full_name": silver_fqn,
@@ -139,7 +141,7 @@ def write_recon(recon_result):
     if not recon_result.checks:
         return
     (spark.createDataFrame(
-        [(run_id, src_id, d.get("connection_id"), d.get("source_system"),
+        [(run_id, src_id, d.get("connection_id"), source_system,
           d.get("source_schema"), d.get("source_table"), c["check_type"],
           c["source_value"], c["target_value"], c["status"], c["message"])
          for c in recon_result.checks],

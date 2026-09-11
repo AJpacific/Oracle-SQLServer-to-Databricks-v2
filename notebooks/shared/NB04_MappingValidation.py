@@ -35,7 +35,8 @@ results = []
 for r in maps:
     d = r.asDict()
     src_id = r["source_table_id"]
-    src_system = r["source_system"]
+    src_system = require_source_system(
+        r["source_system"], "resolved mapping row")
     conn_id = r["connection_id"]
     schema, table, col = r["source_schema"], r["source_table"], r["column_name"]
     status = (r["mapping_status"] or "").upper()

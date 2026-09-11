@@ -359,10 +359,19 @@ _existing = spark.sql(f"""
       AND source_schema IS NOT NULL AND source_table IS NOT NULL
 """).collect()
 _backfilled = 0
+_skipped_missing_source = 0
 for _r in _existing:
+  if _r["source_system"] is None or not str(_r["source_system"]).strip():
+    _skipped_missing_source += 1
+    print(f"  [warn] skipped source_table_id backfill for "
+        f"{_r['source_schema']}.{_r['source_table']}: "
+        "source_system is missing; classify this legacy row manually")
+    continue
     try:
+    _source_system = require_source_system(
+      _r["source_system"], "legacy source_table_control row")
         _sid = compute_source_table_id(
-            _r["source_system"] or "oracle", _r["source_server"],
+      _source_system, _r["source_server"],
             _r["source_database"], _r["source_schema"], _r["source_table"])
     except Exception as _e:
         _safe_error = failcls.sanitize_message(_e)
@@ -373,7 +382,7 @@ for _r in _existing:
     spark.sql(f"""
         UPDATE {ctrl('source_table_control')}
         SET source_table_id = {escape_string_literal(_sid)},
-            source_system = {escape_string_literal(_r['source_system'] or 'oracle')},
+          source_system = {escape_string_literal(_source_system)},
             updated_ts = current_timestamp()
         WHERE (source_table_id IS NULL OR source_table_id = '')
           AND source_schema = {escape_string_literal(_r['source_schema'])}
@@ -386,6 +395,7 @@ for _r in _existing:
     _backfilled += 1
 if _backfilled:
     print(f"Backfilled source_table_id for {_backfilled} existing control row(s).")
+print(f"Skipped {_skipped_missing_source} legacy row(s) with missing source_system.")
 
 print("All control & audit tables created.")
 

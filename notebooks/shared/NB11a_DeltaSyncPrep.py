@@ -103,7 +103,8 @@ skipped = []
 for r in eligible:
     d = r.asDict()
     src_id = d["source_table_id"]
-    src_system = d.get("source_system") or "oracle"
+    src_system = require_source_system(
+        d.get("source_system"), "source_table_control row")
     src_server = d.get("source_server")
     src_db = d.get("source_database")
     s_schema, s_table = r["source_schema"], r["source_table"]

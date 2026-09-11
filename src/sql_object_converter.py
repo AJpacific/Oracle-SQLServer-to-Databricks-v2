@@ -16,6 +16,11 @@ from __future__ import annotations
 
 import re
 
+try:
+    from src.source_identity import normalize_source_system
+except ModuleNotFoundError:
+    from source_identity import normalize_source_system
+
 ORACLE = "oracle"
 SQLSERVER = "sqlserver"
 
@@ -57,8 +62,16 @@ _VIEW_REVIEW_SYNTAX = {
 
 
 def _normalize_system(source_system):
-    s = (source_system or "").strip().lower()
-    return ORACLE if s == ORACLE else SQLSERVER
+    if source_system is None or not str(source_system).strip():
+        raise ValueError("SQL-object conversion requires source_system")
+    token = str(source_system).strip().lower()
+    try:
+        return normalize_source_system(token)
+    except ValueError:
+        # A future adapter may use the shared classifier before it has a
+        # source-specific converter. Keep the token distinct; never apply an
+        # existing source's rewrite rules by default.
+        return token
 
 
 def _mask(sql):
@@ -134,7 +147,7 @@ def classify_sql_object(source_system, object_type, source_definition):
             sorted(set(manual_hits))[:8])
 
     if otype == "VIEW":
-        review_hits = _matches(_VIEW_REVIEW_SYNTAX[system], masked)
+        review_hits = _matches(_VIEW_REVIEW_SYNTAX.get(system, ()), masked)
         if review_hits:
             return CONVERT_WITH_REVIEW, "source-specific view syntax: " + ", ".join(
                 sorted(set(review_hits))[:8])
@@ -266,10 +279,13 @@ def convert_sql_object_deterministic(source_system, object_type, source_definiti
     sql = str(source_definition)
     if system == ORACLE:
         sql = _apply_outside_literals(sql, _ORACLE_REPLACEMENTS)
-    else:
+    elif system == SQLSERVER:
         sql = _apply_outside_literals(sql, _SQLSERVER_REPLACEMENTS)
         sql = _convert_brackets(sql)
         sql, _ = _convert_simple_top(sql)
+    else:
+        return (_manual_guidance(system, otype, source_definition),
+                "MANUAL_REDESIGN_GUIDANCE", NOT_SUPPORTED)
     return sql, "DATABRICKS_SQL", GENERATED
 
 

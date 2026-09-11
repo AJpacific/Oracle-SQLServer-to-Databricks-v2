@@ -76,7 +76,12 @@ class TestSystemConflict(unittest.TestCase):
 
     def test_match_ok(self):
         assert_source_system_match("mssql", "sqlserver")  # no raise
-        assert_source_system_match(None, "oracle")        # legacy: no raise
+
+    def test_missing_system_raises(self):
+        with self.assertRaises(ValueError):
+            assert_source_system_match(None, "oracle")
+        with self.assertRaises(ValueError):
+            assert_source_system_match("oracle", "")
 
 
 class TestUpsertConnectionSQL(unittest.TestCase):

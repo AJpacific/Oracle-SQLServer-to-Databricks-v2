@@ -50,6 +50,7 @@ _collided_fqns = {fqn for fqn, ids in _fqn_to_ids.items() if len(ids) > 1}
 provisioned, failed = 0, 0
 for r in auto:
     src_id = r["source_table_id"]
+    require_source_system(r["source_system"], "source_table_control row")
     s_schema, s_table = r["source_schema"], r["source_table"]
     t_catalog = r["target_catalog"] or CATALOG
     t_schema = r["target_schema"] or s_schema.lower()

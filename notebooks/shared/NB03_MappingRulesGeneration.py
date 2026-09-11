@@ -22,7 +22,7 @@ print("run_id:", run_id)
 _adapter_cache = {}
 
 def adapter_for(source_system):
-    key = normalize_source_system(source_system or "oracle")
+    key = require_source_system(source_system, "normalized inventory row")
     if key not in _adapter_cache:
         _adapter_cache[key] = build_adapter(key)
     return _adapter_cache[key]
@@ -45,7 +45,8 @@ print("Columns to map:", len(norm))
 
 mapped = []
 for r in norm:
-    src_system = r["source_system"] or "oracle"
+    src_system = require_source_system(
+        r["source_system"], "normalized inventory row")
     try:
         adapter = adapter_for(src_system)
         res = adapter.load_type_mapper().map_column(

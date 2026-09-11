@@ -38,8 +38,10 @@ agg = defaultdict(lambda: {"total": 0, "blocked": 0, "review": 0,
                            "connection_id": None})
 for r in maps:
     key = r["source_table_id"]
+    source_system = require_source_system(
+        r["source_system"], "resolved mapping row")
     agg[key]["total"] += 1
-    agg[key]["system"] = r["source_system"]
+    agg[key]["system"] = source_system
     agg[key]["schema"] = r["source_schema"]
     agg[key]["table"] = r["source_table"]
     agg[key]["connection_id"] = r["connection_id"]
