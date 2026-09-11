@@ -154,3 +154,17 @@ def duplicate_key_columns(rule, primary_key_columns=None):
 def reason(rule_type, column_name=None):
     """Stable, readable failure reason token for a rejected row/rule."""
     return f"{rule_type}:{column_name}" if column_name else rule_type
+
+
+def default_value_converts(configured_value, converted_value) -> bool:
+    """True when a configured DEFAULT_VALUE survived conversion to the column type.
+
+    The caller performs the single-row cast with Spark and passes the result
+    back; this keeps the decision rule pure and testable. A configured non-null
+    literal that converts to null is a configuration error. An empty string is
+    only acceptable when the target type could actually represent it (i.e. the
+    conversion returned a non-null value).
+    """
+    if configured_value is None:
+        return True
+    return converted_value is not None

@@ -59,6 +59,14 @@ class SourceAdapter(ABC):
     def get_jdbc_url_and_props(self, source_server=None, source_database=None):
         """Return (jdbc_url, props_dict) for this source row."""
 
+    @abstractmethod
+    def connection_probe_query(self):
+        """Return the dialect's trivial connectivity probe sub-query.
+
+        Shared code must never hard-code ``SELECT 1 FROM DUAL`` or ``SELECT 1``;
+        it asks the adapter so a future source supplies its own probe.
+        """
+
     def extra_read_options(self) -> dict:
         """Dialect-specific JDBC read options (overridden where needed)."""
         return {}
@@ -163,6 +171,26 @@ class SourceAdapter(ABC):
     @abstractmethod
     def table_statistics_query(self, source_database=None, source_schema=None):
         ...
+
+    # --------------------------------------------------------- SQL objects
+    # SQL-object support differs per source, so capability is explicit: a source
+    # that cannot assess an object type says so instead of silently returning
+    # empty data. Definition-text extraction stays on the concrete adapters
+    # because the mechanism (ALL_SOURCE vs sys.sql_modules) is dialect-specific.
+    SQL_OBJECT_TYPES = ()
+
+    def supports_sql_object_type(self, object_type) -> bool:
+        """True when this source can assess the given SQL object type."""
+        return self.normalize_sql_object_type(object_type) in self.SQL_OBJECT_TYPES
+
+    def normalize_sql_object_type(self, object_type) -> str:
+        """Normalize a source object-type token to the shared vocabulary.
+
+        Returns an empty string for a code this source does not recognize, so
+        callers can skip it explicitly rather than mislabelling it.
+        """
+        token = (object_type or "").strip().upper().replace(" ", "_")
+        return token if token in self.SQL_OBJECT_TYPES else ""
 
     # ------------------------------------------------------- watermark policy
     @abstractmethod

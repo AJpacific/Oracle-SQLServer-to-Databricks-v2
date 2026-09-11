@@ -10,61 +10,103 @@ config/
   type_rules_oracle.yaml
   type_rules_sqlserver.yaml
 notebooks/
-  _common.py
-  00_TEST_ORACLE_CONNECTION.py
-  00_TEST_SQLSERVER_CONNECTION.py
-  NB00_ControlTableInit.py
-  NB00A_UpsertAndValidateConnection.py
-  NB01_SourceInventory.py
-  NB01A_SourceAssessment.py
-  NB01B_RegisterSelectedTables.py
-  NB02_TypeNormalization.py
-  NB03_MappingRulesGeneration.py
-  NB04_MappingValidation.py
-  NB07_TableDecisionGeneration.py
-  NB08_TargetProvisioning.py
-  NB09_FullLoad.py
-  NB10_PostFullLoadState.py
-  NB11a_DeltaSyncPrep.py
-  NB11b_DeltaSyncApply.py
-  NB12_ValidationAndReconciliation.py
-  NB13_SQLObjectAssessmentAndConversion.py
-  NB14_RetryFailedTables.py
-  NB15_BronzeToSilverETL.py
-  NB16_NotifyFailures.py
-  NB17_DashboardViews.py
+  shared/                       # source-neutral; identical for every source
+    _common.py
+    NB00_ControlTableInit.py
+    NB01B_RegisterSelectedTables.py
+    NB02_TypeNormalization.py
+    NB03_MappingRulesGeneration.py
+    NB04_MappingValidation.py
+    NB07_TableDecisionGeneration.py
+    NB08_TargetProvisioning.py
+    NB09_FullLoad.py
+    NB10_PostFullLoadState.py
+    NB11a_DeltaSyncPrep.py
+    NB11b_DeltaSyncApply.py
+    NB12_ValidationAndReconciliation.py
+    NB14_RetryFailedTables.py
+    NB15_BronzeToSilverETL.py
+    NB16_NotifyFailures.py
+    NB17_DashboardViews.py
+  sources/                      # thin, dialect-specific operational notebooks
+    oracle/
+      NB00A_UpsertAndValidateConnection.py
+      NB01_SourceInventory.py
+      NB01A_SourceAssessment.py
+      NB13_SQLObjectAssessmentAndConversion.py
+      TEST_CONNECTION.py
+    sqlserver/
+      NB00A_UpsertAndValidateConnection.py
+      NB01_SourceInventory.py
+      NB01A_SourceAssessment.py
+      NB13_SQLObjectAssessmentAndConversion.py
+      TEST_CONNECTION.py
+  <NBxx>.py                     # compatibility wrappers -> %run ./shared/<NBxx>
 src/
   source_adapters/
     base.py
     factory.py
     oracle.py
     sqlserver.py
+  assessment_common.py
   control_repository.py
   crosssourcetypemapper.py
   ddl_builder.py
   dq_rules.py
   failure_classifier.py
   identifiers.py
+  inventory_common.py
   partitioning.py
   reconciliation.py
   source_identity.py
+  source_registry.py
   sql_builder.py
+  sql_object_assessment_common.py
   sql_object_converter.py
   sqlserver_sql_builder.py
   strategy.py
 docs/
   installation.md
   supported_features_and_limitations.md
+  databricks_job_task_mapping.md
 tests/
   _fakes.py
+  _nbsource.py
   test_connection_registry.py
   test_assessment.py
   test_reconciliation.py
   test_failure_retry.py
   test_sql_object_converter.py
   test_etl_dq.py
+  test_defect_fixes.py
+  test_modularity.py
+  test_notebook_wiring.py
 requirements-dev.txt
 ```
+
+## Modular source architecture
+
+Logic that is identical for every source lives in `notebooks/shared/` and
+`src/`. Logic that changes with the source dialect, catalog, metadata,
+connectivity, or SQL lives in `notebooks/sources/<source>/` and in that source's
+adapter. Shared notebooks never branch on `source_system` for a source-specific
+operation - dialect SQL always arrives through the adapter.
+
+Each source folder provides exactly five thin notebooks: connection validation,
+broad assessment, metadata inventory, SQL-object assessment, and a connection
+diagnostic. Everything else - Bronze provisioning and loading, reconciliation,
+checkpoints, ETL, quarantine, retries, dashboards, notifications, and
+control-table DDL - is shared and never duplicated per source.
+
+Adding a future source requires a new adapter, one factory registration, one
+`src/source_registry.py` entry, and those five notebooks. No shared notebook
+changes. See `docs/databricks_job_task_mapping.md` for the template.
+
+Source notebooks bootstrap with `%run ../../shared/_common`; shared notebooks
+use `%run ./_common`. Compatibility wrappers remain at the original
+`notebooks/<NB>.py` paths and simply `%run ./shared/<NB>`, so existing job
+definitions keep working - there is exactly one authoritative implementation of
+each notebook.
 
 ## Architecture: two pipelines (INGEST and ETL)
 
@@ -250,30 +292,31 @@ The generated direct JDBC URL enables encryption and does not trust the server c
 
 ## INGEST onboarding workflow
 
-Run in this order:
+Run in this order (source-specific tasks pick the matching `sources/<source>/`
+notebook; everything else is shared):
 
 ```text
-NB00_ControlTableInit
-NB00A_UpsertAndValidateConnection
-NB01A_SourceAssessment
-NB01B_RegisterSelectedTables
-NB01_SourceInventory
-NB02_TypeNormalization
-NB03_MappingRulesGeneration
-NB04_MappingValidation
-NB07_TableDecisionGeneration
-NB08_TargetProvisioning
-NB09_FullLoad            (per table, inside a ForEach)
-NB12_ValidationAndReconciliation with mode=full
-NB10_PostFullLoadState
+shared/NB00_ControlTableInit
+sources/<source>/NB00A_UpsertAndValidateConnection
+sources/<source>/NB01A_SourceAssessment
+shared/NB01B_RegisterSelectedTables
+sources/<source>/NB01_SourceInventory
+shared/NB02_TypeNormalization
+shared/NB03_MappingRulesGeneration
+shared/NB04_MappingValidation
+shared/NB07_TableDecisionGeneration
+shared/NB08_TargetProvisioning
+shared/NB09_FullLoad            (per table, inside a ForEach)
+shared/NB12_ValidationAndReconciliation with mode=full
+shared/NB10_PostFullLoadState
+sources/<source>/NB13_SQLObjectAssessmentAndConversion
 ```
 
-NB01–NB08 are **bulk** metadata tasks: each processes the selected active tables
-for the run, optionally scoped by `connection_id`. Only the load stage (NB09) runs
-per table inside a ForEach. NB09 performs an overwrite-only initial snapshot load
-and fails if a supplied `source_table_id` does not resolve to exactly one
-eligible table. NB10 commits initial state only for tables with a passing
-`FULL_SNAPSHOT_COUNT` reconciliation.
+NB02–NB08 are **bulk** shared metadata tasks: each processes the selected rows
+for the run, scoped by `connection_id`. Only the load stage (NB09) runs per
+table inside a ForEach, and it fails if a supplied `source_table_id` does not
+resolve to exactly one eligible table. NB10 commits initial state only for
+tables with a passing `FULL_SNAPSHOT_COUNT` reconciliation.
 
 See `docs/databricks_job_task_mapping.md` for the exact task keys and parameters.
 
@@ -282,9 +325,9 @@ See `docs/databricks_job_task_mapping.md` for the exact task keys and parameters
 Run in this order:
 
 ```text
-NB11a_DeltaSyncPrep
-NB11b_DeltaSyncApply
-NB12_ValidationAndReconciliation with mode=delta
+shared/NB11a_DeltaSyncPrep
+shared/NB11b_DeltaSyncApply
+shared/NB12_ValidationAndReconciliation with mode=delta
 ```
 
 Supported strategies:

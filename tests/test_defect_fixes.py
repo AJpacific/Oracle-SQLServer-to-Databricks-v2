@@ -188,7 +188,6 @@ class TestSafeRecoverySelectable(unittest.TestCase):
 
 class TestRuleValidationHardening(unittest.TestCase):
     COLS = {"id", "name", "status"}
-
     def test_missing_column_fails(self):
         with self.assertRaises(ValueError):
             dq.validate_rule({"rule_type": "NOT_NULL", "column_name": "absent"},
@@ -232,6 +231,87 @@ class TestRuleValidationHardening(unittest.TestCase):
 
     def test_rule_validation_without_columns_is_backward_compatible(self):
         dq.validate_rule({"rule_type": "NOT_NULL", "column_name": "anything"})
+
+
+class TestDefaultValueConversion(unittest.TestCase):
+    """A configured DEFAULT_VALUE that cannot be represented must fail."""
+
+    def test_null_default_is_always_acceptable(self):
+        self.assertTrue(dq.default_value_converts(None, None))
+
+    def test_convertible_value_accepted(self):
+        self.assertTrue(dq.default_value_converts("42", 42))
+        self.assertTrue(dq.default_value_converts("", ""))
+
+    def test_value_that_casts_to_null_rejected(self):
+        # e.g. DEFAULT_VALUE 'abc' on an INT column -> try_cast yields null.
+        self.assertFalse(dq.default_value_converts("abc", None))
+
+    def test_empty_string_on_numeric_rejected(self):
+        self.assertFalse(dq.default_value_converts("", None))
+
+
+class TestControlRepositorySanitization(unittest.TestCase):
+    """Only message fields are sanitized; identifiers are left intact."""
+
+    class _RecordingSpark:
+        def __init__(self):
+            self.executed = []
+
+        def sql(self, statement):
+            self.executed.append(statement)
+            return _NoRows()
+
+    def _repo(self):
+        spark = self._RecordingSpark()
+        return cr.ControlRepository(spark, "cat", "control"), spark
+
+    def test_update_control_sanitizes_error_message(self):
+        repo, spark = self._repo()
+        repo.update_control("sid", {
+            "error_message": "login failed for user=sa;password=Secret123!"})
+        sql = spark.executed[-1]
+        self.assertNotIn("Secret123", sql)
+        self.assertIn("***", sql)
+
+    def test_update_control_sanitizes_etl_error_message(self):
+        repo, spark = self._repo()
+        repo.update_control("sid", {"etl_error_message": "token=abc123xyz"})
+        self.assertNotIn("abc123xyz", spark.executed[-1])
+
+    def test_update_control_does_not_rewrite_identifiers(self):
+        repo, spark = self._repo()
+        repo.update_control("sid", {
+            "target_schema": "user_password_data",
+            "current_status": "LOADED",
+            "target_table": "tokens"})
+        sql = spark.executed[-1]
+        self.assertIn("user_password_data", sql)
+        self.assertIn("LOADED", sql)
+        self.assertIn("tokens", sql)
+
+    def test_update_connection_status_sanitizes(self):
+        repo, spark = self._repo()
+        repo.update_connection_status("c1", "FAILED",
+                                      "jdbc:sqlserver://h;password=hunter2")
+        sql = spark.executed[-1]
+        self.assertNotIn("hunter2", sql)
+        self.assertIn("FAILED", sql)
+
+    def test_log_job_run_sanitizes_message(self):
+        repo, spark = self._repo()
+        repo.log_job_run("r1", "job", "FAILED", "Authorization: Bearer abcdef123456")
+        self.assertNotIn("abcdef123456", spark.executed[-1])
+
+    def test_log_job_run_keeps_plain_message(self):
+        repo, spark = self._repo()
+        repo.log_job_run("r1", "job", "SUCCEEDED", "control tables ready")
+        self.assertIn("control tables ready", spark.executed[-1])
+
+
+class _NoRows:
+    def collect(self):
+        return []
 
 
 if __name__ == "__main__":

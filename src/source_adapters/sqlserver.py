@@ -36,8 +36,30 @@ class SqlServerSourceAdapter(SourceAdapter):
     source_system = "sqlserver"
     DRIVER = "com.microsoft.sqlserver.jdbc.SQLServerDriver"
     DEFAULT_PORT = "1433"
+    # SQL Server has no package objects.
+    SQL_OBJECT_TYPES = ("VIEW", "PROCEDURE", "FUNCTION")
+
+    # sys.objects type codes this adapter recognizes. An unlisted code (trigger,
+    # rule, CLR module, ...) normalizes to '' so it is skipped explicitly rather
+    # than mislabelled as a PROCEDURE.
+    _MODULE_TYPE_CODES = {
+        "V": "VIEW", "P": "PROCEDURE", "PC": "PROCEDURE",
+        "FN": "FUNCTION", "IF": "FUNCTION", "TF": "FUNCTION",
+        "FS": "FUNCTION", "FT": "FUNCTION",
+    }
+
+    def normalize_sql_object_type(self, object_type) -> str:
+        token = (object_type or "").strip().upper()
+        mapped = self._MODULE_TYPE_CODES.get(token)
+        if mapped:
+            return mapped
+        normalized = token.replace(" ", "_")
+        return normalized if normalized in self.SQL_OBJECT_TYPES else ""
 
     # ------------------------------------------------------------ connection
+    def connection_probe_query(self):
+        return "(SELECT 1 AS CONNECTION_OK) q"
+
     def get_jdbc_url_and_props(self, source_server=None, source_database=None):
         """Build the SQL Server JDBC url + props from the secret scope.
 

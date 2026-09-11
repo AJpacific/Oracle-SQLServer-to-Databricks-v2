@@ -32,8 +32,13 @@ except ModuleNotFoundError:
 class OracleSourceAdapter(SourceAdapter):
     source_system = "oracle"
     DRIVER = "oracle.jdbc.OracleDriver"
+    SQL_OBJECT_TYPES = ("VIEW", "PROCEDURE", "FUNCTION", "PACKAGE",
+                        "PACKAGE_BODY")
 
     # ------------------------------------------------------------ connection
+    def connection_probe_query(self):
+        return "(SELECT 1 AS CONNECTION_OK FROM DUAL) q"
+
     def get_jdbc_url_and_props(self, source_server=None, source_database=None):
         """Build the Oracle thin JDBC url + props from the secret scope.
 

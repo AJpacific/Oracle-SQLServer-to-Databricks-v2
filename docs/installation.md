@@ -17,10 +17,19 @@ Server JDBC drivers on the cluster. Only the pure unit tests use dev tooling.
 ## 2. Import the repository
 
 Import this repo as a Databricks Git folder (Repos) so the `src/` package and
-the `notebooks/` are available. `notebooks/_common.py` discovers the repo root
-from the running notebook path (no hard-coded workspace path). If you run a
-notebook outside a Git folder, set the `src_path` widget to the absolute path of
-the `src/` directory.
+the `notebooks/` tree are available. `notebooks/shared/_common.py` discovers the
+repo root from the running notebook path (no hard-coded workspace path). If you
+run a notebook outside a Git folder, set the `src_path` widget to the absolute
+path of the `src/` directory.
+
+Notebook layout:
+
+- `notebooks/shared/` - source-neutral notebooks (bootstrap with `%run ./_common`)
+- `notebooks/sources/<source>/` - dialect-specific notebooks
+  (bootstrap with `%run ../../shared/_common`)
+- `notebooks/<NB>.py` - compatibility wrappers that `%run ./shared/<NB>`
+
+Verify the relative `%run` paths resolve after import before running any job.
 
 ## 3. Create secret scopes (per connection)
 
@@ -38,17 +47,20 @@ default; enable trust only per connection via `trust_server_certificate=true`.
 
 ## 4. Initialize control tables
 
-Run `NB00_ControlTableInit`. It is idempotent and never drops tables. It creates
-the control schema, all control/audit tables, the new `source_connection`,
+Run `shared/NB00_ControlTableInit`. It is idempotent and never drops tables. It
+creates the control schema, all control/audit tables, the `source_connection`,
 `source_assessment`, `sql_object_assessment`, `dq_rule`, `dq_result`, and
 `dq_quarantine` tables, and idempotently adds the `connection_id`, ETL, retry,
 and reconciliation columns to existing tables.
 
 ## 5. Onboard a connection
 
-Run `NB00A_UpsertAndValidateConnection` with `connection_id`, `connection_name`,
-`source_system`, `secret_scope`, and (for SQL Server) `source_database`. It
-stores only non-secret metadata and runs a connectivity probe; on success the
+Run the connection notebook for your source:
+`sources/oracle/NB00A_UpsertAndValidateConnection` or
+`sources/sqlserver/NB00A_UpsertAndValidateConnection`. Supply `connection_id`,
+`connection_name`, `secret_scope`, and (for SQL Server) `source_database`.
+`source_system` is fixed by the notebook, not a widget. It stores only
+non-secret metadata and runs the source's own connectivity probe; on success the
 connection becomes `VALID`.
 
 ## 6. Run the pipelines

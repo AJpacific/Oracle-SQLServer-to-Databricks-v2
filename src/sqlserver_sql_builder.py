@@ -342,7 +342,7 @@ def list_schemas_query(database: str = None) -> str:
 
 
 def list_tables_query(database: str = None, owner: str = None) -> str:
-    """SQL Server user tables with exact catalog row counts (sys.partitions)."""
+    """SQL Server user tables with catalog row counts (sys.partitions)."""
     p = _ss_prefix(database)
     return (
         "(SELECT s.name AS SCHEMA_NAME, t.name AS OBJECT_NAME, "
@@ -385,8 +385,14 @@ def table_statistics_query(database: str = None, owner: str = None) -> str:
     (``index_id IN (0,1)``) - it is catalog metadata, not a ``COUNT_BIG(*)``
     executed against the table, so it is labelled CATALOG rather than EXACT.
 
-    SIZE_MB is the *reserved* size of the base table and all of its indexes
-    (``SUM(total_pages) * 8 KiB`` over every allocation unit of the object).
+    SIZE_MB sums ``total_pages`` over the allocation units reached from each
+    partition via ``allocation_units.container_id = partitions.partition_id``.
+    That container relationship covers IN_ROW_DATA and ROW_OVERFLOW_DATA units;
+    LOB_DATA units whose container is an allocation-unit id rather than a
+    partition id are NOT counted. SIZE_MB is therefore a conservative
+    lower bound on reserved size across the base table and its indexes, not a
+    complete reserved-size figure. Confirming the complete relationship requires
+    a live SQL Server check and is documented as a manual validation step.
 
     Row count and size are aggregated in separate CTEs and joined by object_id so
     the row count is never multiplied by the index/allocation-unit join.

@@ -26,9 +26,11 @@ except ModuleNotFoundError:
     )
 
 try:
-    from src.source_identity import normalize_source_system
+    from src.source_identity import (
+        normalize_source_system, SOURCES_REQUIRING_DATABASE)
 except ModuleNotFoundError:
-    from source_identity import normalize_source_system
+    from source_identity import (
+        normalize_source_system, SOURCES_REQUIRING_DATABASE)
 
 try:
     from src.failure_classifier import sanitize_message as sanitize_error_message
@@ -44,6 +46,12 @@ SECRET_FIELD_KEYS = frozenset({
     "secret", "secret_value", "client_secret", "jdbc_url", "url",
     "webhook_url", "webhook", "sas",
 })
+
+
+# Only these control-table columns may carry free-form text from an exception,
+# so only these are sanitized. Identifiers, table/schema/database names, status
+# values, and metrics are never rewritten.
+SANITIZED_CONTROL_FIELDS = frozenset({"error_message", "etl_error_message"})
 
 
 def _to_long(value):
@@ -158,8 +166,9 @@ def normalize_connection_input(raw: dict) -> dict:
     source_system = normalize_source_system(raw.get("source_system"))
     source_server = (raw.get("source_server") or "").strip() or None
     source_database = (raw.get("source_database") or "").strip() or None
-    if source_system == "sqlserver" and not source_database:
-        raise ValueError("SQL Server connections require source_database")
+    if source_system in SOURCES_REQUIRING_DATABASE and not source_database:
+        raise ValueError(
+            f"{source_system} connections require source_database")
     return {
         "connection_id": connection_id,
         "connection_name": connection_name,
@@ -294,12 +303,14 @@ class ControlRepository:
 
     def update_connection_status(self, connection_id: str, status: str,
                                  error_message: str = None):
-        """Set a connection's status (and optional sanitized error)."""
+        """Set a connection's status (and optional error, sanitized on write)."""
         if not connection_id:
             raise ValueError("update_connection_status requires connection_id")
+        safe_error = (sanitize_error_message(error_message)
+                      if error_message is not None else None)
         assignments = [
             f"`connection_status` = {escape_string_literal(status)}",
-            f"`error_message` = {escape_string_literal(error_message)}",
+            f"`error_message` = {escape_string_literal(safe_error)}",
             "`updated_ts` = current_timestamp()",
         ]
         if status == "VALID":
@@ -375,6 +386,8 @@ class ControlRepository:
         assignments = []
 
         for k, v in fields.items():
+            if k in SANITIZED_CONTROL_FIELDS and v is not None:
+                v = sanitize_error_message(v)
             assignments.append(
                 f"{quote_databricks(k)} = {self._render_value(v)}"
             )
@@ -468,6 +481,7 @@ class ControlRepository:
         status,
         message=""
     ):
+        safe_message = sanitize_error_message(message) if message else message
         self.spark.sql(f"""
             INSERT INTO {self.ctrl('job_run_log')}
             VALUES (
@@ -476,7 +490,7 @@ class ControlRepository:
                 {escape_string_literal(status)},
                 current_timestamp(),
                 current_timestamp(),
-                {escape_string_literal(message)}
+                {escape_string_literal(safe_message)}
             )
         """)
 

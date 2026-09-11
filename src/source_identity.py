@@ -44,6 +44,11 @@ _SQLSERVER_SYNONYMS = {
 ORACLE = "oracle"
 SQLSERVER = "sqlserver"
 
+# Sources whose connection identity is incomplete without an explicit database.
+# Declared here so connection validation stays declarative: a future source
+# opts in by adding its token rather than by adding another branch.
+SOURCES_REQUIRING_DATABASE = frozenset({SQLSERVER})
+
 
 def normalize_source_system(value) -> str:
     """Normalize a raw ``source_system`` value to a canonical token.

@@ -10,13 +10,20 @@
 ### INGEST pipeline (source -> Bronze)
 - Pipeline-driven multi-connection onboarding (`source_connection` registry,
   `NB00A`). Only non-secret metadata is stored.
-- Broad source assessment (`NB01A`) using data-dictionary / catalog views:
-  schemas, tables, views, procedures, functions, packages. Row counts are
-  labelled `CATALOG` (SQL Server catalog metadata from `sys.partitions`,
-  heap/clustered partitions only), `ESTIMATED` (Oracle `ALL_TABLES.NUM_ROWS`),
-  or `UNAVAILABLE`. A broad assessment never executes a per-table `COUNT(*)` /
-  `COUNT_BIG(*)`, so no label claims an executed exact count. `SIZE_MB` is the
-  reserved size of the base table and all of its indexes.
+- Broad source assessment (`NB01A`, one notebook per source) using
+  data-dictionary / catalog views: schemas, tables, views, procedures,
+  functions, packages. Row counts are labelled `CATALOG` (SQL Server catalog
+  metadata from `sys.partitions`, heap/clustered partitions only), `ESTIMATED`
+  (Oracle `ALL_TABLES.NUM_ROWS` optimizer statistics), or `UNAVAILABLE`. A broad
+  assessment never executes a per-table `COUNT(*)` / `COUNT_BIG(*)`, so no label
+  claims an executed exact count.
+- **SQL Server `SIZE_MB` is a conservative lower bound**, not a verified
+  complete reserved size: it sums `total_pages` over allocation units reached
+  from each partition through `container_id = partition_id`, which covers
+  IN_ROW_DATA and ROW_OVERFLOW_DATA but not LOB_DATA units keyed by an
+  allocation-unit id. Validating the complete relationship requires a live SQL
+  Server check (see the manual validation checklist); it has not been verified
+  by the pure unit tests.
 - Source assessment and SQL-object assessment are retry-safe: re-running the
   same `assessment_id` updates its own rows instead of duplicating them, and an
   existing `APPROVED`/`REJECTED` review decision is preserved.

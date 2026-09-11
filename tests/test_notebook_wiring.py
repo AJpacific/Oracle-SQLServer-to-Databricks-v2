@@ -1,203 +1,245 @@
 """
-Static source checks for notebook-level defects that cannot be unit tested
-without Spark: connection-id routing, connection_id propagation, run_id
-priority, targeted is_selected, ETL ordering guarantees, terminology, and the
-absence of hard-coded environment values.
+Static source checks for notebook-level behavior that cannot be unit tested
+without Spark: connection routing, connection_id propagation and scoping, run_id
+priority, ETL ordering guarantees, retry frozen-interval reuse, state-only
+recovery auditing, and production cleanliness.
 
-These read the notebook source text; they do not execute any notebook.
+These read notebook source text; they never execute a notebook.
 """
 
 import os
 import re
+import sys
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
-NB = os.path.join(ROOT, "notebooks")
+for p in (HERE, os.path.dirname(HERE)):
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
-
-def read_nb(name):
-    with open(os.path.join(NB, name), "r", encoding="utf-8") as fh:
-        return fh.read()
-
-
-def all_notebooks():
-    return [f for f in os.listdir(NB) if f.endswith(".py")]
+from _nbsource import (  # noqa: E402
+    SHARED_NOTEBOOKS, SOURCE_TOKENS, shared_nb, source_nb,
+    all_shared_notebooks, all_source_notebooks,
+)
 
 
 class TestConnectionRouting(unittest.TestCase):
-    PRODUCTION_SOURCE_NOTEBOOKS = [
-        "NB01_SourceInventory.py",
-        "NB09_FullLoad.py",
-        "NB10_PostFullLoadState.py",
-        "NB11a_DeltaSyncPrep.py",
-        "NB11b_DeltaSyncApply.py",
-    ]
+    ROUTED = ("NB09_FullLoad.py", "NB10_PostFullLoadState.py",
+              "NB11a_DeltaSyncPrep.py", "NB11b_DeltaSyncApply.py")
 
-    def test_production_notebooks_use_routed_adapter(self):
-        for name in self.PRODUCTION_SOURCE_NOTEBOOKS:
-            src = read_nb(name)
-            self.assertIn("get_source_adapter_routed(", src, name)
+    def test_shared_source_notebooks_use_routed_adapter(self):
+        for name in self.ROUTED:
+            self.assertIn("get_source_adapter_routed(", shared_nb(name), name)
 
-    def test_no_legacy_row_adapter_in_production_notebooks(self):
-        # The legacy helper may only remain as the internal fallback in _common.
-        for name in all_notebooks():
-            if name == "_common.py":
-                continue
-            src = read_nb(name)
-            self.assertNotIn("get_source_adapter_for_row(", src, name)
+    def test_source_inventory_uses_routed_adapter(self):
+        for token in SOURCE_TOKENS:
+            self.assertIn("get_source_adapter_routed(",
+                          source_nb(token, "NB01_SourceInventory.py"), token)
 
-    def test_common_keeps_documented_fallback(self):
-        src = read_nb("_common.py")
-        self.assertIn("def get_source_adapter_for_row(", src)
-        self.assertIn("def get_source_adapter_routed(", src)
+    def test_legacy_row_adapter_only_in_common_fallback(self):
+        for name in SHARED_NOTEBOOKS:
+            self.assertNotIn("get_source_adapter_for_row(", shared_nb(name), name)
+        for token, name in all_source_notebooks():
+            self.assertNotIn("get_source_adapter_for_row(",
+                             source_nb(token, name), f"{token}/{name}")
+        common = shared_nb("_common.py")
+        self.assertIn("def get_source_adapter_for_row(", common)
+        self.assertIn("def get_source_adapter_routed(", common)
 
-    def test_routing_requires_valid_and_guards_conflict(self):
-        src = read_nb("_common.py")
-        self.assertIn("assert_source_system_match", src)
-        self.assertIn("not found in source_connection", src)
-        self.assertIn("is not VALID", src)
+    def test_routing_guards_connection_state(self):
+        common = shared_nb("_common.py")
+        self.assertIn("assert_source_system_match", common)
+        self.assertIn("not found in source_connection", common)
+        self.assertIn("is not VALID", common)
 
-    def test_no_legacy_oracle_read_jdbc_in_production(self):
-        for name in all_notebooks():
-            if name in ("_common.py", "00_TEST_ORACLE_CONNECTION.py"):
-                continue
-            src = read_nb(name)
-            self.assertIsNone(re.search(r"(?<![._\w])read_jdbc\(", src), name)
+    def test_no_legacy_oracle_read_jdbc_outside_common(self):
+        for name in SHARED_NOTEBOOKS:
+            self.assertIsNone(
+                re.search(r"(?<![._\w])read_jdbc\(", shared_nb(name)), name)
+        for token, name in all_source_notebooks():
+            self.assertIsNone(
+                re.search(r"(?<![._\w])read_jdbc\(", source_nb(token, name)),
+                f"{token}/{name}")
 
 
-class TestConnectionIdPropagation(unittest.TestCase):
+class TestConnectionIdPropagationAndScoping(unittest.TestCase):
     def test_inventory_writes_connection_id(self):
-        src = read_nb("NB01_SourceInventory.py")
-        self.assertIn('StructField("connection_id"', src)
-        self.assertIn("conn_id", src)
+        for token in SOURCE_TOKENS:
+            code = source_nb(token, "NB01_SourceInventory.py")
+            self.assertIn('"connection_id": conn_id', code, token)
 
-    def test_normalized_inventory_writes_connection_id(self):
-        self.assertIn('StructField("connection_id"',
-                      read_nb("NB02_TypeNormalization.py"))
+    def test_bulk_notebooks_scope_by_connection(self):
+        for name in ("NB02_TypeNormalization.py", "NB03_MappingRulesGeneration.py",
+                     "NB04_MappingValidation.py", "NB07_TableDecisionGeneration.py"):
+            code = shared_nb(name)
+            self.assertIn("CONNECTION_ID", code, name)
+            self.assertIn("connection_id = {escape_string_literal(CONNECTION_ID)}",
+                          code, name)
 
-    def test_mappings_write_connection_id(self):
-        self.assertIn('StructField("connection_id"',
-                      read_nb("NB03_MappingRulesGeneration.py"))
+    def test_provisioning_scopes_active_tables(self):
+        self.assertIn("repo.active_tables(connection_id=(CONNECTION_ID or None)",
+                      shared_nb("NB08_TargetProvisioning.py"))
 
-    def test_validation_results_write_connection_id(self):
-        self.assertIn('"connection_id"', read_nb("NB04_MappingValidation.py"))
-
-    def test_decisions_and_review_queue_write_connection_id(self):
-        src = read_nb("NB07_TableDecisionGeneration.py")
-        self.assertIn('StructField("connection_id"', src)
-        self.assertIn('"connection_id",', src)
+    def test_full_load_scopes_active_tables(self):
+        self.assertIn("connection_id=(CONNECTION_ID or None)",
+                      shared_nb("NB09_FullLoad.py"))
 
     def test_delta_queue_carries_connection_id(self):
-        src = read_nb("NB11a_DeltaSyncPrep.py")
-        self.assertIn("connection_id=d.get(\"connection_id\")", src)
-        self.assertIn('StructField("connection_id"', src)
+        code = shared_nb("NB11a_DeltaSyncPrep.py")
+        self.assertIn('connection_id=d.get("connection_id")', code)
+        self.assertIn('StructField("connection_id"', code)
 
     def test_reconciliation_results_carry_connection_id(self):
-        src = read_nb("NB12_ValidationAndReconciliation.py")
-        self.assertIn("c.connection_id", src)
-        self.assertIn('"connection_id"', src)
-
-    def test_bulk_notebooks_support_connection_scoping(self):
-        self.assertIn("connection_id=(CONNECTION_ID or None)",
-                      read_nb("NB01_SourceInventory.py"))
-        self.assertIn("connection_id=(CONNECTION_ID or None)",
-                      read_nb("NB09_FullLoad.py"))
-
-
-class TestRegistration(unittest.TestCase):
-    def test_backfills_null_connection_id_only(self):
-        src = read_nb("NB01B_RegisterSelectedTables.py")
-        self.assertIn("WHEN MATCHED", src)
-        self.assertIn("t.connection_id IS NULL OR trim(t.connection_id) = ''", src)
-        self.assertIn("t.connection_id = s.connection_id", src)
-
-    def test_conflicting_connection_id_blocked(self):
-        src = read_nb("NB01B_RegisterSelectedTables.py")
-        self.assertIn("connection conflict", src)
-        self.assertIn("conflicts", src)
-
-    def test_operational_state_not_overwritten(self):
-        src = read_nb("NB01B_RegisterSelectedTables.py")
-        matched = src.split("WHEN MATCHED")[1].split("WHEN NOT MATCHED")[0]
-        for protected in ("last_watermark_value", "initial_load_completed",
-                          "target_table", "target_schema", "current_status",
-                          "load_strategy", "last_successful_run_id"):
-            self.assertNotIn(protected, matched)
-
-    def test_is_selected_is_targeted_not_blanket(self):
-        src = read_nb("NB01B_RegisterSelectedTables.py")
-        self.assertNotIn("SET is_selected = true\n        WHERE", src)
-        self.assertIn("_selected_objects", src)
-        self.assertIn("t.object_name  = s.object_name", src)
+        self.assertIn("c.connection_id",
+                      shared_nb("NB12_ValidationAndReconciliation.py"))
 
 
 class TestRunId(unittest.TestCase):
     def test_widget_has_priority(self):
-        src = read_nb("_common.py")
-        body = src.split("def get_run_id():")[1].split("def set_task_value")[0]
-        widget_pos = body.index('dbutils.widgets.get("run_id")')
-        task_pos = body.index("dbutils.jobs.taskValues.get")
-        new_pos = body.index("return new_run_id()")
-        self.assertLess(widget_pos, task_pos)
-        self.assertLess(task_pos, new_pos)
-
-    def test_retry_child_run_id_is_passed_explicitly(self):
-        self.assertIn('dbutils.widgets.get("run_id")',
-                      read_nb("NB15_BronzeToSilverETL.py"))
+        body = (shared_nb("_common.py").split("def get_run_id():")[1]
+                .split("def set_task_value")[0])
+        self.assertLess(body.index('dbutils.widgets.get("run_id")'),
+                        body.index("dbutils.jobs.taskValues.get"))
+        self.assertLess(body.index("dbutils.jobs.taskValues.get"),
+                        body.index("return new_run_id()"))
 
 
-class TestAssessmentIdempotency(unittest.TestCase):
-    def test_source_assessment_uses_merge(self):
-        src = read_nb("NB01A_SourceAssessment.py")
-        self.assertIn("MERGE INTO", src)
-        self.assertIn("_assessed_objects", src)
-        self.assertNotIn('mode("append")', src)
-
-    def test_sql_object_assessment_uses_merge_and_keeps_review(self):
-        src = read_nb("NB13_SQLObjectAssessmentAndConversion.py")
-        self.assertIn("MERGE INTO", src)
-        self.assertIn("APPROVED", src)
-        self.assertIn("REJECTED", src)
-
-    def test_unknown_sqlserver_type_not_defaulted_to_procedure(self):
-        src = read_nb("NB13_SQLObjectAssessmentAndConversion.py")
-        self.assertNotIn('_SS_TYPE.get((m["OBJECT_TYPE"] or "").strip(), "PROCEDURE")',
-                         src)
-        self.assertIn("skipped_types", src)
-
-    def test_missing_definition_is_unable_to_assess(self):
-        src = read_nb("NB13_SQLObjectAssessmentAndConversion.py")
-        self.assertIn('complexity = "UNABLE_TO_ASSESS"', src)
-
-    def test_package_and_package_body_distinct(self):
-        src = read_nb("NB13_SQLObjectAssessmentAndConversion.py")
-        self.assertIn('"PACKAGE_BODY"', src)
-        self.assertIn("_ORACLE_TYPES", src)
-
-
-class TestEtlOrdering(unittest.TestCase):
+class TestDeltaApplyScoping(unittest.TestCase):
     SRC = None
 
     @classmethod
     def setUpClass(cls):
-        cls.SRC = read_nb("NB15_BronzeToSilverETL.py")
+        cls.SRC = shared_nb("NB11b_DeltaSyncApply.py")
+
+    def test_normal_queue_query_is_scoped(self):
+        self.assertIn("queue_scope", self.SRC)
+        self.assertIn("AND source_table_id = {escape_string_literal(only_id)}",
+                      self.SRC)
+
+    def test_scoped_run_requires_exactly_one_queued_row(self):
+        self.assertIn("resolved to {len(queue)} QUEUED rows", self.SRC)
+        self.assertIn("expected exactly 1", self.SRC)
+
+    def test_retry_delta_apply_requires_parent_run(self):
+        self.assertIn("RETRY_DELTA_APPLY requires both parent_run_id and "
+                      "source_table_id", self.SRC)
+
+    def test_retry_delta_apply_reads_parent_queue_row(self):
+        block = self.SRC.split('if recovery_action == "RETRY_DELTA_APPLY":')[1]
+        self.assertIn("run_id = {escape_string_literal(parent_run_id)}", block)
+
+    def test_retry_delta_apply_preserves_frozen_bounds(self):
+        block = self.SRC.split('if recovery_action == "RETRY_DELTA_APPLY":')[1]
+        self.assertIn('"last_watermark_value"', block)
+        self.assertIn('"upper_watermark_value"', block)
+        self.assertIn('"source_query"', block)
+
+    def test_retry_delta_apply_does_not_recapture_watermark(self):
+        block = self.SRC.split('if recovery_action == "RETRY_DELTA_APPLY":')[1]
+        block = block.split("# COMMAND ----------")[0]
+        self.assertNotIn("upper_watermark_query", block)
+        self.assertNotIn("capture_upper_watermark", block)
+
+    def test_retry_child_queue_row_is_idempotent(self):
+        block = self.SRC.split('if recovery_action == "RETRY_DELTA_APPLY":')[1]
+        self.assertIn("MERGE INTO", block)
+        self.assertIn("t.run_id = s.run_id AND t.source_table_id = s.source_table_id",
+                      block)
+        self.assertIn("WHEN MATCHED AND t.status <> 'SUCCEEDED'", block)
+
+    def test_retry_does_not_copy_result_metrics(self):
+        block = self.SRC.split('if recovery_action == "RETRY_DELTA_APPLY":')[1]
+        carried = block.split("carried = {")[1].split("}")[0]
+        for excluded in ("applied_row_count", "reconciled_ts",
+                         "checkpoint_committed_ts", "finalized_ts",
+                         "reconciliation_status"):
+            self.assertNotIn(excluded, carried)
+
+    def test_child_audit_carries_parent_and_attempt(self):
+        self.assertIn('"parent_run_id": parent_run_id', self.SRC)
+        self.assertIn('"attempt_number": attempt_number', self.SRC)
+
+
+class TestStateOnlyRecoveryAudit(unittest.TestCase):
+    SRC = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.SRC = shared_nb("NB11b_DeltaSyncApply.py")
+
+    def test_recovery_operations_are_named(self):
+        self.assertIn('"CHECKPOINT_RECOVERY"', self.SRC)
+        self.assertIn('"QUEUE_FINALIZATION_RECOVERY"', self.SRC)
+
+    def test_recovery_writes_child_audit_rows(self):
+        block = self.SRC.split("RETRY_CHECKPOINT_ONLY\", \"RETRY_QUEUE_FINALIZATION_ONLY\"")[1]
+        self.assertIn("def _log_recovery(", block)
+        self.assertIn('"parent_run_id": src_run', block)
+        self.assertIn('_log_recovery("SUCCEEDED")', block)
+        self.assertIn('_log_recovery("FAILED"', block)
+
+    def test_recovery_never_reads_source_or_reapplies(self):
+        block = self.SRC.split(
+            "RETRY_CHECKPOINT_ONLY\", \"RETRY_QUEUE_FINALIZATION_ONLY\"")[1]
+        block = block.split("# RETRY_DELTA_APPLY reuses")[0]
+        for forbidden in ("read_source_jdbc", "build_merge_sql", "DELETE FROM",
+                          "saveAsTable"):
+            self.assertNotIn(forbidden, block)
+        self.assertIn("no source read, no data reapplied", self.SRC)
+
+
+class TestSpecializedDeltaFailureFields(unittest.TestCase):
+    SRC = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.SRC = shared_nb("NB11b_DeltaSyncApply.py")
+
+    def test_reconciliation_failure_fields(self):
+        self.assertIn('"error_category": failcls.RECONCILIATION_ERROR', self.SRC)
+
+    def test_checkpoint_failure_fields(self):
+        self.assertIn('"failure_stage": failcls.CHECKPOINT', self.SRC)
+        self.assertIn('"error_category": failcls.CHECKPOINT_ERROR', self.SRC)
+
+    def test_finalization_failure_fields(self):
+        self.assertIn('"failure_stage": failcls.QUEUE_FINALIZATION', self.SRC)
+
+    def test_specialized_failures_are_not_retry_eligible(self):
+        # Each of the three specialized handlers sets retry_eligible False.
+        self.assertGreaterEqual(self.SRC.count('"retry_eligible": False'), 3)
+
+
+class TestEtlBehavior(unittest.TestCase):
+    SRC = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.SRC = shared_nb("NB15_BronzeToSilverETL.py")
 
     def test_duplicate_keys_checked_before_merge(self):
-        dup_pos = self.SRC.index("dup_valid = (valid_out.groupBy")
-        stage_pos = self.SRC.index("_etl_stage\"")
-        merge_pos = self.SRC.index("ddl.build_merge_sql(silver_catalog")
-        self.assertLess(dup_pos, stage_pos)
-        self.assertLess(dup_pos, merge_pos)
-
-    def test_duplicate_keys_fail_before_merge(self):
+        dup = self.SRC.index("dup_valid = (valid_out.groupBy")
+        merge = self.SRC.index("ddl.build_merge_sql(silver_catalog")
+        self.assertLess(dup, merge)
         self.assertIn("MERGE not executed and ETL watermark unchanged", self.SRC)
 
     def test_invalid_rules_fail_before_silver_write(self):
-        invalid_pos = self.SRC.index("if invalid_rules:")
-        write_pos = self.SRC.index("current_stage = failcls.SILVER_WRITE")
-        self.assertLess(invalid_pos, write_pos)
+        self.assertLess(self.SRC.index("if invalid_rules:"),
+                        self.SRC.index("current_stage = failcls.SILVER_WRITE"))
         self.assertIn("DQ_CONFIG_ERROR", self.SRC)
+
+    def test_default_value_validated_before_transformation(self):
+        validate = self.SRC.index("DEFAULT_VALUE cast probe failed")
+        transform = self.SRC.index("# ---- Stage: cleansing transforms")
+        self.assertLess(validate, transform)
+        self.assertIn("dqr.default_value_converts(", self.SRC)
+        self.assertIn("cannot be represented as", self.SRC)
+
+    def test_invalid_default_value_blocks_silver(self):
+        # The DEFAULT_VALUE probe feeds invalid_rules, which raises via fail_etl
+        # before the Silver write stage is reached.
+        self.assertLess(self.SRC.index("invalid_rules.append((\n                    t[\"rule_id\"]"),
+                        self.SRC.index("current_stage = failcls.SILVER_WRITE"))
 
     def test_single_failure_log_guard(self):
         self.assertIn("failure_already_logged", self.SRC)
@@ -206,71 +248,102 @@ class TestEtlOrdering(unittest.TestCase):
     def test_typed_watermark_comparison(self):
         self.assertIn("TimestampType", self.SRC)
         self.assertIn("DateType", self.SRC)
-        self.assertIn('.cast(cast_to)', self.SRC)
+        self.assertIn(".cast(cast_to)", self.SRC)
         self.assertIn("only DATE and TIMESTAMP are supported", self.SRC)
 
-    def test_quarantine_is_idempotent_per_run_and_table(self):
-        self.assertIn("DELETE FROM", self.SRC)
-        self.assertIn("dq_quarantine", self.SRC)
+    def test_retry_reuses_frozen_bounds(self):
+        self.assertIn("is_etl_retry", self.SRC)
+        self.assertIn("retry_upper_watermark", self.SRC)
+        self.assertIn("retry_lower_watermark", self.SRC)
+        self.assertIn("RETRY_ETL requires parent_run_id", self.SRC)
 
-    def test_quarantine_disabled_still_counts_rejects(self):
+    def test_retry_does_not_recompute_bronze_max(self):
+        block = self.SRC.split("if is_etl_retry:")[1].split("else:")[0]
+        self.assertNotIn("F.max(", block)
+        self.assertIn("upper_raw = retry_upper_wm", block)
+
+    def test_incremental_retry_without_bounds_is_configuration_error(self):
+        self.assertIn("RETRY_ETL for an incremental table requires", self.SRC)
+
+    def test_quarantine_idempotent_and_counted_when_disabled(self):
+        self.assertIn("DELETE FROM", self.SRC)
         self.assertIn("counted for reconciliation but NOT persisted", self.SRC)
 
     def test_reconciliation_precedes_checkpoint(self):
-        recon_pos = self.SRC.index("if not recon_result.passed:")
-        ckpt_pos = self.SRC.index("current_stage = failcls.CHECKPOINT")
-        self.assertLess(recon_pos, ckpt_pos)
+        self.assertLess(self.SRC.index("if not recon_result.passed:"),
+                        self.SRC.index("current_stage = failcls.CHECKPOINT"))
 
     def test_unique_duplicate_helper_columns(self):
         self.assertIn('f"_dupcount_{idx}"', self.SRC)
 
-    def test_etl_never_builds_a_source_adapter(self):
+    def test_etl_never_touches_a_source(self):
         self.assertNotIn("get_source_adapter", self.SRC)
         self.assertNotIn("dbutils.secrets", self.SRC)
+        self.assertNotIn("read_source_jdbc", self.SRC)
 
 
 class TestIngestFailureStages(unittest.TestCase):
     def test_full_load_tracks_stage(self):
-        src = read_nb("NB09_FullLoad.py")
-        self.assertIn("current_stage = failcls.TARGET_WRITE", src)
-        self.assertIn("current_stage = failcls.RECONCILIATION", src)
-        self.assertIn("classify_failure(e, current_stage", src)
+        code = shared_nb("NB09_FullLoad.py")
+        self.assertIn("current_stage = failcls.TARGET_WRITE", code)
+        self.assertIn("current_stage = failcls.RECONCILIATION", code)
+        self.assertIn("classify_failure(e, current_stage", code)
+        self.assertIn("expected exactly 1", code)
 
     def test_delta_apply_tracks_stage(self):
-        src = read_nb("NB11b_DeltaSyncApply.py")
+        code = shared_nb("NB11b_DeltaSyncApply.py")
         for stage in ("SOURCE_READ", "TARGET_WRITE", "RECONCILIATION",
                       "CHECKPOINT", "QUEUE_FINALIZATION"):
-            self.assertIn(f"current_stage = failcls.{stage}", src)
-        self.assertIn("classify_failure(apply_error, current_stage", src)
+            self.assertIn(f"current_stage = failcls.{stage}", code)
+        self.assertIn("classify_failure(apply_error, current_stage", code)
 
-    def test_table_run_log_status_normalized(self):
-        # Detailed operational states live on the control row; the audit status
-        # stays SUCCEEDED/FAILED so the retry selector can filter on FAILED.
-        src = read_nb("NB09_FullLoad.py")
-        self.assertNotIn('"COUNT_MISMATCH", None, started', src)
-        self.assertIn('log_run(ident, target_fqn, s_count, t_count, "FAILED"', src)
+    def test_audit_status_normalized(self):
+        code = shared_nb("NB09_FullLoad.py")
+        self.assertNotIn('"COUNT_MISMATCH", None, started', code)
+        self.assertIn('log_run(ident, target_fqn, s_count, t_count, "FAILED"', code)
 
-    def test_single_table_scope_must_resolve_exactly_one(self):
-        src = read_nb("NB09_FullLoad.py")
-        self.assertIn("expected exactly 1", src)
+
+class TestRetrySelector(unittest.TestCase):
+    SRC = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.SRC = shared_nb("NB14_RetryFailedTables.py")
+
+    def test_returns_frozen_bounds(self):
+        self.assertIn("lower_watermark, upper_watermark", self.SRC)
+        self.assertIn('"retry_lower_watermark": r["lower_watermark"]', self.SRC)
+        self.assertIn('"retry_upper_watermark": r["upper_watermark"]', self.SRC)
+
+    def test_additional_retry_semantics(self):
+        self.assertIn("retry_count = prev_attempt - 1", self.SRC)
+        self.assertIn("retry_count >= max_retries", self.SRC)
+
+    def test_safe_recovery_actions_remain_selectable(self):
+        self.assertIn("SAFE_RECOVERY_ACTIONS", self.SRC)
+        self.assertIn("RETRY_CHECKPOINT_ONLY", self.SRC)
+        self.assertIn("RETRY_QUEUE_FINALIZATION_ONLY", self.SRC)
+
+    def test_deterministic_latest_attempt_ordering(self):
+        self.assertIn("ended_ts DESC NULLS LAST", self.SRC)
 
 
 class TestCanonicalFullLoadCheck(unittest.TestCase):
     def test_nb12_writes_canonical_check_type(self):
         self.assertIn('check_type = "FULL_SNAPSHOT_COUNT"',
-                      read_nb("NB12_ValidationAndReconciliation.py"))
+                      shared_nb("NB12_ValidationAndReconciliation.py"))
 
     def test_nb10_gates_on_canonical_check_type(self):
-        src = read_nb("NB10_PostFullLoadState.py")
-        self.assertIn("rr.check_type = 'FULL_SNAPSHOT_COUNT'", src)
-        self.assertNotIn("rr.check_type = 'ROW_COUNT'", src)
+        code = shared_nb("NB10_PostFullLoadState.py")
+        self.assertIn("rr.check_type = 'FULL_SNAPSHOT_COUNT'", code)
+        self.assertNotIn("rr.check_type = 'ROW_COUNT'", code)
 
     def test_dashboard_uses_canonical_check_type(self):
-        self.assertIn("FULL_SNAPSHOT_COUNT", read_nb("NB17_DashboardViews.py"))
+        self.assertIn("FULL_SNAPSHOT_COUNT", shared_nb("NB17_DashboardViews.py"))
 
-    def test_nb12_does_not_use_count_comparison_shortcut(self):
-        src = read_nb("NB12_ValidationAndReconciliation.py")
-        self.assertNotIn("tgt_count >= src_count", src)
+    def test_no_count_comparison_shortcut(self):
+        self.assertNotIn("tgt_count >= src_count",
+                         shared_nb("NB12_ValidationAndReconciliation.py"))
 
 
 class TestDashboardViews(unittest.TestCase):
@@ -278,7 +351,7 @@ class TestDashboardViews(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.SRC = read_nb("NB17_DashboardViews.py")
+        cls.SRC = shared_nb("NB17_DashboardViews.py")
 
     def test_deterministic_latest_ordering(self):
         self.assertIn("ended_ts DESC NULLS LAST", self.SRC)
@@ -305,64 +378,109 @@ class TestDashboardViews(unittest.TestCase):
 
 class TestNotification(unittest.TestCase):
     def test_distinct_failed_tables_reported(self):
-        src = read_nb("NB16_NotifyFailures.py")
-        self.assertIn("distinct_failed_tables", src)
-        self.assertIn("table_run_failures=", src)
-        self.assertIn("reconciliation_failures=", src)
-        self.assertIn("dq_rule_failures=", src)
+        code = shared_nb("NB16_NotifyFailures.py")
+        for token in ("distinct_failed_tables", "table_run_failures=",
+                      "reconciliation_failures=", "dq_rule_failures="):
+            self.assertIn(token, code)
 
     def test_webhook_never_printed(self):
-        src = read_nb("NB16_NotifyFailures.py")
-        self.assertNotIn("print(webhook", src)
-        self.assertIn("never printed", src)
+        code = shared_nb("NB16_NotifyFailures.py")
+        self.assertNotIn("print(webhook", code)
+        self.assertIn("never printed", code)
+
+
+class TestDiagnostics(unittest.TestCase):
+    def test_counters_initialized(self):
+        for token in SOURCE_TOKENS:
+            code = source_nb(token, "TEST_CONNECTION.py")
+            self.assertIn("sample_count = 0", code)
+            self.assertIn("meta_count = 0", code)
+            self.assertIn("pk_count = 0", code)
+
+    def test_registered_connection_is_authority(self):
+        for token in SOURCE_TOKENS:
+            code = source_nb(token, "TEST_CONNECTION.py")
+            self.assertIn("if CONNECTION_ID:", code)
+            self.assertIn("get_source_adapter_for_connection(", code)
+            self.assertIn('test_server = cd.get("source_server")', code)
+            self.assertIn('test_database = cd.get("source_database")', code)
+
+    def test_sqlserver_registered_mode_needs_no_database_widget(self):
+        code = source_nb("sqlserver", "TEST_CONNECTION.py")
+        registered = code.split("if CONNECTION_ID:")[1].split("else:")[0]
+        # The widget is never read in the registered branch.
+        self.assertNotIn('dbutils.widgets.get("test_database")', registered)
+        self.assertIn("legacy mode requires the test_database widget", code)
+
+    def test_source_system_mismatch_fails(self):
+        self.assertIn("requires an Oracle connection",
+                      source_nb("oracle", "TEST_CONNECTION.py"))
+        self.assertIn("requires a SQL Server connection",
+                      source_nb("sqlserver", "TEST_CONNECTION.py"))
+
+    def test_legacy_mode_is_announced(self):
+        for token in SOURCE_TOKENS:
+            self.assertIn("legacy fallback", source_nb(token, "TEST_CONNECTION.py"))
+
+    def test_probe_comes_from_adapter(self):
+        for token in SOURCE_TOKENS:
+            self.assertIn("probe_connection(adapter",
+                          source_nb(token, "TEST_CONNECTION.py"))
+
+
+class TestConnectionNotebookSanitization(unittest.TestCase):
+    def test_failures_are_sanitized_without_an_adapter(self):
+        for token in SOURCE_TOKENS:
+            code = source_nb(token, "NB00A_UpsertAndValidateConnection.py")
+            self.assertIn("failcls.sanitize_message(e)", code, token)
+            # No dependency on a constructed adapter for redaction.
+            self.assertNotIn("adapter.redact_jdbc_url(str(e))", code, token)
+
+    def test_no_secrets_returned(self):
+        for token in SOURCE_TOKENS:
+            code = source_nb(token, "NB00A_UpsertAndValidateConnection.py")
+            tail = code.split("dbutils.notebook.exit(")[-1]
+            for banned in ("password", "secret_scope", "jdbc"):
+                self.assertNotIn(banned, tail.lower(), token)
 
 
 class TestProductionCleanliness(unittest.TestCase):
+    def _every_notebook(self):
+        for name in all_shared_notebooks():
+            yield f"shared/{name}", shared_nb(name)
+        for token, name in all_source_notebooks():
+            yield f"sources/{token}/{name}", source_nb(token, name)
+
     def test_no_personal_workspace_path(self):
-        for name in all_notebooks():
-            self.assertNotIn("/Workspace/Users/", read_nb(name), name)
+        for label, code in self._every_notebook():
+            self.assertNotIn("/Workspace/Users/", code, label)
 
     def test_no_hardcoded_control_schema(self):
         self.assertNotIn("da_accelerators.control",
-                         read_nb("NB00_ControlTableInit.py"))
+                         shared_nb("NB00_ControlTableInit.py"))
 
     def test_seeding_disabled_by_default(self):
-        src = read_nb("NB00_ControlTableInit.py")
-        self.assertIn('dropdown("seed_poc_rows", "false"', src)
-        self.assertIn('dropdown("seed_sqlserver_examples", "false"', src)
+        code = shared_nb("NB00_ControlTableInit.py")
+        self.assertIn('dropdown("seed_poc_rows", "false"', code)
+        self.assertIn('dropdown("seed_sqlserver_examples", "false"', code)
 
-    def test_no_ipv4_defaults(self):
+    def test_no_ipv4_widget_defaults(self):
         ipv4 = re.compile(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b")
-        for name in all_notebooks():
-            src = read_nb(name)
-            for line in src.splitlines():
+        for label, code in self._every_notebook():
+            for line in code.splitlines():
                 if "widgets.text" in line or "widgets.dropdown" in line:
-                    self.assertIsNone(ipv4.search(line), f"{name}: {line}")
-
-    def test_diagnostic_counters_initialized(self):
-        for name in ("00_TEST_ORACLE_CONNECTION.py", "00_TEST_SQLSERVER_CONNECTION.py"):
-            src = read_nb(name)
-            self.assertIn("sample_count = 0", src)
-            self.assertIn("meta_count = 0", src)
-            self.assertIn("pk_count = 0", src)
-
-    def test_diagnostics_prefer_connection_id(self):
-        for name in ("00_TEST_ORACLE_CONNECTION.py", "00_TEST_SQLSERVER_CONNECTION.py"):
-            src = read_nb(name)
-            self.assertIn("if CONNECTION_ID:", src)
-            self.assertIn("get_source_adapter_for_connection(", src)
-            self.assertIn("legacy fallback", src)
-
-    def test_diagnostics_reject_mismatched_source_system(self):
-        self.assertIn("requires an Oracle connection",
-                      read_nb("00_TEST_ORACLE_CONNECTION.py"))
-        self.assertIn("requires a ", read_nb("00_TEST_SQLSERVER_CONNECTION.py"))
+                    self.assertIsNone(ipv4.search(line), f"{label}: {line}")
 
     def test_legacy_pipeline_terminology_removed(self):
-        for name in all_notebooks():
-            src = read_nb(name)
-            self.assertNotIn("Pipeline 1", src, name)
-            self.assertNotIn("Pipeline 2", src, name)
+        for label, code in self._every_notebook():
+            self.assertNotIn("Pipeline 1", code, label)
+            self.assertNotIn("Pipeline 2", code, label)
+
+    def test_assessment_wording_does_not_claim_exact(self):
+        for label, code in self._every_notebook():
+            lowered = code.lower()
+            self.assertNotIn("exact catalog row counts", lowered, label)
+            self.assertNotIn("exact for sql server", lowered, label)
 
 
 if __name__ == "__main__":
