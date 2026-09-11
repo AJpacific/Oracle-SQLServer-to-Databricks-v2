@@ -114,9 +114,18 @@ for r in auto:
         print(f"  provisioned {t_catalog}.{t_schema}.{t_table} ({len(col_specs)} cols)")
     except Exception as e:
         failed += 1
-        repo.update_control(src_id, {"current_status": "PROVISION_FAILED",
-                                     "error_message": str(e)[:1000]})
-        print(f"  FAILED {s_schema}.{s_table}: {e}")
+        safe_error = failcls.sanitize_message(e)
+        repo.update_control(
+            src_id,
+            {
+                "current_status": "PROVISION_FAILED",
+                "error_message": safe_error[:1000],
+            },
+        )
+        print(
+            f"FAILED {s_schema}.{s_table}: "
+            f"{type(e).__name__}: {safe_error[:300]}"
+        )
 
 # COMMAND ----------
 

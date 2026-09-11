@@ -365,8 +365,9 @@ for _r in _existing:
             _r["source_system"] or "oracle", _r["source_server"],
             _r["source_database"], _r["source_schema"], _r["source_table"])
     except Exception as _e:
+        _safe_error = failcls.sanitize_message(_e)
         print(f"  [warn] cannot backfill id for "
-              f"{_r['source_schema']}.{_r['source_table']}: {_e}")
+          f"{_r['source_schema']}.{_r['source_table']}: {_safe_error[:300]}")
         continue
     # Match the historical row on the full identity (null-safe) to set its id.
     spark.sql(f"""

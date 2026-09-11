@@ -247,15 +247,18 @@ for r in eligible:
         })
         queue.append(queue_row)
     except Exception as e:
+        safe_error = failcls.sanitize_message(e)
         try:
             repo.update_control(src_id, {
                 "current_status": "DELTA_PREP_FAILED",
-                "error_message": str(e)[:1000],
+                "error_message": safe_error[:1000],
             })
         except Exception as update_error:
-            print(f"  [warn] failed to record prep error: {update_error}")
+            safe_update_error = failcls.sanitize_message(update_error)
+            print(f"  [warn] failed to record prep error: {safe_update_error[:300]}")
         skipped.append((s_schema, s_table, "PREP_FAILED"))
-        print(f"  FAILED prep [{src_system}] {s_schema}.{s_table}: {e}")
+        print(f"  FAILED prep [{src_system}] {s_schema}.{s_table}: "
+              f"{safe_error[:300]}")
 
 print(f"Prepared {len(queue)} work item(s); skipped {len(skipped)}.")
 

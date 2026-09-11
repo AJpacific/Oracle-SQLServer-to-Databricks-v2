@@ -70,13 +70,14 @@ for r in norm:
             bool(policy.requires_review), policy.policy_code,
         ))
     except Exception as exc:
+        safe_error = failcls.sanitize_message(exc)
         mapped.append((
             run_id, r["source_table_id"], r["connection_id"], src_system,
             r["source_schema"], r["source_table"], r["column_name"],
             int(r["ordinal_position"]), r["raw_type"], None,
             "BLOCKED", "UNKNOWN",
             f"Mapping failed with {type(exc).__name__}: "
-            f"{failcls.sanitize_message(exc)[:500]}",
+            f"{safe_error[:500]}",
             bool(r["is_nullable"]), bool(r["is_identity"]),
             bool(r["is_computed"]), bool(r["is_hidden"]),
             bool(r["is_rowversion"]), r["source_type_schema"],
@@ -85,7 +86,7 @@ for r in norm:
         print(
             "BLOCKED mapping:",
             f"[{src_system}] {r['source_schema']}.{r['source_table']}.{r['column_name']}",
-            type(exc).__name__, str(exc)[:500],
+            type(exc).__name__, safe_error[:500],
         )
 
 if norm and not mapped:

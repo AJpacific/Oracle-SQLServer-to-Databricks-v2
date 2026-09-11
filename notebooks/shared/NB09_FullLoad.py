@@ -267,7 +267,8 @@ for r in auto:
                 "error_message": cls.sanitized_message[:1000],
             })
         except Exception as update_error:
-            print(f"  [warn] failed to record control error: {update_error}")
+            safe_update_error = failcls.sanitize_message(update_error)
+            print(f"  [warn] failed to record control error: {safe_update_error[:300]}")
         try:
             log_run(ident, target_fqn, s_count, t_count,
                     "FAILED", cls.sanitized_message[:1000], started,
@@ -275,14 +276,18 @@ for r in auto:
                            "error_category": cls.category,
                            "retry_eligible": cls.retry_eligible})
         except Exception as log_error:
-            print(f"  [warn] failed to write table audit: {log_error}")
-        print(f"  FAILED [{src_system}] {s_schema}.{s_table}: {e}")
+            safe_log_error = failcls.sanitize_message(log_error)
+            print(f"  [warn] failed to write table audit: {safe_log_error[:300]}")
+        print(f"  FAILED [{src_system}] {s_schema}.{s_table}: "
+              f"{cls.sanitized_message[:300]}")
     finally:
         if src_df is not None:
             try:
                 src_df.unpersist()
             except Exception as unpersist_error:
-                print(f"  [warn] failed to unpersist source data: {unpersist_error}")
+                safe_unpersist_error = failcls.sanitize_message(unpersist_error)
+                print(f"  [warn] failed to unpersist source data: "
+                      f"{safe_unpersist_error[:300]}")
 
 # COMMAND ----------
 

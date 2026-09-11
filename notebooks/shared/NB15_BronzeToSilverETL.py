@@ -554,7 +554,9 @@ except Exception as e:
                 "etl_current_status": etl_status,
                 "etl_error_message": msg[:1000]})
         except Exception as update_error:
-            print(f"  [warn] could not record ETL status: {update_error}")
+            safe_update_error = failcls.sanitize_message(update_error)
+            print(f"  [warn] could not record ETL status: "
+                  f"{safe_update_error[:300]}")
         try:
             log_etl(etl_op, "FAILED", msg[:1000], None, None,
                     extra={"failure_stage": cls.stage, "error_category": cls.category,
@@ -562,7 +564,8 @@ except Exception as e:
                            **(work_unit.audit_fields(attempt_number)
                               if work_unit is not None else {})})
         except Exception as log_error:
-            print(f"  [warn] could not write ETL audit: {log_error}")
+            safe_log_error = failcls.sanitize_message(log_error)
+            print(f"  [warn] could not write ETL audit: {safe_log_error[:300]}")
     print(f"  ETL FAILED {src_id} at {current_stage}: "
           f"{failcls.sanitize_message(e)[:300]}")
     raise

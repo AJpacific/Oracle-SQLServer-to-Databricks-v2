@@ -89,14 +89,16 @@ for r in loaded:
         print(f"  committed {s_schema}.{s_table} strategy={strategy} seed_wm={new_wm}")
     except Exception as e:
         failed += 1
+        safe_error = failcls.sanitize_message(e)
         try:
             repo.update_control(src_id, {
                 "current_status": "STATE_COMMIT_FAILED",
-                "error_message": str(e)[:1000],
+                "error_message": safe_error[:1000],
             })
         except Exception as update_error:
-            print(f"  [warn] failed to record state error: {update_error}")
-        print(f"  FAILED state commit {s_schema}.{s_table}: {e}")
+            safe_update_error = failcls.sanitize_message(update_error)
+            print(f"  [warn] failed to record state error: {safe_update_error[:300]}")
+        print(f"  FAILED state commit {s_schema}.{s_table}: {safe_error[:300]}")
 
 # COMMAND ----------
 

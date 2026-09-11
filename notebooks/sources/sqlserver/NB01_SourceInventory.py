@@ -62,7 +62,8 @@ for r in active:
                     "current_status": "INVENTORY_FAILED",
                     "error_message": f"source routing failed: {safe[:900]}"})
             except Exception as ctrl_err:
-                print(f"  [warn] control update failed: {ctrl_err}")
+                safe_ctrl_error = failcls.sanitize_message(ctrl_err)
+                print(f"  [warn] control update failed: {safe_ctrl_error[:300]}")
         print(f"  FAILED routing {src_schema}.{src_table}: {safe[:300]}")
         continue
 
@@ -108,7 +109,8 @@ for r in active:
             repo.update_control(src_id, {"current_status": "INVENTORY_FAILED",
                                          "error_message": safe[:1000]})
         except Exception as ctrl_err:
-            print(f"  [warn] control update failed: {ctrl_err}")
+            safe_ctrl_error = failcls.sanitize_message(ctrl_err)
+            print(f"  [warn] control update failed: {safe_ctrl_error[:300]}")
         print(f"  FAILED sqlserver {src_schema}.{src_table}: {safe[:300]}")
 
 # COMMAND ----------

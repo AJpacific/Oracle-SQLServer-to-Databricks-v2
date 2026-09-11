@@ -122,7 +122,8 @@ if recovery_action in ("RETRY_CHECKPOINT_ONLY", "RETRY_QUEUE_FINALIZATION_ONLY")
             try:
                 _log_recovery("FAILED", safe[:1000])
             except Exception as log_error:
-                print(f"  [warn] recovery audit failed: {log_error}")
+                safe_log_error = failcls.sanitize_message(log_error)
+                print(f"  [warn] recovery audit failed: {safe_log_error[:300]}")
             print(f"  recovery failed for {src_id}: {safe[:300]}")
     print(f"{recovery_action}: recovered={recovered} failed={rec_failed} "
           "(no source read, no data reapplied)")
@@ -459,27 +460,35 @@ for q in queue:
             _update_queue("CHECKPOINT_COMMITTED", {"checkpoint_committed_ts": now_utc()})
         except Exception as checkpoint_error:
             failed += 1
+            safe_checkpoint_error = failcls.sanitize_message(checkpoint_error)
             try:
                 _update_queue("CHECKPOINT_COMMIT_FAILED")
             except Exception as queue_error:
-                print(f"  [warn] failed to mark queue CHECKPOINT_COMMIT_FAILED: {queue_error}")
+                safe_queue_error = failcls.sanitize_message(queue_error)
+                print(f"  [warn] failed to mark queue CHECKPOINT_COMMIT_FAILED: "
+                      f"{safe_queue_error[:300]}")
             try:
                 repo.update_control(src_id, {
                     "current_status": "CHECKPOINT_COMMIT_FAILED",
                     "error_message": ("Data applied and reconciled, but checkpoint "
-                                      f"commit failed: {checkpoint_error}")[:1000],
+                                      f"commit failed: {safe_checkpoint_error}")[:1000],
                 })
             except Exception as update_error:
-                print(f"  [warn] failed to record checkpoint error: {update_error}")
+                safe_update_error = failcls.sanitize_message(update_error)
+                print(f"  [warn] failed to record checkpoint error: "
+                      f"{safe_update_error[:300]}")
             try:
                 log_run(ident, plain_target, s_count, t_count,
-                        "CHECKPOINT_COMMIT", "FAILED", str(checkpoint_error)[:1000],
+                        "CHECKPOINT_COMMIT", "FAILED", safe_checkpoint_error[:1000],
                         started, extra={"failure_stage": failcls.CHECKPOINT,
                                         "error_category": failcls.CHECKPOINT_ERROR,
                                         "retry_eligible": False})
             except Exception as log_error:
-                print(f"  [warn] failed to write checkpoint audit: {log_error}")
-            print(f"  CHECKPOINT COMMIT FAILED {s_schema}.{s_table}: {checkpoint_error}")
+                safe_log_error = failcls.sanitize_message(log_error)
+                print(f"  [warn] failed to write checkpoint audit: "
+                      f"{safe_log_error[:300]}")
+            print(f"  CHECKPOINT COMMIT FAILED {s_schema}.{s_table}: "
+                  f"{safe_checkpoint_error[:300]}")
             continue
 
         # --- Stage 5: finalize the queue row ----------------------------------
@@ -490,30 +499,38 @@ for q in queue:
             _update_queue("SUCCEEDED", {"finalized_ts": now_utc()})
         except Exception as queue_finalize_error:
             failed += 1
+            safe_finalize_error = failcls.sanitize_message(queue_finalize_error)
             try:
                 repo.update_control(src_id, {
                     "current_status": "QUEUE_FINALIZATION_FAILED",
                     "error_message": ("Data applied, reconciled, and checkpoint "
                                       "committed, but delta_sync_queue finalization "
-                                      f"failed: {queue_finalize_error}")[:1000],
+                                      f"failed: {safe_finalize_error}")[:1000],
                 })
             except Exception as update_error:
-                print(f"  [warn] failed to record finalization error: {update_error}")
+                safe_update_error = failcls.sanitize_message(update_error)
+                print(f"  [warn] failed to record finalization error: "
+                      f"{safe_update_error[:300]}")
             try:
                 _update_queue("FAILED_FINALIZATION")
             except Exception as queue_error:
-                print(f"  [warn] failed to mark queue FAILED_FINALIZATION: {queue_error}")
+                safe_queue_error = failcls.sanitize_message(queue_error)
+                print(f"  [warn] failed to mark queue FAILED_FINALIZATION: "
+                      f"{safe_queue_error[:300]}")
             try:
                 log_run(ident, plain_target, s_count, t_count,
                         "QUEUE_FINALIZATION", "FAILED",
-                        str(queue_finalize_error)[:1000], started,
+                        safe_finalize_error[:1000], started,
                         extra={"failure_stage": failcls.QUEUE_FINALIZATION,
                                "error_category": failcls.CHECKPOINT_ERROR,
                                "retry_eligible": False})
             except Exception as log_error:
-                print(f"  [warn] failed to write finalization audit: {log_error}")
+                safe_log_error = failcls.sanitize_message(log_error)
+                print(f"  [warn] failed to write finalization audit: "
+                      f"{safe_log_error[:300]}")
             print(f"  Data, reconciliation, and checkpoint committed, but queue "
-                  f"finalization failed {s_schema}.{s_table}: {queue_finalize_error}")
+                  f"finalization failed {s_schema}.{s_table}: "
+                  f"{safe_finalize_error[:300]}")
             continue
 
         succeeded += 1
@@ -526,28 +543,36 @@ for q in queue:
         try:
             _update_queue("FAILED")
         except Exception as queue_error:
-            print(f"  [warn] failed to mark queue row FAILED: {queue_error}")
+            safe_queue_error = failcls.sanitize_message(queue_error)
+            print(f"  [warn] failed to mark queue row FAILED: "
+                  f"{safe_queue_error[:300]}")
         try:
             repo.update_control(src_id, {
                 "current_status": "DELTA_FAILED",
                 "error_message": cls.sanitized_message[:1000],
             })
         except Exception as update_error:
-            print(f"  [warn] failed to record control error: {update_error}")
+            safe_update_error = failcls.sanitize_message(update_error)
+            print(f"  [warn] failed to record control error: "
+                  f"{safe_update_error[:300]}")
         try:
             log_run(ident, plain_target, s_count, t_count,
                     op, "FAILED", cls.sanitized_message[:1000], started,
                     extra={"failure_stage": cls.stage, "error_category": cls.category,
                            "retry_eligible": cls.retry_eligible})
         except Exception as log_error:
-            print(f"  [warn] failed to write table audit: {log_error}")
-        print(f"  FAILED [{src_system}] {s_schema}.{s_table}: {apply_error}")
+            safe_log_error = failcls.sanitize_message(log_error)
+            print(f"  [warn] failed to write table audit: {safe_log_error[:300]}")
+        print(f"  FAILED [{src_system}] {s_schema}.{s_table}: "
+              f"{cls.sanitized_message[:300]}")
     finally:
         if src_df is not None:
             try:
                 src_df.unpersist()
             except Exception as unpersist_error:
-                print(f"  [warn] failed to unpersist source data: {unpersist_error}")
+                safe_unpersist_error = failcls.sanitize_message(unpersist_error)
+                print(f"  [warn] failed to unpersist source data: "
+                      f"{safe_unpersist_error[:300]}")
 
 # COMMAND ----------
 
