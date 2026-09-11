@@ -22,8 +22,9 @@ Rules that apply to every workflow:
   original run, and the original frozen watermark bounds.
 - The ETL workflow never receives a source secret scope or a `connection_id`
   used for connectivity.
-- Compatibility wrappers still exist at the original `notebooks/<NB>.py` paths
-  and simply `%run ./shared/<NB>`. New jobs should target the shared path.
+- Every notebook exists in exactly one place (`shared/` or
+  `sources/<source>/`); there are no wrapper copies, so tasks must reference
+  those paths directly.
 
 ---
 

@@ -77,8 +77,3 @@ def all_source_notebooks():
             if name.endswith(".py"):
                 out.append((token, name))
     return out
-
-
-def wrapper_notebooks():
-    """Compatibility wrappers still sitting at the original notebook paths."""
-    return sorted(f for f in os.listdir(NOTEBOOKS) if f.endswith(".py"))

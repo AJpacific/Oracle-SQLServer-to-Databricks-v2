@@ -41,7 +41,6 @@ notebooks/
       NB01A_SourceAssessment.py
       NB13_SQLObjectAssessmentAndConversion.py
       TEST_CONNECTION.py
-  <NBxx>.py                     # compatibility wrappers -> %run ./shared/<NBxx>
 src/
   source_adapters/
     base.py
@@ -103,10 +102,9 @@ Adding a future source requires a new adapter, one factory registration, one
 changes. See `docs/databricks_job_task_mapping.md` for the template.
 
 Source notebooks bootstrap with `%run ../../shared/_common`; shared notebooks
-use `%run ./_common`. Compatibility wrappers remain at the original
-`notebooks/<NB>.py` paths and simply `%run ./shared/<NB>`, so existing job
-definitions keep working - there is exactly one authoritative implementation of
-each notebook.
+use `%run ./_common`. Every notebook exists in exactly one place - there are no
+duplicate or wrapper copies - so Databricks job definitions must reference the
+`shared/` or `sources/<source>/` path directly.
 
 ## Architecture: two pipelines (INGEST and ETL)
 

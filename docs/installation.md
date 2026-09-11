@@ -27,9 +27,10 @@ Notebook layout:
 - `notebooks/shared/` - source-neutral notebooks (bootstrap with `%run ./_common`)
 - `notebooks/sources/<source>/` - dialect-specific notebooks
   (bootstrap with `%run ../../shared/_common`)
-- `notebooks/<NB>.py` - compatibility wrappers that `%run ./shared/<NB>`
 
-Verify the relative `%run` paths resolve after import before running any job.
+Every notebook exists in exactly one place; job definitions must reference the
+`shared/` or `sources/<source>/` path. Verify the relative `%run` paths resolve
+after import before running any job.
 
 ## 3. Create secret scopes (per connection)
 

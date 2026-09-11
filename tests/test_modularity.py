@@ -21,7 +21,7 @@ for p in (SRC, HERE, os.path.dirname(HERE)):
 from _nbsource import (  # noqa: E402
     SOURCES, SOURCE_TOKENS, REQUIRED_SOURCE_NOTEBOOKS, SHARED_NOTEBOOKS,
     shared_nb, source_nb, source_nb_path, all_shared_notebooks,
-    all_source_notebooks, wrapper_notebooks,
+    all_source_notebooks,
 )
 import source_registry  # noqa: E402
 import assessment_common as assess_common  # noqa: E402
@@ -170,18 +170,11 @@ class TestNotebookImportPaths(unittest.TestCase):
         for name in SHARED_NOTEBOOKS:
             self.assertIn("%run ./_common", shared_nb(name), name)
 
-    def test_compatibility_wrappers_delegate_only(self):
-        wrappers = wrapper_notebooks()
-        self.assertTrue(wrappers)
-        for name in wrappers:
-            path = os.path.join(os.path.dirname(SOURCES), name)
-            with open(path, "r", encoding="utf-8") as fh:
-                code = fh.read()
-            stem = name[:-3]
-            self.assertIn(f"%run ./shared/{stem}", code, name)
-            # A wrapper must delegate, never duplicate an implementation.
-            self.assertNotIn("spark.sql(", code, name)
-            self.assertLess(len(code.splitlines()), 30, name)
+    def test_no_notebooks_outside_shared_and_sources(self):
+        # Every notebook is authoritative and lives in exactly one place.
+        stray = [f for f in os.listdir(os.path.dirname(SOURCES))
+                 if f.endswith(".py")]
+        self.assertEqual(stray, [], f"unexpected notebooks at notebooks/: {stray}")
 
 
 class TestSourceContractParity(unittest.TestCase):
