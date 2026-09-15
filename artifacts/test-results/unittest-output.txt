@@ -163,7 +163,25 @@ test_delta_retries_delta (test_failure_retry.TestRecoveryAction.test_delta_retri
 test_etl_retries_etl (test_failure_retry.TestRecoveryAction.test_etl_retries_etl) ... ok
 test_finalization_only_does_not_reapply (test_failure_retry.TestRecoveryAction.test_finalization_only_does_not_reapply) ... ok
 test_full_load_retries_full (test_failure_retry.TestRecoveryAction.test_full_load_retries_full) ... ok
+test_generic_etl_retries_etl (test_failure_retry.TestRecoveryAction.test_generic_etl_retries_etl) ... ok
 test_unknown_is_manual (test_failure_retry.TestRecoveryAction.test_unknown_is_manual) ... ok
+test_attempt_number_precedes_timestamps (test_failure_retry.TestRetrySelectionPolicy.test_attempt_number_precedes_timestamps) ... ok
+test_attempts_do_not_cross_operations (test_failure_retry.TestRetrySelectionPolicy.test_attempts_do_not_cross_operations) ... ok
+test_blank_operation_returns_all_owned_operations (test_failure_retry.TestRetrySelectionPolicy.test_blank_operation_returns_all_owned_operations) ... ok
+test_exact_operation_filter (test_failure_retry.TestRetrySelectionPolicy.test_exact_operation_filter) ... ok
+test_executable_output_contract (test_failure_retry.TestRetrySelectionPolicy.test_executable_output_contract) ... ok
+test_frozen_bounds_are_retained (test_failure_retry.TestRetrySelectionPolicy.test_frozen_bounds_are_retained) ... ok
+test_latest_attempt_is_selected_per_operation (test_failure_retry.TestRetrySelectionPolicy.test_latest_attempt_is_selected_per_operation) ... ok
+test_manual_review_is_not_executable (test_failure_retry.TestRetrySelectionPolicy.test_manual_review_is_not_executable) ... ok
+test_pipeline_filtering_is_bidirectional (test_failure_retry.TestRetrySelectionPolicy.test_pipeline_filtering_is_bidirectional) ... ok
+test_pipeline_operation_mismatch_fails (test_failure_retry.TestRetrySelectionPolicy.test_pipeline_operation_mismatch_fails) ... ok
+test_retry_limit_is_operation_specific (test_failure_retry.TestRetrySelectionPolicy.test_retry_limit_is_operation_specific) ... ok
+test_run_id_is_final_deterministic_tie_breaker (test_failure_retry.TestRetrySelectionPolicy.test_run_id_is_final_deterministic_tie_breaker) ... ok
+test_same_table_ingest_operations_are_both_selected (test_failure_retry.TestRetrySelectionPolicy.test_same_table_ingest_operations_are_both_selected) ... ok
+test_same_table_operations_remain_independent_before_filtering (test_failure_retry.TestRetrySelectionPolicy.test_same_table_operations_remain_independent_before_filtering) ... ok
+test_state_only_recovery_remains_selectable (test_failure_retry.TestRetrySelectionPolicy.test_state_only_recovery_remains_selectable) ... ok
+test_unknown_pipeline_fails (test_failure_retry.TestRetrySelectionPolicy.test_unknown_pipeline_fails) ... ok
+test_worklist_uniqueness (test_failure_retry.TestRetrySelectionPolicy.test_worklist_uniqueness) ... ok
 test_batch_must_be_one_run_and_table (test_inventory_idempotency.TestInventoryKeys.test_batch_must_be_one_run_and_table) ... ok
 test_connection_and_identity_must_agree (test_inventory_idempotency.TestInventoryKeys.test_connection_and_identity_must_agree) ... ok
 test_distinct_columns_validate (test_inventory_idempotency.TestInventoryKeys.test_distinct_columns_validate) ... ok
@@ -330,6 +348,9 @@ test_no_personal_workspace_path (test_notebook_wiring.TestProductionCleanliness.
 test_seeding_disabled_by_default (test_notebook_wiring.TestProductionCleanliness.test_seeding_disabled_by_default) ... ok
 test_additional_retry_semantics (test_notebook_wiring.TestRetrySelector.test_additional_retry_semantics) ... ok
 test_deterministic_latest_attempt_ordering (test_notebook_wiring.TestRetrySelector.test_deterministic_latest_attempt_ordering) ... ok
+test_manual_review_is_a_separate_task_value (test_notebook_wiring.TestRetrySelector.test_manual_review_is_a_separate_task_value) ... ok
+test_no_raw_error_message_in_output (test_notebook_wiring.TestRetrySelector.test_no_raw_error_message_in_output) ... ok
+test_pipeline_and_exact_operation_filters (test_notebook_wiring.TestRetrySelector.test_pipeline_and_exact_operation_filters) ... ok
 test_returns_frozen_bounds (test_notebook_wiring.TestRetrySelector.test_returns_frozen_bounds) ... ok
 test_safe_recovery_actions_remain_selectable (test_notebook_wiring.TestRetrySelector.test_safe_recovery_actions_remain_selectable) ... ok
 test_widget_has_priority (test_notebook_wiring.TestRunId.test_widget_has_priority) ... ok
@@ -402,6 +423,6 @@ test_source_mismatch_fails (test_type_mappers.TestYamlValidation.test_source_mis
 test_target_mismatch_fails (test_type_mappers.TestYamlValidation.test_target_mismatch_fails) ... ok
 
 ----------------------------------------------------------------------
-Ran 402 tests in 2.139s
+Ran 423 tests in 1.257s
 
 OK

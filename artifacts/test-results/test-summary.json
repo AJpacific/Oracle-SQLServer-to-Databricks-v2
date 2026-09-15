@@ -1,5 +1,5 @@
 {
-  "generated_at_utc": "2026-09-11T14:13:56.8104299Z",
+  "generated_at_utc": "2026-09-15T07:09:12.3409500Z",
   "environment": {
     "operating_system": "Microsoft Windows 11 Enterprise, version 10.0.26200, build 26200",
     "python_version": "3.12.10",
@@ -15,7 +15,7 @@
     {
       "command": "python -m pytest tests -q",
       "exit_code": 0,
-      "reported_passed": 402,
+      "reported_passed": 423,
       "reported_failed": null,
       "reported_skipped": null,
       "reported_warnings": null,
@@ -25,7 +25,7 @@
     {
       "command": "python -m unittest discover -s tests -v",
       "exit_code": 0,
-      "reported_tests": 402,
+      "reported_tests": 423,
       "output_file": "artifacts/test-results/unittest-output.txt"
     }
   ],

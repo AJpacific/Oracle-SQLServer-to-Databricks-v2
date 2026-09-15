@@ -1,11 +1,10 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # NB14_RetryFailedTables
-# MAGIC Selector ONLY. It inspects the latest failed attempt per source table for a
-# MAGIC prior run and returns a retry worklist (child run_id + parent_run_id +
-# MAGIC incremented attempt_number + a safe recovery_action). It never reloads a
-# MAGIC table, never reapplies data, and never duplicates the migration logic - the
-# MAGIC INGEST/ETL job routes each recovery_action to the existing load notebook.
+# MAGIC Selector ONLY. It inspects the latest failed attempt per source table and
+# MAGIC operation for a prior run, then returns separate executable and manual
+# MAGIC review collections. It never reloads a table, reapplies data, or duplicates
+# MAGIC migration logic; the job routes each recovery_action to an existing notebook.
 
 # COMMAND ----------
 
@@ -20,9 +19,12 @@ dbutils.widgets.text("source_table_id", "")    # optional single-table scope
 dbutils.widgets.text("max_retries", "3")
 dbutils.widgets.dropdown("include_non_retryable", "false", ["true", "false"])
 
-pipeline_name = dbutils.widgets.get("pipeline_name").strip()
+pipeline_name = failcls.normalize_pipeline_name(
+    dbutils.widgets.get("pipeline_name"))
 original_run_id = dbutils.widgets.get("original_run_id").strip()
-operation_filter = dbutils.widgets.get("operation").strip()
+operation_filter = dbutils.widgets.get("operation").strip().upper()
+operation_filter = failcls.validate_pipeline_operation(
+    pipeline_name, operation_filter)
 only_id = dbutils.widgets.get("source_table_id").strip()
 try:
     # max_retries = the number of ADDITIONAL attempts allowed after the first.
@@ -32,11 +34,6 @@ try:
 except ValueError:
     max_retries = 3
 include_non_retryable = dbutils.widgets.get("include_non_retryable") == "true"
-
-# Safe recovery actions only re-commit state; they never reapply data, so they
-# stay selectable even though a checkpoint/finalization error is not classified
-# as automatically retry-eligible.
-SAFE_RECOVERY_ACTIONS = {"RETRY_CHECKPOINT_ONLY", "RETRY_QUEUE_FINALIZATION_ONLY"}
 
 if not original_run_id:
     raise ValueError("original_run_id is required")
@@ -50,8 +47,12 @@ print(f"Selecting retries for {pipeline_name} run {original_run_id}; "
 
 # COMMAND ----------
 
-# Latest FAILED attempt per source table (history is preserved; nothing mutated).
+# Latest FAILED attempt per source table + operation. Pipeline ownership is an
+# explicit exact filter; no source or operation can fall through by default.
 where = [f"run_id = {escape_string_literal(original_run_id)}", "status = 'FAILED'"]
+owned_operations = sorted(failcls.operations_for_pipeline(pipeline_name))
+owned_sql = ", ".join(escape_string_literal(op) for op in owned_operations)
+where.append(f"operation IN ({owned_sql})")
 if operation_filter:
     where.append(f"operation = {escape_string_literal(operation_filter)}")
 if only_id:
@@ -63,64 +64,82 @@ latest = spark.sql(f"""
       SELECT source_table_id, connection_id, operation, failure_stage,
              error_category, retry_eligible, attempt_number,
              lower_watermark, upper_watermark,
-             ROW_NUMBER() OVER (PARTITION BY source_table_id
-                                ORDER BY ended_ts DESC NULLS LAST,
-                                         started_ts DESC NULLS LAST) AS rn
+             ROW_NUMBER() OVER (
+                 PARTITION BY source_table_id, operation
+                 ORDER BY COALESCE(attempt_number, 1) DESC,
+                          ended_ts DESC NULLS LAST,
+                          started_ts DESC NULLS LAST,
+                          run_id DESC
+             ) AS rn
       FROM {ctrl('table_run_log')}
       WHERE {where_sql}
     ) WHERE rn = 1
+    ORDER BY source_table_id, operation
 """).collect()
-print(f"Distinct failed tables: {len(latest)}")
+print(f"Distinct failed operations: {len(latest)}")
 
 # COMMAND ----------
 
-worklist = []
-manual = []
-for r in latest:
-    src_id = r["source_table_id"]
-    operation = r["operation"]
-    stage = r["failure_stage"]
-    eligible = bool(r["retry_eligible"]) if r["retry_eligible"] is not None else False
-    prev_attempt = int(r["attempt_number"]) if r["attempt_number"] is not None else 1
-    next_attempt = prev_attempt + 1
-    retry_count = prev_attempt - 1        # retries already consumed
+# include_non_retryable remains an accepted widget for compatibility. Unsafe
+# rows are always returned in manual_review_items and never become executable.
+worklist, manual_review_items, duplicate_keys = failcls.build_retry_collections(
+    latest, child_run_id, original_run_id, pipeline_name, max_retries)
 
-    action = failcls.recovery_action(operation, stage)
-    selectable = eligible or action in SAFE_RECOVERY_ACTIONS
-    if not selectable and not include_non_retryable:
-        manual.append((src_id, operation, r["error_category"], "not retry eligible"))
-        continue
-    if not selectable:
-        action = "MANUAL_REVIEW"
-    if retry_count >= max_retries:
-        action = "MANUAL_REVIEW"
+for source_table_id, operation, recovery_action in duplicate_keys:
+    print(
+        "  [warn] duplicate retry item removed:",
+        f"source_table_id={source_table_id}",
+        f"operation={operation}",
+        f"recovery_action={recovery_action}",
+    )
 
-    item = {
-        "run_id": child_run_id, "parent_run_id": original_run_id,
-        "connection_id": r["connection_id"], "source_table_id": src_id,
-        "operation": operation, "attempt_number": next_attempt,
-        "recovery_action": action,
-        # The original frozen interval travels with the worklist so a retry can
-        # reuse it instead of recomputing a wider one.
-        "retry_lower_watermark": r["lower_watermark"],
-        "retry_upper_watermark": r["upper_watermark"],
-    }
-    if action == "MANUAL_REVIEW":
-        manual.append((src_id, operation, r["error_category"],
-                       f"retry_count={retry_count} max_retries={max_retries}"))
-    worklist.append(item)
-
-print(f"Retry worklist: {len(worklist)}; manual review: {len(manual)}")
-for m in manual:
-    print("  MANUAL_REVIEW", m)
+print(f"Retry worklist: {len(worklist)}; "
+      f"manual review: {len(manual_review_items)}")
+for item in manual_review_items:
+    print(
+        "  MANUAL_REVIEW",
+        f"source_table_id={item['source_table_id']}",
+        f"operation={item['operation']}",
+        f"reason={item['reason']}",
+    )
 
 # COMMAND ----------
 
-set_task_value("run_id", child_run_id)
-set_task_value("worklist", json.dumps(worklist))
-dbutils.notebook.exit(json.dumps({
+TASK_VALUE_LIMIT_BYTES = 48 * 1024
+NOTEBOOK_EXIT_LIMIT_BYTES = 5 * 1024 * 1024
+
+def _compact_json(value):
+    return json.dumps(value, separators=(",", ":"))
+
+def _set_json_task_value_if_fits(key, value):
+    payload = _compact_json(value)
+    # Preserve the existing string-valued task contract. Databricks serializes
+    # that string as JSON, so include its quoting/escaping in the size check.
+    serialized_size = len(json.dumps(payload).encode("utf-8"))
+    if serialized_size > TASK_VALUE_LIMIT_BYTES:
+        print(f"  [warn] {key} exceeds the Databricks task-value limit; "
+              "use the complete notebook result or scope the selector by "
+              "operation/source_table_id. No entries were truncated.")
+        return False
+    set_task_value(key, payload)
+    return True
+
+result = {
     "status": "SUCCEEDED", "pipeline_name": pipeline_name,
     "run_id": child_run_id, "parent_run_id": original_run_id,
-    "selected": len(worklist), "manual_review": len(manual),
+    "selected": len(worklist),
+    "manual_review": len(manual_review_items),
     "worklist": worklist,
-}))
+    "manual_review_items": manual_review_items,
+}
+result_payload = _compact_json(result)
+if len(result_payload.encode("utf-8")) > NOTEBOOK_EXIT_LIMIT_BYTES:
+    raise ValueError(
+        "retry selector output exceeds the notebook result limit; rerun with "
+        "operation or source_table_id scoping, or query table_run_log using "
+        "the documented retry-selection identity")
+
+set_task_value("run_id", child_run_id)
+_set_json_task_value_if_fits("worklist", worklist)
+_set_json_task_value_if_fits("manual_review_items", manual_review_items)
+dbutils.notebook.exit(result_payload)

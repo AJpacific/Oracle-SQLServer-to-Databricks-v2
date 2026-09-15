@@ -99,7 +99,19 @@ secret scope.
 | Task key | Notebook | Parameters |
 |---|---|---|
 | `T40_Select_Retries` | `shared/NB14_RetryFailedTables` | `pipeline_name`, `original_run_id`, `operation`, `source_table_id`, `max_retries`, `include_non_retryable` |
-| `T41_ForEach_Retry` | routed by `recovery_action` | `run_id` (child), `parent_run_id`, `connection_id`, `source_table_id`, `attempt_number`, `recovery_action`, `retry_lower_watermark`, `retry_upper_watermark` |
+| `T41_ForEach_Retry` | routed by `recovery_action` | `run_id` (child), `parent_run_id`, `connection_id`, `source_table_id`, `pipeline_name`, `operation`, `previous_attempt_number`, `attempt_number`, `failure_stage`, `error_category`, `recovery_action`, `retry_lower_watermark`, `retry_upper_watermark` |
+
+Retry selection identity is `source_table_id + operation`. NB14 selects the
+latest failed row independently for every operation using the greatest attempt
+number, then ended timestamp, started timestamp, and run ID. A table may
+therefore produce more than one recovery item when distinct operations failed;
+one operation never contributes attempt history to another.
+
+`pipeline_name=INGEST` admits only the documented ingest operations, while
+`pipeline_name=ETL` admits only `ETL`, `ETL_FULL`, and `ETL_INCREMENTAL`. A
+nonblank `operation` is an exact, case-normalized filter and must belong to the
+selected pipeline. Unknown pipelines and pipeline/operation mismatches fail
+before a worklist is produced.
 
 Routing for `recovery_action`:
 
@@ -114,7 +126,22 @@ Routing for `recovery_action`:
 
 `max_retries` means the number of **additional** attempts allowed after the
 first. With `max_retries=3`, an initial `attempt_number=1` may be retried as
-attempts 2, 3, and 4; beyond that the item becomes `MANUAL_REVIEW`.
+attempts 2, 3, and 4; beyond that the operation becomes `MANUAL_REVIEW`.
+Attempts and retry limits are evaluated independently per
+`source_table_id + operation`.
+
+NB14 returns two collections. `worklist` contains only executable recovery
+actions. `manual_review_items` contains non-retryable, exhausted, unknown, or
+otherwise unsafe operation failures and is never routed into the ForEach. The
+ForEach routes with both `source_table_id` and `recovery_action` and retains
+`operation` for audit and diagnostics.
+
+Both collections are set as task values only when their serialized values fit
+the Databricks task-value limit. The complete collections remain in the
+notebook result when reasonably sized; no list is silently truncated. For a
+larger result, scope NB14 with `operation` or `source_table_id`, or use the same
+documented `table_run_log` query pattern keyed by original run, pipeline-owned
+operation, source table, and operation.
 
 State-only recoveries (`RETRY_CHECKPOINT_ONLY`,
 `RETRY_QUEUE_FINALIZATION_ONLY`) write a child `table_run_log` row with

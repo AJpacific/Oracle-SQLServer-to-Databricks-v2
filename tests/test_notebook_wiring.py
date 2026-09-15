@@ -360,20 +360,44 @@ class TestRetrySelector(unittest.TestCase):
 
     def test_returns_frozen_bounds(self):
         self.assertIn("lower_watermark, upper_watermark", self.SRC)
-        self.assertIn('"retry_lower_watermark": r["lower_watermark"]', self.SRC)
-        self.assertIn('"retry_upper_watermark": r["upper_watermark"]', self.SRC)
+        self.assertIn("failcls.build_retry_collections(", self.SRC)
 
     def test_additional_retry_semantics(self):
-        self.assertIn("retry_count = prev_attempt - 1", self.SRC)
-        self.assertIn("retry_count >= max_retries", self.SRC)
+        import inspect
+        from src import failure_classifier as failcls
+        helper = inspect.getsource(failcls.build_retry_item)
+        self.assertIn("retry_count = previous_attempt - 1", helper)
+        self.assertIn("retry_count >= int(max_retries)", helper)
 
     def test_safe_recovery_actions_remain_selectable(self):
-        self.assertIn("SAFE_RECOVERY_ACTIONS", self.SRC)
-        self.assertIn("RETRY_CHECKPOINT_ONLY", self.SRC)
-        self.assertIn("RETRY_QUEUE_FINALIZATION_ONLY", self.SRC)
+        import inspect
+        from src import failure_classifier as failcls
+        helper = inspect.getsource(failcls.build_retry_item)
+        self.assertIn("SAFE_STATE_RECOVERY_ACTIONS", helper)
+        self.assertIn("RETRY_CHECKPOINT_ONLY", helper)
+        self.assertIn("RETRY_QUEUE_FINALIZATION_ONLY", helper)
 
     def test_deterministic_latest_attempt_ordering(self):
+        self.assertIn("PARTITION BY source_table_id, operation", self.SRC)
+        self.assertIn("COALESCE(attempt_number, 1) DESC", self.SRC)
         self.assertIn("ended_ts DESC NULLS LAST", self.SRC)
+        self.assertIn("started_ts DESC NULLS LAST", self.SRC)
+        self.assertIn("run_id DESC", self.SRC)
+
+    def test_pipeline_and_exact_operation_filters(self):
+        self.assertIn("operations_for_pipeline(pipeline_name)", self.SRC)
+        self.assertIn("operation IN ({owned_sql})", self.SRC)
+        self.assertIn("operation = {escape_string_literal(operation_filter)}",
+                      self.SRC)
+
+    def test_manual_review_is_a_separate_task_value(self):
+        self.assertIn('"manual_review_items": manual_review_items', self.SRC)
+        self.assertIn('_set_json_task_value_if_fits("manual_review_items"',
+                      self.SRC)
+
+    def test_no_raw_error_message_in_output(self):
+        result_block = self.SRC.split("result = {", 1)[1]
+        self.assertNotIn('"error_message"', result_block)
 
 
 class TestCanonicalFullLoadCheck(unittest.TestCase):

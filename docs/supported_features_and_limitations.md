@@ -47,9 +47,13 @@
   **before** the checkpoint is committed (extract -> apply -> reconcile ->
   checkpoint -> finalize). `target_count >= source_count` is never an automatic
   pass.
-- Failed-ingest classification and retry worklists (`NB14`) with no-reapply
-  checkpoint-only / finalization-only recovery. `max_retries` means the number
-  of **additional** attempts allowed after the first.
+- Failure classification and retry worklists (`NB14`) select the latest failed
+  attempt independently per `source_table_id + operation`. INGEST and ETL own
+  explicit operation sets, so blank operation filtering returns all applicable
+  failed operations without mixing pipelines. One table may yield multiple
+  recovery items. Attempts and `max_retries` are operation-specific;
+  non-executable `MANUAL_REVIEW` items are returned separately and never enter
+  the ForEach. Checkpoint-only / finalization-only recovery remains no-reapply.
 - **Frozen retry boundaries.** `RETRY_DELTA_APPLY` copies the parent run's queue
   row unchanged into a child row, so the source MAX is never recaptured and the
   interval is never widened. `RETRY_ETL` replays the lower/upper bounds recorded
