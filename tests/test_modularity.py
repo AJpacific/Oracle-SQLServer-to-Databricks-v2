@@ -131,16 +131,20 @@ class TestSharedNotebookNeutrality(unittest.TestCase):
         self.assertNotIn("def read_jdbc(", code)
         self.assertIn("def read_source_jdbc(", code)
 
-    def test_legacy_scope_widget_is_marked_compatibility_only(self):
-        self.assertIn("COMPATIBILITY ONLY", shared_nb("_common.py"))
+    def test_legacy_scope_is_not_in_shared_bootstrap(self):
+        code = shared_nb("_common.py")
+        self.assertNotIn("legacy_secret_scope_widget()", code)
+        self.assertNotIn("oracle-migration", code)
+        self.assertNotIn("sqlserver-migration", code)
 
     def test_common_does_not_route_scope_or_rules_by_source(self):
         code = _strip_markdown(shared_nb("_common.py"))
         self.assertNotIn("def _scope_for_system(", code)
         self.assertNotIn("def _type_rules_path_for(", code)
-        # Both now come from the adapter.
+        # Type rules come from the adapter; operational scope comes from the
+        # registered connection row.
         self.assertIn("adapter.type_rules_file()", code)
-        self.assertIn("legacy_secret_scope_widget()", code)
+        self.assertNotIn("legacy_secret_scope_widget()", code)
 
 
 class TestColumnPolicy(unittest.TestCase):

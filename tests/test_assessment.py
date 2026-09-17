@@ -176,6 +176,9 @@ class TestAssessmentDiscoveryStatus(unittest.TestCase):
             self.assertIn(
                 '_capture_assessment_error("table_discovery", e, schema)',
                 code, source)
+            discovery = code.index("discovered_tables = _q(")
+            include_guard = code.index('if "TABLE" in include_types:', discovery)
+            self.assertLess(discovery, include_guard, source)
             result = code.split("business_status =", 1)[1]
             self.assertIn('if business_status == "FAILED":', result, source)
             self.assertIn("raise RuntimeError(", result, source)

@@ -5,7 +5,12 @@
 ### Sources
 - Oracle and Microsoft SQL Server only, via shared source adapters.
 - Secret-backed JDBC; one Databricks secret scope per registered connection.
-- Deterministic five-part `source_table_id` identity.
+- Deterministic connection-owned identity v2 over `connection_id`, source
+  system, server, database, schema, and table.
+- Multiple connection IDs may reference one physical endpoint, including
+  different secret scopes. The same physical table under different connection
+  IDs has separate control state, targets, history, checkpoints, retries,
+  reconciliation, inventory, mappings, and decisions.
 - Mandatory explicit `source_system`; missing, blank, and unknown values fail
   before routing or identity generation.
 
@@ -43,8 +48,10 @@
 - Source assessment and SQL-object assessment are retry-safe: re-running the
   same `assessment_id` updates its own rows instead of duplicating them, and an
   existing `APPROVED`/`REJECTED` review decision is preserved.
-- Source inventory is an exact replacement per `run_id + source_table_id`.
-  Incoming duplicate `(run_id, source_table_id, column_name)` keys fail before
+- Source inventory is an exact replacement per
+  `run_id + connection_id + source_table_id`.
+  Incoming duplicate
+  `(run_id, connection_id, source_table_id, column_name)` keys fail before
   persistence. A same-run retry replaces the full table snapshot, so a dropped
   source column is removed; older run history and unrelated tables remain.
   `INVENTORIED` is set only after the inventory write succeeds. The notebook
@@ -55,12 +62,17 @@
 - Full load (`NB09`, overwrite) and delta sync (`NB11a`/`NB11b`) with
   `FULL_LOAD`, `WATERMARK`, `PRIMARY_KEY`, `HYBRID` strategies and frozen
   incremental intervals.
+- Full Load and Delta worklists discover eligible registrations across active,
+  `VALID` connections. They contain only `run_id`, `connection_id`, and
+  `source_table_id`; adapters and secrets are resolved lazily, so a connection
+  with no eligible registration is not contacted.
 - Correct source-to-Bronze reconciliation performed on the exact work unit
   **before** the checkpoint is committed (extract -> apply -> reconcile ->
   checkpoint -> finalize). `target_count >= source_count` is never an automatic
   pass.
 - Failure classification and retry worklists (`NB14`) select the latest failed
-  attempt independently per `source_table_id + operation`. INGEST and ETL own
+  attempt independently per `connection_id + source_table_id + operation`.
+  INGEST and ETL own
   explicit operation sets, so blank operation filtering returns all applicable
   failed operations without mixing pipelines. One table may yield multiple
   recovery items. Attempts and `max_retries` are operation-specific;
@@ -163,6 +175,9 @@
 - Optional AI conversion requires a pre-approved, configured endpoint; without
   one, routine conversion is `NOT_CONFIGURED` (never fabricated).
 - No new source systems beyond Oracle and SQL Server.
+- Existing physical-source IDs require the explicit dry-run-first
+  `deployment/NB_MigrateSourceTableIdentityV2` upgrade. Initialization never
+  rewrites them automatically.
 
 ## Security
 - No username, password, token, secret value, or credential-bearing JDBC URL is
@@ -178,8 +193,9 @@
   warning and is permitted only with approved non-sensitive test data.
 - An unregistered source fails explicitly. It never falls through to Oracle or
   SQL Server behavior.
-- Legacy control rows with missing `source_system` no longer run. NB00 skips
-  and counts them; an operator must classify each reviewed row explicitly. For
+- Legacy control rows with missing ownership no longer run. NB00 reports and
+  blocks them without changing their IDs; an operator must classify each
+  reviewed row explicitly before the identity-v2 migration. For
   example, only after confirming the source is Oracle:
 
   ```sql

@@ -10,6 +10,11 @@ config/
   type_rules_oracle.yaml
   type_rules_sqlserver.yaml
 notebooks/
+  deployment/
+    NB_CreateRunContext.ipynb
+    NB_GetFullLoadWorklist.ipynb
+    NB_GetDeltaWorklist.ipynb
+    NB_MigrateSourceTableIdentityV2.py
   shared/                       # source-neutral; identical for every source
     _common.py
     NB00_ControlTableInit.py
@@ -75,6 +80,7 @@ docs/
   supported_features_and_limitations.md
   databricks_job_task_mapping.md
   production_readiness_checklist.md
+  source_identity_v2_migration.md
 artifacts/
   test-results/                  # captured repository-test evidence
 tests/
@@ -88,6 +94,7 @@ tests/
   test_etl_dq.py
   test_defect_fixes.py
   test_inventory_idempotency.py
+  test_multi_connection.py
   test_modularity.py
   test_notebook_wiring.py
   test_release_documentation.py
@@ -168,10 +175,17 @@ reads a source secret scope.
 ### Multi-connection onboarding
 - `source_connection` stores non-secret connection metadata; credentials stay in
   a per-connection Databricks secret scope.
+- One physical endpoint may have multiple connection IDs and secret scopes. Each
+  source-table registration belongs to exactly one connection; the same physical
+  table registered through two connections has two independent IDs, targets,
+  checkpoints, retries, reconciliations, and audit histories.
 - `NB00A_UpsertAndValidateConnection` upserts metadata and validates
   connectivity (`SELECT 1 FROM DUAL` / `SELECT 1`), setting the connection
-  `VALID` or `FAILED` with a sanitized error. Downstream tasks receive only
-  `connection_id`, `source_table_id`, and `run_id`.
+  active/`VALID` or inactive/`FAILED` with a sanitized error. Onboarding remains
+  one connection per execution.
+- Operational worklists are discovered globally from eligible registrations and
+  contain only `run_id`, `connection_id`, and `source_table_id`. Connections
+  without eligible registrations are not resolved, connected, or updated.
 
 ### Source assessment and registration
 - `NB01A_SourceAssessment` discovers objects via data-dictionary/catalog views
@@ -239,6 +253,7 @@ Pipeline JSON files may be maintained separately. Confirm notebook paths, task o
 Every source row is identified by:
 
 ```text
+connection_id
 source_system
 source_server
 source_database
@@ -246,7 +261,11 @@ source_schema
 source_table
 ```
 
-A deterministic `source_table_id` is derived from that identity. This keeps Oracle and SQL Server tables separate even when schema and table names match.
+A deterministic v2 `source_table_id` is the SHA-256 digest of a version marker
+and that normalized six-part identity. `connection_id` is trimmed; source
+system, server, and database retain their existing normalization; schema and
+table casing remains significant. Thus the same physical object registered via
+two connection IDs receives two distinct IDs.
 
 `source_system` is mandatory on every registered connection and operational
 row. A missing, blank, or unknown value fails explicitly before identity
@@ -263,10 +282,18 @@ mssql
 
 Aliases normalize to `sqlserver`. Unknown systems fail explicitly.
 
-Legacy rows with a blank `source_system` are intentionally skipped by the NB00
-identity backfill and require reviewed manual classification. Repair only a row
-whose source is known; do not infer it from names, schemas, databases, or secret
-keys. Example (documentation only, never run automatically):
+Existing five-part IDs are never recalculated during ordinary initialization or
+processing. Before enabling global operational worklists on an upgraded
+installation, run `notebooks/deployment/NB_MigrateSourceTableIdentityV2.py`
+first with `dry_run=true`, resolve every blocker, then rerun with
+`dry_run=false`. The migration preserves the old ID in
+`legacy_source_table_id`, marks `source_identity_version=2`, and updates child
+history by `connection_id + old_source_table_id`. It is never invoked
+automatically. Repair missing source ownership only after reviewing the real
+source; do not infer it from names or secret keys. Example:
+
+See `docs/source_identity_v2_migration.md` for the complete dry-run, execution,
+and verification procedure.
 
 ```sql
 UPDATE <catalog>.<control_schema>.source_table_control
@@ -373,21 +400,30 @@ shared/NB03_MappingRulesGeneration
 shared/NB04_MappingValidation
 shared/NB07_TableDecisionGeneration
 shared/NB08_TargetProvisioning
-shared/NB09_FullLoad            (per table, inside a ForEach)
-shared/NB12_ValidationAndReconciliation with mode=full
-shared/NB10_PostFullLoadState
 sources/<source>/NB13_SQLObjectAssessmentAndConversion
 ```
 
-NB02–NB08 are **bulk** shared metadata tasks: each processes the selected rows
-for the run, scoped by `connection_id`. Only the load stage (NB09) runs per
-table inside a ForEach, and it fails if a supplied `source_table_id` does not
-resolve to exactly one eligible table. NB10 commits initial state only for
-tables with a passing `FULL_SNAPSHOT_COUNT` reconciliation.
+NB02-NB08 are **bulk** metadata tasks for one onboarding `connection_id`.
 
-Source inventory is retry-safe at the exact `run_id + source_table_id` scope.
+Full Load is a separate global operational workflow:
+
+```text
+deployment/NB_CreateRunContext
+deployment/NB_GetFullLoadWorklist
+shared/NB09_FullLoad            (per item inside a ForEach)
+shared/NB12_ValidationAndReconciliation with mode=full
+shared/NB10_PostFullLoadState
+```
+
+The worklist discovers registrations across all active, `VALID` connections;
+optional connection/table filters narrow it. Each NB09 iteration requires and
+resolves exactly `run_id + connection_id + source_table_id`.
+
+Source inventory is retry-safe at the exact
+`run_id + connection_id + source_table_id` scope.
 Each successfully discovered table is validated as one complete incoming
-snapshot, duplicate `(run_id, source_table_id, column_name)` keys fail before
+snapshot, duplicate
+`(run_id, connection_id, source_table_id, column_name)` keys fail before
 any write, then that table's existing same-run snapshot is deleted and replaced.
 A dropped source column therefore disappears on retry, while older run history
 and every other table remain untouched. The table is marked `INVENTORIED` only
@@ -403,6 +439,7 @@ Run in this order:
 
 ```text
 shared/NB11a_DeltaSyncPrep
+deployment/NB_GetDeltaWorklist
 shared/NB11b_DeltaSyncApply
 shared/NB12_ValidationAndReconciliation with mode=delta
 ```
@@ -415,6 +452,10 @@ WATERMARK
 PRIMARY_KEY
 HYBRID
 ```
+
+NB11a discovers initialized registrations globally, creates adapters lazily only
+for participating connections, and freezes each interval independently. The
+Delta worklist emits only `run_id`, `connection_id`, and `source_table_id`.
 
 Behavior:
 
@@ -561,3 +602,7 @@ Unit tests validate pure logic and static wiring. They do not replace live JDBC,
 Track those results separately in
 `docs/production_readiness_checklist.md`. Production readiness must not be
 claimed while required live checks remain `NOT_EXECUTED`.
+
+Repository changes do not update Databricks Job YAML. Deployed Jobs must be
+updated separately to use the run-only context, global worklist tasks, and the
+three-field ForEach payload.

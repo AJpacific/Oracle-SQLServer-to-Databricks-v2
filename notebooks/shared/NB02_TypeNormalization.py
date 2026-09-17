@@ -15,20 +15,18 @@ import hashlib
 from pyspark.sql import functions as F, Row
 
 run_id = get_run_id()
-print("run_id:", run_id)
+connection_id = require_connection_id(CONNECTION_ID, "type normalization")
+connection = require_valid_connection(connection_id)
+print("run_id:", run_id, "| connection_id:", connection_id)
 
 def ctrl(t):
     return f"{quote_databricks(CATALOG)}.{quote_databricks(CONTROL_SCHEMA)}.{quote_databricks(t)}"
 
 # COMMAND ----------
 
-# Optional connection scoping: a per-connection onboarding run must not consume
-# another connection's rows from the same run_id.
-_conn_filter = (f" AND connection_id = {escape_string_literal(CONNECTION_ID)}"
-                if CONNECTION_ID else "")
-
 inv = spark.sql(f"SELECT * FROM {ctrl('source_inventory')} "
-                f"WHERE run_id = {escape_string_literal(run_id)}{_conn_filter}")
+                f"WHERE run_id = {escape_string_literal(run_id)} "
+                f"AND connection_id = {escape_string_literal(connection_id)}")
 rows = inv.collect()
 print("Inventory rows to normalize:", len(rows))
 
@@ -43,6 +41,8 @@ def _to_int(v):
 out = []
 by_table = {}
 for r in rows:
+    assert_table_connection_match(r, connection_id)
+    assert_source_identity_match(r, connection)
     raw = r["data_type"]
     # Type names are lower-cased to form rule keys. The source dialect is NEVER
     # derived from a datatype name; it is carried explicitly as source_system.
@@ -57,7 +57,7 @@ for r in rows:
     conn_id = r["connection_id"]
     # Group by the source-qualified id so the same schema.table on two sources
     # never share a signature or collide.
-    key = src_id
+    key = (conn_id, src_id)
     # Include every schema-defining attribute in the deterministic signature.
     by_table.setdefault(key, []).append((
         int(r["ordinal_position"]),
@@ -93,6 +93,12 @@ from pyspark.sql.types import (
     BooleanType
 )
 
+spark.sql(f"""
+    DELETE FROM {ctrl('normalized_source_inventory')}
+    WHERE run_id = {escape_string_literal(run_id)}
+      AND connection_id = {escape_string_literal(connection_id)}
+""")
+
 if out:
 
     normalized_schema = StructType([
@@ -123,11 +129,8 @@ if out:
     )
 
     hash_rows = [
-        Row(
-            source_table_id=k,
-            schema_hash=v
-        )
-        for k, v in hashes.items()
+        Row(connection_id=key[0], source_table_id=key[1], schema_hash=value)
+        for key, value in hashes.items()
     ]
 
     hdf = spark.createDataFrame(hash_rows)
@@ -135,7 +138,7 @@ if out:
     df = (
         df.join(
             hdf,
-            ["source_table_id"],
+            ["connection_id", "source_table_id"],
             "left"
         )
         .withColumn("captured_ts", F.current_timestamp())
@@ -159,6 +162,7 @@ dbutils.notebook.exit(
     json.dumps({
         "status": "SUCCEEDED",
         "run_id": run_id,
+        "connection_id": connection_id,
         "columns": len(out)
     })
 )

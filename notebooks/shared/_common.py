@@ -41,13 +41,6 @@ def _ensure_widget(name, default):
 
 _ensure_widget("catalog", "da_accelerators")
 _ensure_widget("control_schema", "control")
-_ensure_widget("secret_scope", "oracle-migration")
-# Legacy per-source secret scopes, kept for COMPATIBILITY ONLY so environments
-# onboarded before the connection registry keep working. New jobs must pass
-# connection_id; the scope then comes from source_connection and the adapter
-# owns its own secret key names. A future source must NOT add another global
-# scope widget here.
-_ensure_widget("sqlserver_secret_scope", "sqlserver-migration")
 # Absolute path to the repo src folder, used only as a fallback if the
 # package import below fails (e.g. notebook run outside a Git folder).
 _ensure_widget("src_path", "")
@@ -59,8 +52,6 @@ _ensure_widget("run_id", "")
 
 CATALOG = dbutils.widgets.get("catalog").strip()
 CONTROL_SCHEMA = dbutils.widgets.get("control_schema").strip()
-SECRET_SCOPE = dbutils.widgets.get("secret_scope").strip()
-SQLSERVER_SECRET_SCOPE = dbutils.widgets.get("sqlserver_secret_scope").strip()
 _SRC_PATH = dbutils.widgets.get("src_path").strip()
 CONNECTION_ID = dbutils.widgets.get("connection_id").strip()
 SOURCE_TABLE_ID = dbutils.widgets.get("source_table_id").strip()
@@ -153,8 +144,10 @@ try:
     from src.control_repository import (
         ControlRepository, new_run_id,
         normalize_connection_input, assert_source_system_match,
+        require_connection_id,
     )
     from src.source_identity import (
+        SOURCE_IDENTITY_VERSION, compute_legacy_source_table_id,
         compute_source_table_id, normalize_source_system, require_source_system,
     )
     from src.source_adapters.factory import get_source_adapter
@@ -184,24 +177,15 @@ except ModuleNotFoundError:
     from control_repository import (
         ControlRepository, new_run_id,
         normalize_connection_input, assert_source_system_match,
+        require_connection_id,
     )
     from source_identity import (
+        SOURCE_IDENTITY_VERSION, compute_legacy_source_table_id,
         compute_source_table_id, normalize_source_system, require_source_system,
     )
     from source_adapters.factory import get_source_adapter
 
 # COMMAND ----------
-
-# --- Oracle connection from secrets -----------------------------------------
-
-def _get_secret_or_none(key):
-    "Return a secret value, or None if the key isn't present in the scope."
-    try:
-        val = dbutils.secrets.get(SECRET_SCOPE, key)
-        return val or None
-    except Exception:
-        return None
-
 
 def _secret_provider(scope, key):
     "Adapter-facing secret reader: (scope, key) -> value | None."
@@ -241,21 +225,6 @@ def _resolve_type_rules_path(adapter):
         f"not found in: {', '.join(_config_dir_candidates())}")
 
 
-def _legacy_scope_for(adapter):
-    """COMPATIBILITY ONLY legacy scope, named by the adapter and read from a widget.
-
-    Returns None when the source declares no legacy widget, so an unregistered
-    source can never fall through to another source's scope.
-    """
-    widget = adapter.legacy_secret_scope_widget()
-    if not widget:
-        return None
-    try:
-        return dbutils.widgets.get(widget).strip() or None
-    except Exception:
-        return None
-
-
 def _build_adapter(source_system, source_server=None, source_database=None,
                    secret_scope=None, extra_config=None):
     """Construct an adapter and attach its own type-rules path.
@@ -281,31 +250,85 @@ def build_adapter(source_system, source_server=None, source_database=None,
                           secret_scope=secret_scope)
 
 
-def get_source_adapter_for_row(row):
-    """Return the source adapter for one control-table row.
-
-    LEGACY FALLBACK ONLY, used when a row predates the connection registry. The
-    scope comes from the source's own declared legacy widget; production routing
-    goes through get_source_adapter_routed() and the registered connection.
-    """
-    d = row.asDict() if hasattr(row, "asDict") else dict(row)
-    source_system = require_source_system(d.get("source_system"))
-    probe = get_source_adapter(source_system)
-    scope = _legacy_scope_for(probe)
-    if not scope:
-        raise ValueError(
-            f"source {source_system!r} has no registered connection and no legacy "
-            "secret-scope widget; supply connection_id")
-    return _build_adapter(
-        source_system, source_server=d.get("source_server"),
-        source_database=d.get("source_database"), secret_scope=scope)
-
-
 def get_connection(connection_id):
     "Return the source_connection row for an id, or None (no secrets involved)."
     if not connection_id:
         return None
     return control_repo().get_connection(connection_id)
+
+
+def require_valid_connection(connection_id, expected_source_system=None):
+    """Return one active VALID registered connection with a nonblank scope."""
+    connection_id = require_connection_id(
+        connection_id, "source operation")
+    connection = control_repo().get_connection(connection_id)
+    if connection is None:
+        raise ValueError(
+            f"connection_id {connection_id!r} not found in source_connection")
+    data = connection.asDict() if hasattr(connection, "asDict") else dict(connection)
+    if not data.get("is_active"):
+        raise ValueError(f"connection {connection_id!r} is not active")
+    if (data.get("connection_status") or "") != "VALID":
+        raise ValueError(
+            f"connection {connection_id!r} is not VALID "
+            f"(status={data.get('connection_status')!r}); validate it first")
+    if not str(data.get("secret_scope") or "").strip():
+        raise ValueError(
+            f"registered connection {connection_id!r} has a blank secret_scope")
+    source_system = require_source_system(
+        data.get("source_system"), "registered connection")
+    if expected_source_system is not None:
+        assert_source_system_match(expected_source_system, source_system)
+    return connection
+
+
+def assert_table_connection_match(table_row, connection_id):
+    """Reject a table/work row that is not owned by the supplied connection."""
+    expected = require_connection_id(connection_id, "table ownership check")
+    data = table_row.asDict() if hasattr(table_row, "asDict") else dict(table_row)
+    actual = require_connection_id(
+        data.get("connection_id"), "source table registration")
+    if actual != expected:
+        raise ValueError(
+            f"source table belongs to connection_id {actual!r}, not {expected!r}")
+    return actual
+
+
+def assert_source_identity_match(table_row, connection_row):
+    """Validate table ownership metadata against the authoritative connection."""
+    table = table_row.asDict() if hasattr(table_row, "asDict") else dict(table_row)
+    connection = (connection_row.asDict() if hasattr(connection_row, "asDict")
+                  else dict(connection_row))
+    assert_table_connection_match(table, connection.get("connection_id"))
+    assert_source_system_match(
+        table.get("source_system"), connection.get("source_system"))
+    for field in ("source_server", "source_database"):
+        table_value = str(table.get(field) or "").strip().casefold()
+        connection_value = str(connection.get(field) or "").strip().casefold()
+        if table_value and connection_value and table_value != connection_value:
+            raise ValueError(
+                f"source table {field} does not match registered connection "
+                f"{connection.get('connection_id')!r}")
+    return True
+
+
+def assert_current_source_table_identity(table_row, connection_row):
+    """Require a registration's stored ID to match connection-owned v2."""
+    table = table_row.asDict() if hasattr(table_row, "asDict") else dict(table_row)
+    connection = (connection_row.asDict() if hasattr(connection_row, "asDict")
+                  else dict(connection_row))
+    assert_source_identity_match(table, connection)
+    if table.get("source_identity_version") != SOURCE_IDENTITY_VERSION:
+        raise ValueError(
+            "source table registration requires identity-v2 migration")
+    expected = compute_source_table_id(
+        connection.get("connection_id"), connection.get("source_system"),
+        connection.get("source_server"), connection.get("source_database"),
+        table.get("source_schema"), table.get("source_table"))
+    if table.get("source_table_id") != expected:
+        raise ValueError(
+            "source_table_id does not match its connection-owned identity")
+    return True
 
 
 def get_source_adapter_for_connection(connection, source_database=None,
@@ -326,7 +349,14 @@ def get_source_adapter_for_connection(connection, source_database=None,
             f"(status={c.get('connection_status')!r}); validate it first")
     source_system = require_source_system(
         c.get("source_system"), "registered connection")
-    database = source_database or c.get("source_database")
+    registered_database = c.get("source_database")
+    if (source_database is not None
+            and str(source_database).strip().casefold()
+            != str(registered_database or "").strip().casefold()):
+        raise ValueError(
+            f"source_database override does not match registered connection "
+            f"{c.get('connection_id')!r}")
+    database = registered_database
     secret_scope = (c.get("secret_scope") or "").strip()
     if not secret_scope:
         raise ValueError(
@@ -352,35 +382,23 @@ def get_source_adapter_routed(row, require_valid=True):
     credential-bearing URLs.
     """
     d = row.asDict() if hasattr(row, "asDict") else dict(row)
-    conn_id = d.get("connection_id")
-    if not conn_id:
-        raise ValueError(
-            "source operations require a registered connection_id")
-    connection = get_connection(conn_id)
+    conn_id = require_connection_id(
+        d.get("connection_id"), "source operation")
+    connection = (require_valid_connection(conn_id, d.get("source_system"))
+                  if require_valid else get_connection(conn_id))
     if connection is None:
         raise ValueError(f"connection_id {conn_id!r} not found in source_connection")
-    cd = connection.asDict()
-    assert_source_system_match(d.get("source_system"), cd.get("source_system"))
+    cd = connection.asDict() if hasattr(connection, "asDict") else dict(connection)
 
     src_id = d.get("source_table_id")
     if src_id:
-        control_row = control_repo().get_control_row(src_id)
+        control_row = control_repo().get_source_table(conn_id, src_id)
         if control_row is None:
             raise ValueError(
-                f"source_table_id {src_id!r} not found in source_table_control")
-        control_connection_id = control_row["connection_id"]
-        if control_connection_id != conn_id:
-            raise ValueError(
-                f"source_table_id {src_id!r} belongs to connection_id "
-                f"{control_connection_id!r}, not {conn_id!r}")
-
-    for field in ("source_server", "source_database"):
-        row_value = str(d.get(field) or "").strip().casefold()
-        registered_value = str(cd.get(field) or "").strip().casefold()
-        if row_value != registered_value:
-            raise ValueError(
-                f"source row {field} does not match registered connection "
-                f"{conn_id!r}")
+                f"connection_id {conn_id!r} and source_table_id {src_id!r} "
+                "not found in source_table_control")
+        assert_current_source_table_identity(control_row, connection)
+    assert_source_identity_match(d, connection)
     return get_source_adapter_for_connection(
         connection, require_valid=require_valid)
 
@@ -406,6 +424,7 @@ def source_table_id_for_row(row):
     "Compute the deterministic source_table_id for a control/queue row."
     d = row.asDict() if hasattr(row, "asDict") else dict(row)
     return compute_source_table_id(
+        require_connection_id(d.get("connection_id"), "source table identity"),
         require_source_system(d.get("source_system")),
         d.get("source_server"),
         d.get("source_database"),
@@ -571,13 +590,14 @@ def persist_inventory_rows(rows):
         return 0
     records = inv_common.validate_inventory_batch(rows)
     run_id = records[0]["run_id"]
+    connection_id = records[0]["connection_id"]
     source_table_id = records[0]["source_table_id"]
-    connection_id = records[0].get("connection_id")
 
     control_rows = spark.sql(f"""
         SELECT connection_id
         FROM {ctrl_table('source_table_control')}
-        WHERE source_table_id = {escape_string_literal(source_table_id)}
+        WHERE connection_id = {escape_string_literal(connection_id)}
+          AND source_table_id = {escape_string_literal(source_table_id)}
     """).collect()
     if len(control_rows) != 1:
         raise ValueError(
@@ -594,7 +614,8 @@ def persist_inventory_rows(rows):
         for row in spark.sql(f"""
             SELECT DISTINCT connection_id
             FROM {ctrl_table('source_inventory')}
-            WHERE source_table_id = {escape_string_literal(source_table_id)}
+                        WHERE connection_id = {escape_string_literal(connection_id)}
+                            AND source_table_id = {escape_string_literal(source_table_id)}
               AND connection_id IS NOT NULL
         """).collect()
     }
@@ -624,6 +645,7 @@ def persist_inventory_rows(rows):
     spark.sql(f"""
         DELETE FROM {ctrl_table('source_inventory')}
         WHERE run_id = {escape_string_literal(run_id)}
+                    AND connection_id = {escape_string_literal(connection_id)}
           AND source_table_id = {escape_string_literal(source_table_id)}
     """)
     (snapshot.write.format("delta").mode("append").option(

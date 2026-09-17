@@ -48,13 +48,13 @@ class TestInventoryKeys(unittest.TestCase):
     def test_merge_key_contract(self):
         self.assertEqual(
             inv.INVENTORY_MERGE_KEYS,
-            ("run_id", "source_table_id", "column_name"))
+            ("run_id", "connection_id", "source_table_id", "column_name"))
 
     def test_duplicate_incoming_key_is_reported(self):
         duplicate = _record()
         self.assertEqual(
             inv.find_duplicate_inventory_keys([duplicate, duplicate]),
-            [("run-1", "sid-1", "ID")])
+            [("run-1", "conn-1", "sid-1", "ID")])
 
     def test_duplicate_error_identifies_full_key(self):
         duplicate = _record(column_name="PASSWORD_HASH")
@@ -62,6 +62,7 @@ class TestInventoryKeys(unittest.TestCase):
             inv.validate_inventory_batch([duplicate, duplicate])
         message = str(context.exception)
         self.assertIn("run_id='run-1'", message)
+        self.assertIn("connection_id='conn-1'", message)
         self.assertIn("source_table_id='sid-1'", message)
         self.assertIn("column_name='PASSWORD_HASH'", message)
 
@@ -81,6 +82,11 @@ class TestInventoryKeys(unittest.TestCase):
             inv.validate_inventory_batch([
                 _record("ID", source_table_id="sid-1"),
                 _record("NAME", source_table_id="sid-2"),
+            ])
+        with self.assertRaises(ValueError):
+            inv.validate_inventory_batch([
+                _record("ID", connection_id="conn-1"),
+                _record("NAME", connection_id="conn-2"),
             ])
 
     def test_connection_and_identity_must_agree(self):
@@ -122,8 +128,8 @@ class TestInventoryPersistenceWiring(unittest.TestCase):
     def test_delete_is_exact_run_table_scope(self):
         delete = self.block.split("DELETE FROM", 1)[1].split('""")', 1)[0]
         self.assertIn("WHERE run_id =", delete)
+        self.assertIn("AND connection_id =", delete)
         self.assertIn("AND source_table_id =", delete)
-        self.assertNotIn("connection_id =", delete)
 
     def test_new_runs_and_other_tables_are_not_deleted(self):
         # Both identity parts appear in the predicate, so a different run or
@@ -133,6 +139,7 @@ class TestInventoryPersistenceWiring(unittest.TestCase):
 
     def test_connection_rebinding_fails_before_delete(self):
         self.assertIn("FROM {ctrl_table('source_table_control')}", self.block)
+        self.assertIn("WHERE connection_id =", self.block)
         self.assertIn("control_connection_id != connection_id", self.block)
         self.assertIn("SELECT DISTINCT connection_id", self.block)
         self.assertIn("prior_connections != {connection_id}", self.block)
@@ -160,7 +167,7 @@ class TestInventoryPersistenceWiring(unittest.TestCase):
             code = source_nb(source, "NB01_SourceInventory.py")
             success = code.split("table_inventory_rows =", 1)[1]
             persist = success.index("persist_inventory_rows(table_inventory_rows)")
-            update = success.index("repo.update_control(")
+            update = success.index("repo.update_control_for_connection(")
             self.assertLess(persist, update, source)
             self.assertIn("INVENTORY_FAILED", success)
             self.assertIn("failcls.sanitize_message(e)", success)

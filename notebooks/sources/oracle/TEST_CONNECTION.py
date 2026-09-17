@@ -18,14 +18,19 @@
 
 SOURCE_SYSTEM = "oracle"
 
+dbutils.widgets.text("secret_scope", "oracle-migration")
 dbutils.widgets.text("test_schema", "", "Oracle source owner (optional)")
 dbutils.widgets.text("test_table", "", "Oracle source table (optional)")
 dbutils.widgets.dropdown("show_sample_values", "false", ["true", "false"])
+dbutils.widgets.dropdown("allow_legacy_mode", "false", ["true", "false"])
 
 test_schema = dbutils.widgets.get("test_schema").strip().upper()
 test_table = dbutils.widgets.get("test_table").strip().upper()
 show_sample_values = (
     dbutils.widgets.get("show_sample_values").strip().lower() == "true")
+allow_legacy_mode = (
+    dbutils.widgets.get("allow_legacy_mode").strip().lower() == "true")
+legacy_secret_scope = dbutils.widgets.get("secret_scope").strip()
 if show_sample_values:
     print("WARNING: show_sample_values=true should only be used with approved non-sensitive test data.")
 
@@ -69,14 +74,21 @@ if CONNECTION_ID:
     adapter = get_source_adapter_for_connection(connection, require_valid=False)
     print(f"Using registered connection {CONNECTION_ID} "
           f"(server/database/secret scope from source_connection).")
-else:
+elif allow_legacy_mode:
+    if not legacy_secret_scope:
+        raise ValueError("legacy diagnostic requires secret_scope")
     test_server = None
     test_database = None
     adapter = get_source_adapter(
-        SOURCE_SYSTEM, secret_provider=_secret_provider, secret_scope=SECRET_SCOPE)
+        SOURCE_SYSTEM, secret_provider=_secret_provider,
+        secret_scope=legacy_secret_scope)
     print(f"[legacy fallback] no connection_id supplied; using the "
-          f"'{SECRET_SCOPE}' secret scope. Register a connection and pass "
+          f"'{legacy_secret_scope}' secret scope. Register a connection and pass "
           "connection_id for production use.")
+else:
+    raise ValueError(
+        "connection_id is required; set allow_legacy_mode=true only for an "
+        "approved manual legacy diagnostic")
 
 print("JDBC URL (redacted):",
       adapter.redact_jdbc_url(adapter.get_jdbc_url_and_props()[0]))

@@ -12,19 +12,20 @@ invokes another notebook.
 
 Rules that apply to every workflow:
 
-- No secret is ever passed as a task parameter. Downstream tasks receive only
-  `connection_id`, `source_table_id`, and `run_id`.
+- No secret is ever passed as a task parameter. Normal Full Load and Delta
+  ForEach items contain only `run_id`, `connection_id`, and `source_table_id`.
 - Every registered and operational row must carry a nonblank, registered
   `source_system`. A missing or unknown value fails and is never routed to a
   default source.
 - Every task in one workflow receives the **same** `run_id`, passed explicitly
   as a task parameter (`get_run_id()` prefers the widget over a task value).
-- Every shared task from `T03` onward receives `connection_id` where relevant,
-  so one connection's onboarding never consumes another connection's rows.
+- Onboarding tasks receive one required `connection_id`; operational worklist
+  tasks discover eligible registrations globally and may be narrowed by
+  `only_connection_ids` or `only_source_table_ids`.
 - A retry workflow receives a **child** `run_id` plus the `parent_run_id` of the
   original run, and the original frozen watermark bounds.
-- The ETL workflow never receives a source secret scope or a `connection_id`
-  used for connectivity.
+- The ETL workflow receives `connection_id` only as ownership lineage. It never
+  receives a source secret scope or uses the connection for source access.
 - Every notebook exists in exactly one place (`shared/` or
   `sources/<source>/`); there are no wrapper copies, so tasks must reference
   those paths directly.
@@ -45,7 +46,7 @@ Rules that apply to every workflow:
 | `T07_Mapping_Validation` | `shared/NB04_MappingValidation` | `run_id`, `connection_id` | – |
 | `T08_Table_Decision` | `shared/NB07_TableDecisionGeneration` | `run_id`, `connection_id` | – |
 | `T09_Provision_Bronze` | `shared/NB08_TargetProvisioning` | `run_id`, `connection_id` | – |
-| `T10_Get_Auto_Migrate_Worklist` | shared query on `source_table_control` | `connection_id` | `{connection_id, source_table_id, run_id}` |
+| `T10_Get_Auto_Migrate_Worklist` | `deployment/NB_GetFullLoadWorklist` | `run_id`, `catalog`, `control_schema`, `max_tables`, optional `only_connection_ids`, optional `only_source_table_ids` | `worklist`, `worklist_count`, `connection_count` |
 | `T11_ForEach_Full_Load` | `shared/NB09_FullLoad` | `connection_id`, `source_table_id`, `run_id`, `attempt_number` | – |
 | `T12_Full_Reconciliation` | `shared/NB12_ValidationAndReconciliation` | `run_id`, `mode=full` | – |
 | `T13_Commit_Initial_State` | `shared/NB10_PostFullLoadState` | `run_id` | – |
@@ -59,7 +60,8 @@ per-table; `shared/NB09_FullLoad` fails if a supplied `source_table_id` does not
 resolve to exactly one eligible AUTO_MIGRATE table.
 
 `T04` persists each table independently. Repeating it with the same `run_id`
-replaces that table's exact inventory snapshot after duplicate-key validation;
+replaces that table's exact `run_id + connection_id + source_table_id`
+inventory snapshot after duplicate-key validation;
 it does not append duplicate columns or delete another run/table. A new
 `run_id` creates new history.
 
@@ -69,14 +71,18 @@ it does not append duplicate columns or delete another run/table. A new
 
 | Task key | Notebook | Parameters |
 |---|---|---|
-| `T20_Delta_Prep` | `shared/NB11a_DeltaSyncPrep` | `run_id`, `connection_id` (optional scope) |
-| `T21_Delta_Apply` | `shared/NB11b_DeltaSyncApply` | `run_id`, `source_table_id`, `attempt_number`, `parent_run_id`, `recovery_action` |
+| `T19_Create_Run_Context` | `deployment/NB_CreateRunContext` | optional `run_id`, `run_prefix` | `run_id` only |
+| `T20_Delta_Prep` | `shared/NB11a_DeltaSyncPrep` | `run_id`, optional `only_connection_ids`, optional `only_source_table_ids` |
+| `T20B_Get_Delta_Worklist` | `deployment/NB_GetDeltaWorklist` | `run_id`, `catalog`, `control_schema`, `max_tables`, optional `only_connection_ids`, optional `only_source_table_ids` | `worklist`, `worklist_count`, `connection_count` |
+| `T21_Delta_Apply` | `shared/NB11b_DeltaSyncApply` | `run_id`, `connection_id`, `source_table_id`, `attempt_number`, `parent_run_id`, `recovery_action` |
 | `T22_Delta_Summary` | `shared/NB12_ValidationAndReconciliation` | `run_id`, `mode=delta` |
 | `T23_Notify_Delta_Failures` | `shared/NB16_NotifyFailures` (run_if: ALL_DONE) | `run_id`, `pipeline_name=INGEST_DELTA` |
 
-`NB11b` performs extract → apply → reconcile → checkpoint → finalize per queue
-item, so reconciliation always precedes the checkpoint. When `source_table_id`
-is supplied the task must resolve exactly one QUEUED row.
+`NB11a` discovers work across active, valid connections and creates adapters
+lazily only for registrations it processes. `NB11b` performs extract → apply →
+reconcile → checkpoint → finalize per queue item, so reconciliation always
+precedes the checkpoint. Each task resolves exactly one
+`run_id + connection_id + source_table_id` queue row.
 
 ---
 
@@ -85,7 +91,7 @@ is supplied the task must resolve exactly one QUEUED row.
 | Task key | Notebook | Parameters |
 |---|---|---|
 | `T30_Get_ETL_Eligible_Tables` | shared query on `source_table_control` | – |
-| `T31_ForEach_Bronze_Table` | `shared/NB15_BronzeToSilverETL` | `source_table_id`, `run_id`, `etl_mode`, `attempt_number`, `quarantine_enabled`, `exclude_quarantine_columns` |
+| `T31_ForEach_Bronze_Table` | `shared/NB15_BronzeToSilverETL` | `connection_id`, `source_table_id`, `run_id`, `etl_mode`, `attempt_number`, `quarantine_enabled`, `exclude_quarantine_columns` |
 | `T32_Notify_ETL_Failures` | `shared/NB16_NotifyFailures` (run_if: ALL_DONE) | `run_id`, `pipeline_name=ETL` |
 
 `NB15` performs transform → validate → quarantine → reconcile → ETL checkpoint
@@ -101,7 +107,8 @@ secret scope.
 | `T40_Select_Retries` | `shared/NB14_RetryFailedTables` | `pipeline_name`, `original_run_id`, `operation`, `source_table_id`, `max_retries`, `include_non_retryable` |
 | `T41_ForEach_Retry` | routed by `recovery_action` | `run_id` (child), `parent_run_id`, `connection_id`, `source_table_id`, `pipeline_name`, `operation`, `previous_attempt_number`, `attempt_number`, `failure_stage`, `error_category`, `recovery_action`, `retry_lower_watermark`, `retry_upper_watermark` |
 
-Retry selection identity is `source_table_id + operation`. NB14 selects the
+Retry selection identity is `connection_id + source_table_id + operation`.
+NB14 selects the
 latest failed row independently for every operation using the greatest attempt
 number, then ended timestamp, started timestamp, and run ID. A table may
 therefore produce more than one recovery item when distinct operations failed;
@@ -128,7 +135,7 @@ Routing for `recovery_action`:
 first. With `max_retries=3`, an initial `attempt_number=1` may be retried as
 attempts 2, 3, and 4; beyond that the operation becomes `MANUAL_REVIEW`.
 Attempts and retry limits are evaluated independently per
-`source_table_id + operation`.
+`connection_id + source_table_id + operation`.
 
 NB14 returns two collections. `worklist` contains only executable recovery
 actions. `manual_review_items` contains non-retryable, exhausted, unknown, or
@@ -141,7 +148,7 @@ the Databricks task-value limit. The complete collections remain in the
 notebook result when reasonably sized; no list is silently truncated. For a
 larger result, scope NB14 with `operation` or `source_table_id`, or use the same
 documented `table_run_log` query pattern keyed by original run, pipeline-owned
-operation, source table, and operation.
+operation, connection, source table, and operation.
 
 State-only recoveries (`RETRY_CHECKPOINT_ONLY`,
 `RETRY_QUEUE_FINALIZATION_ONLY`) write a child `table_run_log` row with
@@ -169,6 +176,10 @@ task parameters, ForEach isolation, retry routing, child lineage, retry policy,
 and `ALL_DONE` failure-notification conditions. Record actual workspace evidence
 in `docs/production_readiness_checklist.md`; repository tests cannot validate a
 deployed Databricks Job.
+
+The repository changes do not update Databricks Job YAML. Existing deployments
+must separately replace any global `connection_id` run context with the global
+Full Load/Delta worklist tasks and pass each three-field item into its ForEach.
 
 ---
 

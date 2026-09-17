@@ -34,7 +34,10 @@ try:
 except ValueError:
     attempt_number = 1
 recovery_action = dbutils.widgets.get("recovery_action").strip().upper()
-only_id = SOURCE_TABLE_ID or None
+connection_id = require_connection_id(CONNECTION_ID, "Delta work item")
+only_id = str(SOURCE_TABLE_ID or "").strip()
+if not only_id:
+    raise ValueError("Delta work item requires source_table_id")
 
 # COMMAND ----------
 
@@ -53,17 +56,32 @@ if recovery_action in ("RETRY_CHECKPOINT_ONLY", "RETRY_QUEUE_FINALIZATION_ONLY")
                       if recovery_action == "RETRY_CHECKPOINT_ONLY"
                       else failcls.QUEUE_FINALIZATION)
     in_list = ", ".join(escape_string_literal(s) for s in statuses)
-    scope = (f" AND source_table_id = {escape_string_literal(only_id)}"
-             if only_id else "")
     rows = spark.sql(f"""
         SELECT * FROM {ctrl('delta_sync_queue')}
         WHERE run_id = {escape_string_literal(src_run)}
-          AND status IN ({in_list}){scope}
+          AND connection_id = {escape_string_literal(connection_id)}
+          AND source_table_id = {escape_string_literal(only_id)}
+          AND status IN ({in_list})
     """).collect()
+    if len(rows) != 1:
+        raise ValueError(
+            f"state-only recovery resolved to {len(rows)} queue rows; "
+            "expected exactly one")
     recovered, rec_failed = 0, 0
     for q in rows:
         qd = q.asDict()
         src_id = q["source_table_id"]
+        assert_table_connection_match(q, connection_id)
+        registration = repo.get_source_table(connection_id, src_id)
+        if registration is None:
+            raise ValueError(
+                "state-only recovery registration no longer exists")
+        connection = repo.get_connection(connection_id)
+        if connection is None:
+            raise ValueError(
+                "state-only recovery connection no longer exists")
+        assert_current_source_table_identity(registration, connection)
+        assert_source_identity_match(q, connection)
         strategy = q["load_strategy"]
         upper_wm = q["upper_watermark_value"]
         rec_started = now_utc()
@@ -72,7 +90,7 @@ if recovery_action in ("RETRY_CHECKPOINT_ONLY", "RETRY_QUEUE_FINALIZATION_ONLY")
             """Child audit row for a state-only recovery (no data reapplied)."""
             repo.log_table_run({
                 "run_id": run_id, "parent_run_id": src_run,
-                "source_table_id": src_id, "connection_id": qd.get("connection_id"),
+                "source_table_id": src_id, "connection_id": connection_id,
                 "source_system": qd.get("source_system"),
                 "source_server": qd.get("source_server"),
                 "source_database": qd.get("source_database"),
@@ -100,18 +118,21 @@ if recovery_action in ("RETRY_CHECKPOINT_ONLY", "RETRY_QUEUE_FINALIZATION_ONLY")
                 if strategy in ("WATERMARK", "HYBRID"):
                     fields["last_watermark_value"] = wm.canonical_watermark_string(
                         upper_wm, strict=True)
-                repo.update_control(src_id, fields)
+                repo.update_control_for_connection(
+                    connection_id, src_id, fields)
                 spark.sql(f"""
                     UPDATE {ctrl('delta_sync_queue')}
                     SET status = 'CHECKPOINT_COMMITTED',
                         checkpoint_committed_ts = current_timestamp()
                     WHERE run_id = {escape_string_literal(src_run)}
+                                            AND connection_id = {escape_string_literal(connection_id)}
                       AND source_table_id = {escape_string_literal(src_id)}
                 """)
             spark.sql(f"""
                 UPDATE {ctrl('delta_sync_queue')}
                 SET status = 'SUCCEEDED', finalized_ts = current_timestamp()
                 WHERE run_id = {escape_string_literal(src_run)}
+                                    AND connection_id = {escape_string_literal(connection_id)}
                   AND source_table_id = {escape_string_literal(src_id)}
             """)
             recovered += 1
@@ -140,12 +161,13 @@ if recovery_action in ("RETRY_CHECKPOINT_ONLY", "RETRY_QUEUE_FINALIZATION_ONLY")
 # MAX(watermark) is never recaptured. NB11a is not involved.
 queue_run_id = run_id
 if recovery_action == "RETRY_DELTA_APPLY":
-    if not parent_run_id or not only_id:
+    if not parent_run_id:
         raise ValueError(
-            "RETRY_DELTA_APPLY requires both parent_run_id and source_table_id")
+            "RETRY_DELTA_APPLY requires parent_run_id")
     parent_rows = spark.sql(f"""
         SELECT * FROM {ctrl('delta_sync_queue')}
         WHERE run_id = {escape_string_literal(parent_run_id)}
+          AND connection_id = {escape_string_literal(connection_id)}
           AND source_table_id = {escape_string_literal(only_id)}
     """).collect()
     if len(parent_rows) != 1:
@@ -173,7 +195,9 @@ if recovery_action == "RETRY_DELTA_APPLY":
     spark.sql(f"""
         MERGE INTO {ctrl('delta_sync_queue')} t
         USING _retry_queue_row s
-          ON t.run_id = s.run_id AND t.source_table_id = s.source_table_id
+                    ON t.run_id = s.run_id
+                 AND t.connection_id = s.connection_id
+                 AND t.source_table_id = s.source_table_id
         WHEN MATCHED AND t.status <> 'SUCCEEDED' THEN UPDATE SET
             t.status = 'QUEUED', t.source_query = s.source_query,
             t.last_watermark_value = s.last_watermark_value,
@@ -187,18 +211,18 @@ if recovery_action == "RETRY_DELTA_APPLY":
 
 # COMMAND ----------
 
-# Per-table ForEach scoping: one task must process only its own work unit.
-queue_scope = (f" AND source_table_id = {escape_string_literal(only_id)}"
-               if only_id else "")
+# Per-table ForEach scoping: one task processes exactly one owned work unit.
 queue = spark.sql(f"""
     SELECT * FROM {ctrl('delta_sync_queue')}
     WHERE run_id = {escape_string_literal(queue_run_id)}
+      AND connection_id = {escape_string_literal(connection_id)}
+      AND source_table_id = {escape_string_literal(only_id)}
       AND status = 'QUEUED'
-      {queue_scope}
 """).collect()
-if only_id and len(queue) != 1:
+if len(queue) != 1:
     raise ValueError(
-        f"source_table_id {only_id!r} resolved to {len(queue)} QUEUED rows; "
+        f"connection_id {connection_id!r} and source_table_id {only_id!r} "
+        f"resolved to {len(queue)} QUEUED rows; "
         "expected exactly 1")
 print("Queued items:", len(queue))
 
@@ -250,6 +274,18 @@ def write_recon(ident, recon_result):
              c["status"], c["message"]) for c in recon_result.checks]
     if not rows:
         return
+    check_types = ", ".join(
+        escape_string_literal(check["check_type"])
+        for check in recon_result.checks)
+    spark.sql(f"""
+        DELETE FROM {ctrl('reconciliation_results')}
+        WHERE run_id = {escape_string_literal(run_id)}
+          AND connection_id =
+              {escape_string_literal(ident['connection_id'])}
+          AND source_table_id =
+              {escape_string_literal(ident['source_table_id'])}
+          AND check_type IN ({check_types})
+    """)
     cols = ["run_id", "source_table_id", "connection_id", "source_system",
             "source_schema", "source_table", "check_type", "source_value",
             "target_value", "status", "message"]
@@ -272,15 +308,23 @@ def pk_list(pk_cols):
 succeeded, failed = 0, 0
 for q in queue:
     qd = q.asDict()
+    assert_table_connection_match(q, connection_id)
+    conn_id = connection_id
     src_id = qd["source_table_id"]
     src_system = require_source_system(
         qd.get("source_system"), "delta_sync_queue row")
-    src_server = qd.get("source_server")
-    src_db = qd.get("source_database")
+    registration = repo.get_source_table(conn_id, src_id)
+    if registration is None:
+        raise ValueError("Delta queue registration no longer exists")
+    registration_data = registration.asDict()
+    for identity_field in ("source_schema", "source_table"):
+        if qd.get(identity_field) != registration_data.get(identity_field):
+            raise ValueError(
+                f"Delta queue {identity_field} does not match control registration")
     s_schema, s_table = q["source_schema"], q["source_table"]
     ident = {"source_table_id": src_id, "source_system": src_system,
-             "connection_id": qd.get("connection_id"),
-             "source_server": src_server, "source_database": src_db,
+             "connection_id": conn_id,
+             "source_server": None, "source_database": None,
              "source_schema": s_schema, "source_table": s_table}
     t_catalog, t_schema, t_table = q["target_catalog"], q["target_schema"], q["target_table"]
     stage_table = q["stage_table"]
@@ -308,6 +352,7 @@ for q in queue:
         spark.sql(f"""
             UPDATE {ctrl('delta_sync_queue')} SET {', '.join(assignments)}
             WHERE run_id = {escape_string_literal(run_id)}
+                            AND connection_id = {escape_string_literal(conn_id)}
               AND source_table_id = {escape_string_literal(src_id)}
         """)
 
@@ -316,6 +361,10 @@ for q in queue:
         # so NB11b never uses one global (Oracle) JDBC connection for every row.
         current_stage = failcls.CONNECTION
         adapter = get_source_adapter_routed(q)
+        src_server = adapter.source_server
+        src_db = adapter.source_database
+        ident["source_server"] = src_server
+        ident["source_database"] = src_db
 
         # Defense-in-depth: a stale/hand-edited queue row must never bypass the
         # temporal-only invariant enforced upstream in NB11a.
@@ -332,8 +381,7 @@ for q in queue:
         # --- Stage 1: EXTRACT the exact frozen slice ---------------------------
         current_stage = failcls.SOURCE_READ
         src_df = read_source_jdbc(
-            adapter, q["source_query"],
-            source_server=src_server, source_database=src_db).cache()
+            adapter, q["source_query"]).cache()
         s_count = src_df.count()   # extracted_row_count
 
         # --- Stage 2: APPLY to Bronze + Stage 3: RECONCILE the work unit -------
@@ -421,7 +469,7 @@ for q in queue:
             _update_queue("RECONCILIATION_FAILED",
                           {"reconciliation_status": recon_result.status,
                            "reconciled_ts": now_utc()})
-            repo.update_control(src_id, {
+            repo.update_control_for_connection(conn_id, src_id, {
                 "current_status": "DELTA_RECONCILIATION_FAILED",
                 "error_message": ("delta reconciliation failed before checkpoint; "
                                   "ingest watermark left unchanged")[:1000],
@@ -457,7 +505,7 @@ for q in queue:
             if strategy in ("WATERMARK", "HYBRID"):
                 control_fields["last_watermark_value"] = wm.canonical_watermark_string(
                     upper_wm, strict=True)
-            repo.update_control(src_id, control_fields)
+            repo.update_control_for_connection(conn_id, src_id, control_fields)
             _update_queue("CHECKPOINT_COMMITTED", {"checkpoint_committed_ts": now_utc()})
         except Exception as checkpoint_error:
             failed += 1
@@ -469,7 +517,7 @@ for q in queue:
                 print(f"  [warn] failed to mark queue CHECKPOINT_COMMIT_FAILED: "
                       f"{safe_queue_error[:300]}")
             try:
-                repo.update_control(src_id, {
+                repo.update_control_for_connection(conn_id, src_id, {
                     "current_status": "CHECKPOINT_COMMIT_FAILED",
                     "error_message": ("Data applied and reconciled, but checkpoint "
                                       f"commit failed: {safe_checkpoint_error}")[:1000],
@@ -502,7 +550,7 @@ for q in queue:
             failed += 1
             safe_finalize_error = failcls.sanitize_message(queue_finalize_error)
             try:
-                repo.update_control(src_id, {
+                repo.update_control_for_connection(conn_id, src_id, {
                     "current_status": "QUEUE_FINALIZATION_FAILED",
                     "error_message": ("Data applied, reconciled, and checkpoint "
                                       "committed, but delta_sync_queue finalization "
@@ -548,7 +596,7 @@ for q in queue:
             print(f"  [warn] failed to mark queue row FAILED: "
                   f"{safe_queue_error[:300]}")
         try:
-            repo.update_control(src_id, {
+            repo.update_control_for_connection(conn_id, src_id, {
                 "current_status": "DELTA_FAILED",
                 "error_message": cls.sanitized_message[:1000],
             })
@@ -586,4 +634,6 @@ if failed > 0:
     )
 
 dbutils.notebook.exit(json.dumps({"status": "SUCCEEDED", "run_id": run_id,
+                                  "connection_id": connection_id,
+                                  "source_table_id": only_id,
                                   "applied": succeeded}))

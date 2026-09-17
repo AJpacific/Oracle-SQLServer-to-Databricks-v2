@@ -34,6 +34,7 @@ dbutils.widgets.text("retry_lower_watermark", "")
 dbutils.widgets.text("retry_upper_watermark", "")
 
 src_id = dbutils.widgets.get("source_table_id").strip() or SOURCE_TABLE_ID
+connection_id = require_connection_id(CONNECTION_ID, "ETL work item")
 run_id = dbutils.widgets.get("run_id").strip() or get_run_id()
 parent_run_id = dbutils.widgets.get("parent_run_id").strip() or None
 try:
@@ -62,10 +63,15 @@ def ctrl(t):
 # COMMAND ----------
 
 # ---- eligibility -----------------------------------------------------------
-row = repo.get_control_row(src_id)
+row = repo.get_source_table(connection_id, src_id)
 if row is None:
-    raise ValueError(f"source_table_id {src_id!r} not found in source_table_control")
+    raise ValueError(
+        f"connection_id {connection_id!r} and source_table_id {src_id!r} "
+        "not found in source_table_control")
 d = row.asDict()
+assert_table_connection_match(row, connection_id)
+if d.get("source_identity_version") != SOURCE_IDENTITY_VERSION:
+    raise ValueError("ETL registration requires identity-v2 migration")
 source_system = require_source_system(
     d.get("source_system"), "source_table_control row")
 
@@ -112,7 +118,7 @@ work_unit = None
 def log_etl(op, status, err, s_count, t_count, extra=None):
     fields = {
         "run_id": run_id, "source_table_id": src_id,
-        "connection_id": d.get("connection_id"), "source_system": source_system,
+        "connection_id": connection_id, "source_system": source_system,
         "source_server": d.get("source_server"), "source_database": d.get("source_database"),
         "source_schema": d.get("source_schema"), "source_table": d.get("source_table"),
         "operation": op, "target_full_name": silver_fqn,
@@ -129,8 +135,18 @@ def log_etl(op, status, err, s_count, t_count, extra=None):
 def write_dq_results(result_rows):
     if not result_rows:
         return
-    (spark.createDataFrame(result_rows, [
-        "run_id", "source_table_id", "rule_id", "rule_type", "input_count",
+    owned_rows = [
+        (row[0], connection_id, row[1], *row[2:]) for row in result_rows
+    ]
+    spark.sql(f"""
+        DELETE FROM {ctrl('dq_result')}
+        WHERE run_id = {escape_string_literal(run_id)}
+          AND connection_id = {escape_string_literal(connection_id)}
+          AND source_table_id = {escape_string_literal(src_id)}
+    """)
+    (spark.createDataFrame(owned_rows, [
+        "run_id", "connection_id", "source_table_id", "rule_id", "rule_type",
+        "input_count",
         "checked_count", "failed_count", "passed_count", "status", "message"])
      .withColumn("captured_ts", F.current_timestamp())
      .write.format("delta").mode("append").option("mergeSchema", "true")
@@ -140,8 +156,18 @@ def write_dq_results(result_rows):
 def write_recon(recon_result):
     if not recon_result.checks:
         return
+    check_types = ", ".join(
+        escape_string_literal(check["check_type"])
+        for check in recon_result.checks)
+    spark.sql(f"""
+        DELETE FROM {ctrl('reconciliation_results')}
+        WHERE run_id = {escape_string_literal(run_id)}
+          AND connection_id = {escape_string_literal(connection_id)}
+          AND source_table_id = {escape_string_literal(src_id)}
+          AND check_type IN ({check_types})
+    """)
     (spark.createDataFrame(
-        [(run_id, src_id, d.get("connection_id"), source_system,
+        [(run_id, src_id, connection_id, source_system,
           d.get("source_schema"), d.get("source_table"), c["check_type"],
           c["source_value"], c["target_value"], c["status"], c["message"])
          for c in recon_result.checks],
@@ -163,7 +189,7 @@ def fail_etl(stage, category, message, etl_status, s_count=None, t_count=None,
     global failure_already_logged
     safe = failcls.sanitize_message(message)
     try:
-        repo.update_control(src_id, {
+        repo.update_control_for_connection(connection_id, src_id, {
             "etl_current_status": etl_status,
             "etl_error_message": safe[:1000]})
     except Exception as e:
@@ -264,7 +290,9 @@ try:
     rule_rows = spark.sql(f"""
         SELECT rule_id, rule_type, column_name, rule_value, severity
         FROM {ctrl('dq_rule')}
-        WHERE source_table_id = {escape_string_literal(src_id)} AND is_active = true
+                WHERE connection_id = {escape_string_literal(connection_id)}
+                    AND source_table_id = {escape_string_literal(src_id)}
+                    AND is_active = true
     """).collect()
 
     # An invalid ACTIVE rule is never silently skipped: it stops the whole table
@@ -414,13 +442,16 @@ try:
         spark.sql(f"""
             DELETE FROM {ctrl('dq_quarantine')}
             WHERE run_id = {escape_string_literal(run_id)}
+                            AND connection_id = {escape_string_literal(connection_id)}
               AND source_table_id = {escape_string_literal(src_id)}
         """)
         (invalid_df
          .withColumn("record_json", F.to_json(F.struct(*[F.col(f"`{c}`") for c in keep])))
          .withColumn("failure_reason", F.concat_ws(",", F.col("_dq_failures")))
          .select(
-             F.lit(run_id).alias("run_id"), F.lit(src_id).alias("source_table_id"),
+             F.lit(run_id).alias("run_id"),
+             F.lit(connection_id).alias("connection_id"),
+             F.lit(src_id).alias("source_table_id"),
              F.lit(None).cast("string").alias("rule_id"),
              "record_json", "failure_reason")
          .withColumn("quarantined_ts", F.current_timestamp())
@@ -525,7 +556,7 @@ try:
     committed_watermark = etlwu.checkpoint_value(work_unit, recon_result.passed)
     if committed_watermark is not None:
         etl_fields["last_etl_watermark_value"] = committed_watermark
-    repo.update_control(src_id, etl_fields)
+    repo.update_control_for_connection(connection_id, src_id, etl_fields)
     log_etl(etl_op, "SUCCEEDED", None, input_count, valid_count,
             extra={"extracted_row_count": input_count,
                    "applied_row_count": valid_count,
@@ -534,7 +565,8 @@ try:
     print(f"  ETL SUCCEEDED: input={input_count} valid={valid_count} "
           f"rejected={rejected_distinct} recon={recon_result.status} "
           f"interval=({work_unit.lower_watermark}, {work_unit.upper_watermark}]")
-    result = {"status": "SUCCEEDED", "source_table_id": src_id, "run_id": run_id,
+    result = {"status": "SUCCEEDED", "connection_id": connection_id,
+              "source_table_id": src_id, "run_id": run_id,
               "mode": effective_mode, "input": input_count, "valid": valid_count,
               "rejected": rejected_distinct,
               "lower_watermark": work_unit.lower_watermark,
@@ -552,7 +584,7 @@ except Exception as e:
             failcls.CHECKPOINT: "ETL_CHECKPOINT_FAILED",
         }.get(current_stage, "ETL_WRITE_FAILED")
         try:
-            repo.update_control(src_id, {
+            repo.update_control_for_connection(connection_id, src_id, {
                 "etl_current_status": etl_status,
                 "etl_error_message": msg[:1000]})
         except Exception as update_error:

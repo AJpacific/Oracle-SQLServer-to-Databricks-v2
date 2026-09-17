@@ -15,7 +15,9 @@
 # COMMAND ----------
 
 run_id = get_run_id()
-print("run_id:", run_id)
+connection_id = require_connection_id(CONNECTION_ID, "target provisioning")
+connection = require_valid_connection(connection_id)
+print("run_id:", run_id, "| connection_id:", connection_id)
 repo = control_repo()
 
 def ctrl(t):
@@ -23,10 +25,11 @@ def ctrl(t):
 
 # COMMAND ----------
 
-# Scoped to the onboarding connection when supplied, so one connection's run
-# never provisions another connection's active tables.
-auto = repo.active_tables(connection_id=(CONNECTION_ID or None),
-                          decision="AUTO_MIGRATE").collect()
+# Onboarding is scoped to exactly one connection. Collision detection remains
+# global across all active registrations.
+auto = repo.active_tables_for_connection(
+    connection_id, decision="AUTO_MIGRATE").collect()
+all_active_auto = repo.active_tables(decision="AUTO_MIGRATE").collect()
 print("AUTO_MIGRATE tables:", len(auto))
 
 # COMMAND ----------
@@ -41,14 +44,18 @@ def _target_fqn(r):
     return f"{t_catalog}.{t_schema}.{t_table}"
 
 _fqn_to_ids = {}
-for r in auto:
-    _fqn_to_ids.setdefault(_target_fqn(r).lower(), set()).add(r["source_table_id"])
+for r in all_active_auto:
+    key = (r["connection_id"], r["source_table_id"])
+    _fqn_to_ids.setdefault(_target_fqn(r).lower(), set()).add(key)
 _collided_fqns = {fqn for fqn, ids in _fqn_to_ids.items() if len(ids) > 1}
 
 # COMMAND ----------
 
 provisioned, failed = 0, 0
 for r in auto:
+    assert_table_connection_match(r, connection_id)
+    assert_current_source_table_identity(r, connection)
+    conn_id = r["connection_id"]
     src_id = r["source_table_id"]
     require_source_system(r["source_system"], "source_table_control row")
     s_schema, s_table = r["source_schema"], r["source_table"]
@@ -59,7 +66,7 @@ for r in auto:
 
     if target_fqn.lower() in _collided_fqns:
         failed += 1
-        repo.update_control(src_id, {
+        repo.update_control_for_connection(conn_id, src_id, {
             "current_status": "PROVISION_CONFIG_ERROR",
             "error_message": ("target FQN collision: multiple active source rows "
                               f"resolve to {target_fqn}; disambiguate target_schema/"
@@ -75,6 +82,7 @@ for r in auto:
                    is_nullable, ordinal_position, include_column, is_writable
             FROM {ctrl('resolved_column_mappings')}
             WHERE run_id = {escape_string_literal(run_id)}
+                            AND connection_id = {escape_string_literal(conn_id)}
               AND source_table_id = {escape_string_literal(src_id)}
             ORDER BY ordinal_position
         """).collect()
@@ -101,8 +109,8 @@ for r in auto:
         spark.sql(ddl.build_create_schema(t_catalog, t_schema, "migrated data"))
         spark.sql(ddl.build_create_table(t_catalog, t_schema, t_table, col_specs))
 
-        repo.update_control(
-            src_id,
+        repo.update_control_for_connection(
+            conn_id, src_id,
             {
                 "target_catalog": t_catalog,
                 "target_schema": t_schema,
@@ -116,8 +124,8 @@ for r in auto:
     except Exception as e:
         failed += 1
         safe_error = failcls.sanitize_message(e)
-        repo.update_control(
-            src_id,
+        repo.update_control_for_connection(
+            conn_id, src_id,
             {
                 "current_status": "PROVISION_FAILED",
                 "error_message": safe_error[:1000],
@@ -135,4 +143,5 @@ if failed > 0:
     raise Exception(f"{failed} table(s) failed provisioning; see control table.")
 
 dbutils.notebook.exit(json.dumps({"status": "SUCCEEDED", "run_id": run_id,
+                                  "connection_id": connection_id,
                                   "provisioned": provisioned}))

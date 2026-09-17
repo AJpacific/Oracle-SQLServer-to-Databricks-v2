@@ -3,8 +3,8 @@
 # MAGIC # NB09_FullLoad
 # MAGIC Reads each AUTO_MIGRATE source table through its registered source adapter
 # MAGIC and writes it to the target Delta table (overwrite). Records source/target
-# MAGIC counts to table_run_log. Designed to run per-table inside a ForEach Job
-# MAGIC task, or loop over all AUTO_MIGRATE tables when run standalone.
+# MAGIC counts to table_run_log. Runs for exactly one connection-owned table
+# MAGIC work item inside a ForEach task.
 
 # COMMAND ----------
 
@@ -12,18 +12,8 @@
 
 # COMMAND ----------
 
-# Optional single-table parameters (used when driven by a ForEach task).
-dbutils.widgets.text("only_source_system", "")
-dbutils.widgets.text("only_source_server", "")
-dbutils.widgets.text("only_source_database", "")
-dbutils.widgets.text("only_source_schema", "")
-dbutils.widgets.text("only_source_table", "")
+# Backward-compatible alias for older task parameter mappings.
 dbutils.widgets.text("only_source_table_id", "")
-only_system = dbutils.widgets.get("only_source_system").strip()
-only_server = dbutils.widgets.get("only_source_server").strip()
-only_database = dbutils.widgets.get("only_source_database").strip()
-only_schema = dbutils.widgets.get("only_source_schema").strip()
-only_table = dbutils.widgets.get("only_source_table").strip()
 only_id = dbutils.widgets.get("only_source_table_id").strip()
 
 # Retry / ForEach parameters. A retry task passes source_table_id (scoping this
@@ -53,8 +43,13 @@ except ValueError:
     NUM_PARTITIONS = 1
 
 run_id = get_run_id()
-print("run_id:", run_id, "| single table:",
-      only_id or (f"{only_schema}.{only_table}" if only_table else "(all)"))
+connection_id = require_connection_id(CONNECTION_ID, "Full Load work item")
+only_id = str(only_id or SOURCE_TABLE_ID or "").strip()
+if not only_id:
+    raise ValueError("Full Load work item requires source_table_id")
+connection = require_valid_connection(connection_id)
+print("run_id:", run_id, "| connection_id:", connection_id,
+    "| source_table_id:", only_id)
 repo = control_repo()
 
 def ctrl(t):
@@ -62,38 +57,22 @@ def ctrl(t):
 
 # COMMAND ----------
 
-auto = repo.active_tables(connection_id=(CONNECTION_ID or None),
-                          decision="AUTO_MIGRATE").collect()
-if only_id:
-    auto = [r for r in auto if r["source_table_id"] == only_id]
-    # Per-table ForEach invocation: the supplied id must resolve to exactly one
-    # eligible table, otherwise the task would silently load nothing.
-    if len(auto) != 1:
-        raise ValueError(
-            f"source_table_id {only_id!r} resolved to {len(auto)} eligible "
-            "AUTO_MIGRATE table(s); expected exactly 1. Verify the table is "
-            "active, AUTO_MIGRATE, and belongs to the supplied connection_id.")
-elif only_schema or only_table or only_system or only_server or only_database:
-    if not (only_schema and only_table):
-        raise ValueError("Manual filtering requires both only_source_schema and only_source_table")
-    def _matches_manual_filter(r):
-        d = r.asDict()
-        row_system = require_source_system(
-            d.get("source_system"), "source_table_control row")
-        if only_system and row_system != normalize_source_system(only_system):
-            return False
-        if only_server and (d.get("source_server") or "").lower() != only_server.lower():
-            return False
-        if only_database and (d.get("source_database") or "").lower() != only_database.lower():
-            return False
-        return r["source_schema"] == only_schema and r["source_table"] == only_table
-    auto = [r for r in auto if _matches_manual_filter(r)]
-    if len(auto) > 1:
-        raise ValueError(
-            "Ambiguous manual source filter. Use only_source_table_id or add "
-            "only_source_system, only_source_server, and only_source_database."
-        )
-print("Tables to full-load:", len(auto))
+registration = repo.get_source_table(connection_id, only_id)
+if registration is None:
+    raise ValueError(
+        f"connection_id {connection_id!r} and source_table_id {only_id!r} "
+        "do not identify a registered table")
+assert_table_connection_match(registration, connection_id)
+assert_current_source_table_identity(registration, connection)
+registration_data = registration.asDict()
+if not registration_data.get("is_active"):
+    raise ValueError("Full Load registration is not active")
+if (registration_data.get("table_decision") or "").upper() != "AUTO_MIGRATE":
+    raise ValueError("Full Load registration is not AUTO_MIGRATE")
+for target_field in ("target_catalog", "target_schema", "target_table"):
+    if not str(registration_data.get(target_field) or "").strip():
+        raise ValueError(f"Full Load registration requires {target_field}")
+auto = [registration]
 
 # COMMAND ----------
 
@@ -124,14 +103,16 @@ succeeded, failed = 0, 0
 
 for r in auto:
     d = r.asDict()
+    conn_id = connection_id
     src_id = d["source_table_id"]
     src_system = require_source_system(
         d.get("source_system"), "source_table_control row")
-    src_server = d.get("source_server")
-    src_db = d.get("source_database")
+    connection_data = connection.asDict()
+    src_server = connection_data.get("source_server")
+    src_db = connection_data.get("source_database")
     s_schema, s_table = r["source_schema"], r["source_table"]
     ident = {"source_table_id": src_id, "source_system": src_system,
-             "connection_id": d.get("connection_id"),
+             "connection_id": conn_id,
              "source_server": src_server, "source_database": src_db,
              "source_schema": s_schema, "source_table": s_table}
     t_catalog = r["target_catalog"] or CATALOG
@@ -144,20 +125,57 @@ for r in auto:
     t_count = None
     current_stage = failcls.METADATA
     try:
+        current_stage = failcls.PROVISIONING
+        target_owners = spark.sql(f"""
+            SELECT connection_id, source_table_id
+            FROM {ctrl('source_table_control')}
+            WHERE is_active = true
+              AND lower(concat_ws('.', target_catalog, target_schema,
+                                  target_table)) =
+                  {escape_string_literal(target_fqn.lower())}
+        """).collect()
+        if (len(target_owners) != 1
+                or target_owners[0]["connection_id"] != conn_id
+                or target_owners[0]["source_table_id"] != src_id):
+            raise ValueError(
+                "target FQN collision: the Bronze target is not exclusively "
+                "owned by this connection registration")
+
         current_stage = failcls.CONNECTION
-        adapter = get_source_adapter_routed(r)
+        adapter = get_source_adapter_for_connection(connection)
         current_stage = failcls.METADATA
 
         # Approved mappings define the target's typed schema (built by NB08).
-        mrows = spark.sql(f"""
-            SELECT column_name, databricks_delta_type, is_nullable, ordinal_position
-            FROM {ctrl('resolved_column_mappings')}
-            WHERE run_id = {escape_string_literal(run_id)}
-              AND source_table_id = {escape_string_literal(src_id)}
+        latest_mappings = spark.sql(f"""
+            SELECT column_name, databricks_delta_type, is_nullable,
+                   ordinal_position, mapping_status, include_column
+            FROM (
+              SELECT column_name, databricks_delta_type, is_nullable,
+                     ordinal_position, mapping_status, include_column,
+                     ROW_NUMBER() OVER (
+                       PARTITION BY column_name
+                       ORDER BY captured_ts DESC NULLS LAST, run_id DESC
+                     ) AS rn
+              FROM {ctrl('resolved_column_mappings')}
+              WHERE connection_id = {escape_string_literal(conn_id)}
+                AND source_table_id = {escape_string_literal(src_id)}
+            )
+            WHERE rn = 1
             ORDER BY ordinal_position
         """).collect()
+        mrows = [row for row in latest_mappings
+                 if row["include_column"] is not False]
         if not mrows:
-            raise Exception("no resolved mappings found for this run")
+            raise Exception("no included resolved mappings found")
+        unsafe_mappings = [
+            row["column_name"] for row in mrows
+            if (row["mapping_status"] or "").upper() != "AUTO"
+            or not row["databricks_delta_type"]
+        ]
+        if unsafe_mappings:
+            raise ValueError(
+                "latest mappings are not safe for Full Load: "
+                + ", ".join(unsafe_mappings))
 
         # Ensure the typed empty table exists even if NB08 wasn't run this session.
         if not spark.catalog.tableExists(target_fqn):
@@ -181,10 +199,10 @@ for r in auto:
             inv = spark.sql(f"""
                 SELECT data_type, numeric_precision, numeric_scale
                 FROM {ctrl('source_inventory')}
-                WHERE run_id = {escape_string_literal(run_id)}
+                                WHERE connection_id = {escape_string_literal(conn_id)}
                   AND source_table_id = {escape_string_literal(src_id)}
                   AND column_name   = {escape_string_literal(pk_col)}
-                ORDER BY captured_ts DESC
+                                ORDER BY captured_ts DESC NULLS LAST, run_id DESC
                 LIMIT 1
             """).collect()
             pk_target = next((m["databricks_delta_type"] for m in mrows
@@ -235,7 +253,7 @@ for r in auto:
         t_count = spark.table(target_fqn).count()
         counts_match = (t_count == s_count)
         if counts_match:
-            repo.update_control(src_id, {
+            repo.update_control_for_connection(conn_id, src_id, {
                 "current_status": "FULL_LOADED",
                 "error_message": None,
             })
@@ -247,7 +265,7 @@ for r in auto:
         else:
             # Detailed operational state stays on the control row; table_run_log
             # status is normalized so the retry selector can filter on FAILED.
-            repo.update_control(src_id, {
+            repo.update_control_for_connection(conn_id, src_id, {
                 "current_status": "FULL_LOAD_COUNT_MISMATCH",
                 "error_message": f"source={s_count} target={t_count}",
             })
@@ -265,7 +283,7 @@ for r in auto:
         failed += 1
         cls = failcls.classify_failure(e, current_stage, idempotent=True)
         try:
-            repo.update_control(src_id, {
+            repo.update_control_for_connection(conn_id, src_id, {
                 "current_status": "FULL_LOAD_FAILED",
                 "error_message": cls.sanitized_message[:1000],
             })
@@ -299,4 +317,6 @@ if failed > 0:
     raise Exception(f"{failed} table(s) failed full load; see table_run_log.")
 
 dbutils.notebook.exit(json.dumps({"status": "SUCCEEDED", "run_id": run_id,
+                                  "connection_id": connection_id,
+                                  "source_table_id": only_id,
                                   "loaded": succeeded}))

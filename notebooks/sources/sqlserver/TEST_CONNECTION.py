@@ -20,16 +20,21 @@
 
 SOURCE_SYSTEM = "sqlserver"
 
+dbutils.widgets.text("sqlserver_secret_scope", "sqlserver-migration")
 dbutils.widgets.text("test_server", "", "SQL Server host (legacy mode only)")
 dbutils.widgets.text("test_database", "", "SQL Server database (legacy mode only)")
 dbutils.widgets.text("test_schema", "", "SQL Server schema (optional)")
 dbutils.widgets.text("test_table", "", "SQL Server table (optional)")
 dbutils.widgets.dropdown("show_sample_values", "false", ["true", "false"])
+dbutils.widgets.dropdown("allow_legacy_mode", "false", ["true", "false"])
 
 test_schema = dbutils.widgets.get("test_schema").strip()
 test_table = dbutils.widgets.get("test_table").strip()
 show_sample_values = (
     dbutils.widgets.get("show_sample_values").strip().lower() == "true")
+allow_legacy_mode = (
+    dbutils.widgets.get("allow_legacy_mode").strip().lower() == "true")
+legacy_secret_scope = dbutils.widgets.get("sqlserver_secret_scope").strip()
 if show_sample_values:
     print("WARNING: show_sample_values=true should only be used with approved non-sensitive test data.")
 
@@ -79,7 +84,9 @@ if CONNECTION_ID:
     adapter = get_source_adapter_for_connection(connection, require_valid=False)
     print(f"Using registered connection {CONNECTION_ID} "
           f"(server/database/secret scope/TLS from source_connection).")
-else:
+elif allow_legacy_mode:
+    if not legacy_secret_scope:
+        raise ValueError("legacy diagnostic requires sqlserver_secret_scope")
     test_server = dbutils.widgets.get("test_server").strip() or None
     test_database = dbutils.widgets.get("test_database").strip()
     if not test_database:
@@ -88,10 +95,14 @@ else:
             "connection_id instead to use a registered connection")
     adapter = get_source_adapter(
         SOURCE_SYSTEM, source_server=test_server, source_database=test_database,
-        secret_provider=_secret_provider, secret_scope=SQLSERVER_SECRET_SCOPE)
+        secret_provider=_secret_provider, secret_scope=legacy_secret_scope)
     print(f"[legacy fallback] no connection_id supplied; using the "
-          f"'{SQLSERVER_SECRET_SCOPE}' secret scope. Register a connection and "
+          f"'{legacy_secret_scope}' secret scope. Register a connection and "
           "pass connection_id for production use.")
+else:
+        raise ValueError(
+        "connection_id is required; set allow_legacy_mode=true only for an "
+        "approved manual legacy diagnostic")
 
 print("Effective SQL Server target:", f"{test_database}")
 print("JDBC URL (redacted):",

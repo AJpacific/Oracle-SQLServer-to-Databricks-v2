@@ -36,7 +36,8 @@ loaded = spark.sql(f"""
            l.operation, l.source_row_count, l.target_row_count
     FROM {ctrl('source_table_control')} c
     JOIN {ctrl('table_run_log')} l
-      ON c.source_table_id = l.source_table_id
+            ON c.connection_id = l.connection_id
+         AND c.source_table_id = l.source_table_id
     WHERE l.run_id = {escape_string_literal(run_id)}
       AND l.status = 'SUCCEEDED'
       AND l.operation IN ({op_filter})
@@ -93,6 +94,7 @@ for r in loaded:
                 SELECT status, count(*) AS n
                 FROM {ctrl('reconciliation_results')}
                 WHERE run_id = {escape_string_literal(run_id)}
+                                    AND connection_id = {escape_string_literal(conn_id)}
                   AND source_table_id = {escape_string_literal(src_id)}
                   AND check_type IN ('FULL_SNAPSHOT_COUNT','DELTA_INTERVAL_COUNT',
                                      'STAGE_COUNT','DUPLICATE_PRIMARY_KEY',
@@ -145,7 +147,8 @@ if mode == "delta":
                c.last_watermark_value  AS final_wm
         FROM {ctrl('delta_sync_queue')} q
         JOIN {ctrl('source_table_control')} c
-          ON q.source_table_id = c.source_table_id
+                    ON q.connection_id = c.connection_id
+                 AND q.source_table_id = c.source_table_id
         WHERE q.run_id = {escape_string_literal(run_id)}
                     AND q.status = 'SUCCEEDED'
           AND q.load_strategy IN ('WATERMARK','HYBRID')
@@ -163,6 +166,17 @@ if mode == "delta":
                         f"previous={prev} captured_upper={upper} final={final}"))
 
 # COMMAND ----------
+
+owned_check_types = (
+    "'FULL_SNAPSHOT_COUNT','NON_EMPTY','RECON_ERROR'"
+    if mode == "full"
+    else "'DELTA_RECON_SUMMARY','DELTA_WATERMARK','RECON_ERROR'"
+)
+spark.sql(f"""
+    DELETE FROM {ctrl('reconciliation_results')}
+    WHERE run_id = {escape_string_literal(run_id)}
+      AND check_type IN ({owned_check_types})
+""")
 
 if results:
     cols = ["run_id", "source_table_id", "connection_id", "source_system",

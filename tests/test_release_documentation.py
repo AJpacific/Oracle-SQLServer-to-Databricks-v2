@@ -25,6 +25,8 @@ class TestReleaseDocumentation(unittest.TestCase):
         cls.checklist_path = os.path.join(
             DOCS, "production_readiness_checklist.md")
         cls.checklist = _read(cls.checklist_path)
+        cls.identity_migration = _read(
+            os.path.join(DOCS, "source_identity_v2_migration.md"))
 
     def test_current_diagnostic_paths_are_documented(self):
         for path in (
@@ -113,6 +115,17 @@ class TestReleaseDocumentation(unittest.TestCase):
         for technology in ("Spark", "JDBC", "Delta", "Oracle", "SQL Server",
                            "Databricks Job"):
             self.assertIn(technology, combined)
+
+    def test_connection_owned_identity_and_migration_are_documented(self):
+        combined = " ".join((self.readme, self.installation, self.supported,
+                             self.jobs, self.identity_migration))
+        for phrase in (
+                "connection-owned", "only `run_id`, `connection_id`, and",
+                "NB_MigrateSourceTableIdentityV2", "dry_run=true",
+                "not called automatically"):
+            self.assertIn(phrase, combined)
+        self.assertIn("Job YAML", combined)
+        self.assertIn("NOT_EXECUTED", self.identity_migration)
 
 
 class TestSharedNotebookDescriptions(unittest.TestCase):

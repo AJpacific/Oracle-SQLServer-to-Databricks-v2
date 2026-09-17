@@ -36,21 +36,14 @@ include_types = {t.strip().upper() for t in
 use_ai = dbutils.widgets.get("use_ai") == "true"
 run_id = get_run_id()
 
-if not connection_id:
-    raise ValueError("connection_id is required")
+connection_id = require_connection_id(connection_id, "Oracle SQL-object assessment")
 
 repo = control_repo()
 
 # COMMAND ----------
 
-connection = repo.get_connection(connection_id)
-if connection is None:
-    raise ValueError(f"connection_id {connection_id!r} not found")
+connection = require_valid_connection(connection_id, SOURCE_SYSTEM)
 cd = connection.asDict()
-if normalize_source_system(cd["source_system"]) != SOURCE_SYSTEM:
-    raise ValueError(
-        f"connection_id {connection_id!r} is {cd['source_system']!r}; "
-        "this notebook assesses Oracle SQL objects only")
 src_server, src_db = cd.get("source_server"), cd.get("source_database")
 adapter = get_source_adapter_for_connection(connection)   # requires VALID
 print(f"NB13 {mode} for Oracle connection {connection_id}; "

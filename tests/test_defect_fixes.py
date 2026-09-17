@@ -110,12 +110,25 @@ class TestTableRunLogSchema(unittest.TestCase):
         self.assertNotIn("Secret123", v["error_message"])
         self.assertIn("***", v["error_message"])
 
+    def test_repository_requires_complete_audit_identity(self):
+        import inspect
+        method = inspect.getsource(cr.ControlRepository.log_table_run)
+        for required in ("run_id", "connection_id", "source_table_id",
+                         "operation", "attempt_number"):
+            self.assertIn(f'"{required}"', method)
+
     def test_log_table_run_uses_sanitized_row_builder(self):
         with open(cr.__file__, encoding="utf-8") as stream:
             source = stream.read()
         method = source.split("def log_table_run(self, fields: dict):", 1)[1]
         method = method.split("def log_job_run", 1)[0]
         self.assertIn("build_table_run_row(fields)", method)
+        self.assertIn("DELETE FROM", method)
+        for key in ("run_id", "connection_id", "source_table_id", "operation",
+                "attempt_number"):
+            self.assertIn(key, method)
+        self.assertLess(method.index("DELETE FROM"),
+                method.index('.mode("append")'))
 
     def test_bool_coercion_preserves_null(self):
         self.assertIsNone(cr._to_bool(None))
@@ -467,8 +480,10 @@ class TestControlRepositorySanitization(unittest.TestCase):
         repo, spark = self._repo()
         repo.update_control_by_identity(
             "oracle", None, None, "HR", "EMPLOYEES",
-            {"error_message": "Authorization: Bearer abcdef123456"})
+            {"error_message": "Authorization: Bearer abcdef123456"},
+            connection_id="c1")
         self.assertNotIn("abcdef123456", spark.executed[-1])
+        self.assertIn("connection_id = 'c1'", spark.executed[-1])
 
     def test_log_job_run_sanitizes_message(self):
         repo, spark = self._repo()

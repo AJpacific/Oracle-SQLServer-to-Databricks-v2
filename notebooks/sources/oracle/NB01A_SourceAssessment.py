@@ -37,21 +37,14 @@ include_types = {t.strip().upper() for t in
                  dbutils.widgets.get("include_object_types").split(",") if t.strip()}
 run_id = get_run_id()
 
-if not connection_id:
-    raise ValueError("connection_id is required")
+connection_id = require_connection_id(connection_id, "Oracle assessment")
 
 repo = control_repo()
 
 # COMMAND ----------
 
-connection = repo.get_connection(connection_id)
-if connection is None:
-    raise ValueError(f"connection_id {connection_id!r} not found")
+connection = require_valid_connection(connection_id, SOURCE_SYSTEM)
 cd = connection.asDict()
-if normalize_source_system(cd["source_system"]) != SOURCE_SYSTEM:
-    raise ValueError(
-        f"connection_id {connection_id!r} is {cd['source_system']!r}; "
-        "this notebook assesses Oracle sources only")
 src_server, src_db = cd.get("source_server"), cd.get("source_database")
 adapter = get_source_adapter_for_connection(connection)   # requires VALID
 mapper = load_type_mapper(SOURCE_SYSTEM)
@@ -109,13 +102,14 @@ for schema in schemas:
     except Exception as e:
         _capture_assessment_error("statistics_discovery", e, schema)
 
-    # ---- TABLES (ALL_TABLES) ----
+    # ---- TABLES (ALL_TABLES): discovery is mandatory -----------------------
+    try:
+        discovered_tables = _q(adapter.list_tables_query(src_db, schema))
+    except Exception as e:
+        discovered_tables = []
+        _capture_assessment_error("table_discovery", e, schema)
+    tables = discovered_tables if "TABLE" in include_types else []
     if "TABLE" in include_types:
-        try:
-            tables = _q(adapter.list_tables_query(src_db, schema))
-        except Exception as e:
-            tables = []
-            _capture_assessment_error("table_discovery", e, schema)
         for t in tables:
             obj = t["OBJECT_NAME"]
             row_count, size_mb, method = stats.get(
@@ -184,6 +178,7 @@ print("Compatibility summary:", summary)
 
 business_status = assess_common.assessment_business_status(assessment_errors)
 execution_status = "FAILED" if business_status == "FAILED" else "SUCCEEDED"
+set_task_value("assessment_id", assessment_id)
 assessment_result = {
     "status": execution_status,
     "execution_status": execution_status,

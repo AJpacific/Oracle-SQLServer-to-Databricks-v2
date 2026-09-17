@@ -13,19 +13,19 @@
 from pyspark.sql import functions as F
 
 run_id = get_run_id()
-print("run_id:", run_id)
+connection_id = require_connection_id(CONNECTION_ID, "mapping validation")
+connection = require_valid_connection(connection_id)
+print("run_id:", run_id, "| connection_id:", connection_id)
 
 def ctrl(t):
     return f"{quote_databricks(CATALOG)}.{quote_databricks(CONTROL_SCHEMA)}.{quote_databricks(t)}"
 
 # COMMAND ----------
 
-_conn_filter = (f" AND connection_id = {escape_string_literal(CONNECTION_ID)}"
-                if CONNECTION_ID else "")
-
 maps = spark.sql(
     f"SELECT * FROM {ctrl('resolved_column_mappings')} "
-    f"WHERE run_id = {escape_string_literal(run_id)}{_conn_filter}"
+    f"WHERE run_id = {escape_string_literal(run_id)} "
+    f"AND connection_id = {escape_string_literal(connection_id)}"
 ).collect()
 print("Mappings to validate:", len(maps))
 
@@ -33,6 +33,8 @@ print("Mappings to validate:", len(maps))
 
 results = []
 for r in maps:
+    assert_table_connection_match(r, connection_id)
+    assert_source_identity_match(r, connection)
     d = r.asDict()
     src_id = r["source_table_id"]
     src_system = require_source_system(
@@ -84,6 +86,12 @@ for r in maps:
 
 # COMMAND ----------
 
+spark.sql(f"""
+        DELETE FROM {ctrl('mapping_validation_results')}
+        WHERE run_id = {escape_string_literal(run_id)}
+            AND connection_id = {escape_string_literal(connection_id)}
+""")
+
 if results:
     cols = ["run_id", "source_table_id", "connection_id", "source_system",
             "source_schema", "source_table", "column_name", "severity", "rule",
@@ -97,4 +105,5 @@ else:
     print("No validation findings (all AUTO/EXACT).")
 
 dbutils.notebook.exit(json.dumps({"status": "SUCCEEDED", "run_id": run_id,
+                                  "connection_id": connection_id,
                                   "findings": len(results)}))

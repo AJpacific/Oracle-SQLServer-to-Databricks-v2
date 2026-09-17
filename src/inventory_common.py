@@ -25,6 +25,7 @@ INVENTORY_FIELDS = (
 
 INVENTORY_MERGE_KEYS = (
     "run_id",
+    "connection_id",
     "source_table_id",
     "column_name",
 )
@@ -62,7 +63,7 @@ def inventory_record_dict(record):
 
 
 def find_duplicate_inventory_keys(records):
-    """Return duplicate ``(run_id, source_table_id, column_name)`` keys."""
+    """Return duplicate connection-owned inventory keys."""
     seen = set()
     duplicates = []
     duplicate_set = set()
@@ -89,17 +90,21 @@ def validate_inventory_batch(records):
 
     duplicates = find_duplicate_inventory_keys(items)
     if duplicates:
-        run_id, source_table_id, column_name = duplicates[0]
+        run_id, connection_id, source_table_id, column_name = duplicates[0]
         raise ValueError(
             "duplicate inventory key: "
-            f"run_id={run_id!r}, source_table_id={source_table_id!r}, "
+            f"run_id={run_id!r}, connection_id={connection_id!r}, "
+            f"source_table_id={source_table_id!r}, "
             f"column_name={column_name!r}")
 
-    scopes = {(item["run_id"], item["source_table_id"]) for item in items}
+    scopes = {
+        (item["run_id"], item["connection_id"], item["source_table_id"])
+        for item in items
+    }
     if len(scopes) != 1:
         raise ValueError(
-            "persist_inventory_rows requires exactly one run_id and "
-            "source_table_id scope")
+            "persist_inventory_rows requires exactly one run_id, connection_id, "
+            "and source_table_id scope")
 
     identity = tuple(items[0].get(field) for field in INVENTORY_IDENTITY_FIELDS)
     for item in items[1:]:
@@ -145,7 +150,7 @@ def normalize_inventory_row(column, identity):
     """Normalize one source column result into the shared inventory tuple.
 
     ``column`` is a dict of the adapter's neutral aliases; ``identity`` carries
-    run_id, source_table_id, connection_id, and the five-part source identity.
+    run_id, connection_id, source_table_id, and source object identity.
     """
     c = {str(k).upper(): v for k, v in dict(column).items()}
     return (

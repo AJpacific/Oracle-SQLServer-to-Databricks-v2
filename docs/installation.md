@@ -25,6 +25,7 @@ path of the `src/` directory.
 Notebook layout:
 
 - `notebooks/shared/` - source-neutral notebooks (bootstrap with `%run ./_common`)
+- `notebooks/deployment/` - run context, global worklists, and manual upgrades
 - `notebooks/sources/<source>/` - dialect-specific notebooks
   (bootstrap with `%run ../../shared/_common`)
 
@@ -59,12 +60,21 @@ default; enable trust only per connection via `trust_server_certificate=true`.
 Run `shared/NB00_ControlTableInit`. It is idempotent and never drops tables. It
 creates the control schema, all control/audit tables, the `source_connection`,
 `source_assessment`, `sql_object_assessment`, `dq_rule`, `dq_result`, and
-`dq_quarantine` tables, and idempotently adds the `connection_id`, ETL, retry,
-and reconciliation columns to existing tables.
+`dq_quarantine` tables, and idempotently adds the `connection_id`, identity-v2,
+ETL, retry, and reconciliation columns to existing tables.
 
-NB00 does not guess a source for legacy rows. Rows with a missing or blank
-`source_system` are counted and skipped during `source_table_id` backfill. After
-reviewing the real source, repair each row explicitly. Example only:
+NB00 never rewrites a legacy `source_table_id`. It reports legacy or inconsistent
+ownership and directs operators to the explicit migration. Existing
+installations must run
+`notebooks/deployment/NB_MigrateSourceTableIdentityV2.py` with `dry_run=true`,
+resolve all blockers, and then run it with `dry_run=false` before global Full
+Load or Delta workflows. The migration is restart-safe, updates history by
+`connection_id + old_source_table_id`, and is not called automatically.
+See `docs/source_identity_v2_migration.md` for the full procedure and
+verification queries.
+
+Rows with missing ownership metadata are blocked. After reviewing the real
+source, repair each row explicitly. Example only:
 
 ```sql
 UPDATE <catalog>.<control_schema>.source_table_control
@@ -88,7 +98,8 @@ connection becomes `VALID`. Missing, blank, or unregistered `source_system`
 values fail; shared routing has no Oracle fallback.
 
 Inventory retries replace the complete snapshot for one
-`run_id + source_table_id`. Duplicate incoming column keys fail before any
+`run_id + connection_id + source_table_id`. Duplicate incoming column keys fail
+before any
 write. A successful retry removes stale columns from that same run/table while
 preserving older runs and unrelated tables. Control status becomes
 `INVENTORIED` only after the replacement write succeeds.

@@ -18,9 +18,11 @@ for p in (SRC, os.path.dirname(HERE)):
 
 from control_repository import (  # noqa: E402
     ControlRepository, normalize_connection_input, assert_source_system_match,
+    require_connection_id,
 )
 from source_adapters.factory import get_source_adapter  # noqa: E402
 from source_identity import (  # noqa: E402
+    SOURCE_IDENTITY_VERSION, compute_legacy_source_table_id,
     compute_source_table_id, normalize_source_system, require_source_system,
 )
 from _fakes import FakeSpark, FakeRow  # noqa: E402
@@ -76,6 +78,12 @@ class TestConnectionInput(unittest.TestCase):
         self.assertTrue(normalize_connection_input(
             self._base(trust_server_certificate=True))["trust_server_certificate"])
 
+    def test_require_connection_id_trims_and_rejects_blank(self):
+        self.assertEqual(require_connection_id("  c1  "), "c1")
+        for value in (None, "", "  "):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                require_connection_id(value)
+
 
 class TestSystemConflict(unittest.TestCase):
     def test_conflict_raises(self):
@@ -111,15 +119,40 @@ class TestRequiredSourceIdentity(unittest.TestCase):
 
     def test_valid_identity_generation_is_stable_across_aliases(self):
         canonical = compute_source_table_id(
-            "sqlserver", "Host", "Db", "dbo", "Orders")
+            "sales-read", "sqlserver", "Host", "Db", "dbo", "Orders")
         alias = compute_source_table_id(
-            "mssql", "host", "db", "dbo", "Orders")
+            "sales-read", "mssql", "host", "db", "dbo", "Orders")
         self.assertEqual(canonical, alias)
         self.assertEqual(len(canonical), 64)
 
     def test_identity_never_assumes_a_source(self):
         with self.assertRaises(ValueError):
-            compute_source_table_id(None, "host", "db", "S", "T")
+            compute_source_table_id("c1", None, "host", "db", "S", "T")
+
+    def test_identity_requires_connection_id(self):
+        for missing in (None, "", "   "):
+            with self.subTest(missing=missing), self.assertRaises(ValueError) as ctx:
+                compute_source_table_id(
+                    missing, "oracle", "host", "db", "S", "T")
+            self.assertIn("connection_id", str(ctx.exception))
+
+    def test_same_physical_table_has_connection_owned_ids(self):
+        read_id = compute_source_table_id(
+            "ORA_FIN_READ", "oracle", "finance-host", "FINPDB",
+            "FINANCE", "INVOICE")
+        migration_id = compute_source_table_id(
+            "ORA_FIN_MIGRATION", "oracle", "finance-host", "FINPDB",
+            "FINANCE", "INVOICE")
+        self.assertNotEqual(read_id, migration_id)
+
+    def test_identity_is_stable_and_versioned(self):
+        args = ("ORA_FIN_READ", "oracle", "finance-host", "FINPDB",
+                "FINANCE", "INVOICE")
+        self.assertEqual(compute_source_table_id(*args),
+                         compute_source_table_id(*args))
+        self.assertEqual(SOURCE_IDENTITY_VERSION, 2)
+        legacy = compute_legacy_source_table_id(*args[1:])
+        self.assertNotEqual(compute_source_table_id(*args), legacy)
 
 
 class TestUpsertConnectionSQL(unittest.TestCase):
@@ -138,6 +171,8 @@ class TestUpsertConnectionSQL(unittest.TestCase):
         self.assertTrue(any("INSERT INTO" in s for s in sqls))
         insert_sql = [s for s in sqls if "INSERT INTO" in s][0]
         self.assertIn("oracle_1", insert_sql)
+        self.assertIn("'REGISTERED'", insert_sql)
+        self.assertIn("false", insert_sql)
 
     def test_update_when_present(self):
         existing = [FakeRow(connection_id="oracle_1")]
@@ -148,6 +183,53 @@ class TestUpsertConnectionSQL(unittest.TestCase):
         })
         sqls = repo.spark.executed
         self.assertTrue(any(s.strip().startswith("UPDATE") for s in sqls))
+
+    def test_same_endpoint_with_different_connection_ids_is_allowed(self):
+        repo = self._repo(results=[[], []])
+        for connection_id, scope in (("ORA_FIN_READ", "read-scope"),
+                                     ("ORA_FIN_MIGRATION", "write-scope")):
+            repo.upsert_connection({
+                "connection_id": connection_id,
+                "connection_name": connection_id,
+                "source_system": "oracle",
+                "source_server": "finance-host",
+                "source_database": "FINPDB",
+                "secret_scope": scope,
+            })
+        inserts = [sql for sql in repo.spark.executed if "INSERT INTO" in sql]
+        self.assertEqual(len(inserts), 2)
+        self.assertIn("read-scope", inserts[0])
+        self.assertIn("write-scope", inserts[1])
+
+    def test_existing_connection_source_system_cannot_change(self):
+        existing = [FakeRow(
+            connection_id="c1", source_system="oracle",
+            source_server="host", source_database=None,
+            secret_scope="scope", trust_server_certificate=False)]
+        repo = self._repo(results=[existing])
+        with self.assertRaisesRegex(ValueError, "source_system conflict"):
+            repo.upsert_connection({
+                "connection_id": "c1", "connection_name": "Changed",
+                "source_system": "sqlserver", "source_server": "host",
+                "source_database": "Db", "secret_scope": "scope",
+            })
+
+    def test_secret_scope_change_forces_revalidation(self):
+        existing = [FakeRow(
+            connection_id="c1", source_system="oracle",
+            source_server="host", source_database=None,
+            secret_scope="old-scope", trust_server_certificate=False,
+            connection_status="VALID", is_active=True)]
+        repo = self._repo(results=[existing])
+        repo.upsert_connection({
+            "connection_id": "c1", "connection_name": "Rotated",
+            "source_system": "oracle", "source_server": "host",
+            "source_database": None, "secret_scope": "new-scope",
+        })
+        sql = repo.spark.last_sql()
+        self.assertIn("`connection_status` = 'REGISTERED'", sql)
+        self.assertIn("`is_active` = false", sql)
+        self.assertIn("`last_validated_ts` = NULL", sql)
 
     def test_direct_upsert_rejects_blank_source_system(self):
         repo = self._repo(results=[])
@@ -179,6 +261,57 @@ class TestUpsertConnectionSQL(unittest.TestCase):
         repo = self._repo(results=[[]])
         repo.active_tables()
         self.assertNotIn("connection_id", repo.spark.last_sql())
+
+    def test_active_tables_for_connection_requires_and_scopes_id(self):
+        repo = self._repo(results=[[]])
+        with self.assertRaises(ValueError):
+            repo.active_tables_for_connection("")
+        repo.active_tables_for_connection("oracle_1", decision="AUTO_MIGRATE")
+        self.assertIn("connection_id =", repo.spark.last_sql())
+        self.assertIn("table_decision =", repo.spark.last_sql())
+
+    def test_duplicate_connection_id_fails(self):
+        duplicate = [FakeRow(connection_id="c1"), FakeRow(connection_id="c1")]
+        with self.assertRaises(ValueError):
+            self._repo(results=[duplicate]).get_connection("c1")
+
+    def test_get_connection_rejects_blank(self):
+        with self.assertRaises(ValueError):
+            self._repo(results=[]).get_connection("  ")
+
+    def test_valid_active_connections_requires_operational_state(self):
+        repo = self._repo(results=[[]])
+        repo.valid_active_connections(["c1", "c2"])
+        sql = repo.spark.last_sql()
+        self.assertIn("is_active = true", sql)
+        self.assertIn("connection_status = 'VALID'", sql)
+        self.assertIn("trim(secret_scope) <> ''", sql)
+
+    def test_get_source_table_uses_composite_key_and_rejects_duplicates(self):
+        duplicate = [FakeRow(source_table_id="s1"), FakeRow(source_table_id="s1")]
+        repo = self._repo(results=[duplicate])
+        with self.assertRaises(ValueError):
+            repo.get_source_table("c1", "s1")
+        sql = repo.spark.last_sql()
+        self.assertIn("connection_id =", sql)
+        self.assertIn("source_table_id =", sql)
+
+    def test_update_control_for_connection_uses_composite_key_and_sanitizes(self):
+        repo = self._repo(results=[])
+        repo.update_control_for_connection(
+            "c1", "s1", {"error_message": "password=hunter2 failed"})
+        sql = repo.spark.last_sql()
+        self.assertIn("connection_id =", sql)
+        self.assertIn("source_table_id =", sql)
+        self.assertNotIn("hunter2", sql)
+
+    def test_status_controls_activation(self):
+        repo = self._repo(results=[])
+        repo.update_connection_status("c1", "VALID")
+        self.assertIn("`is_active` = true", repo.spark.last_sql())
+        repo.update_connection_status("c1", "FAILED", "password=secret")
+        self.assertIn("`is_active` = false", repo.spark.last_sql())
+        self.assertNotIn("secret", repo.spark.last_sql())
 
     def test_update_connection_status_valid_sets_validated_ts(self):
         repo = self._repo(results=[])

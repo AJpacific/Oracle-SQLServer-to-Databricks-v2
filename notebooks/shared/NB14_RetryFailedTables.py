@@ -55,6 +55,8 @@ owned_sql = ", ".join(escape_string_literal(op) for op in owned_operations)
 where.append(f"operation IN ({owned_sql})")
 if operation_filter:
     where.append(f"operation = {escape_string_literal(operation_filter)}")
+if CONNECTION_ID:
+    where.append(f"connection_id = {escape_string_literal(CONNECTION_ID)}")
 if only_id:
     where.append(f"source_table_id = {escape_string_literal(only_id)}")
 where_sql = " AND ".join(where)
@@ -65,7 +67,7 @@ latest = spark.sql(f"""
              error_category, retry_eligible, attempt_number,
              lower_watermark, upper_watermark,
              ROW_NUMBER() OVER (
-                 PARTITION BY source_table_id, operation
+                 PARTITION BY connection_id, source_table_id, operation
                  ORDER BY COALESCE(attempt_number, 1) DESC,
                           ended_ts DESC NULLS LAST,
                           started_ts DESC NULLS LAST,
@@ -74,7 +76,7 @@ latest = spark.sql(f"""
       FROM {ctrl('table_run_log')}
       WHERE {where_sql}
     ) WHERE rn = 1
-    ORDER BY source_table_id, operation
+    ORDER BY connection_id, source_table_id, operation
 """).collect()
 print(f"Distinct failed operations: {len(latest)}")
 
@@ -85,9 +87,10 @@ print(f"Distinct failed operations: {len(latest)}")
 worklist, manual_review_items, duplicate_keys = failcls.build_retry_collections(
     latest, child_run_id, original_run_id, pipeline_name, max_retries)
 
-for source_table_id, operation, recovery_action in duplicate_keys:
+for connection_id, source_table_id, operation, recovery_action in duplicate_keys:
     print(
         "  [warn] duplicate retry item removed:",
+        f"connection_id={connection_id}",
         f"source_table_id={source_table_id}",
         f"operation={operation}",
         f"recovery_action={recovery_action}",
@@ -98,6 +101,7 @@ print(f"Retry worklist: {len(worklist)}; "
 for item in manual_review_items:
     print(
         "  MANUAL_REVIEW",
+        f"connection_id={item['connection_id']}",
         f"source_table_id={item['source_table_id']}",
         f"operation={item['operation']}",
         f"reason={item['reason']}",

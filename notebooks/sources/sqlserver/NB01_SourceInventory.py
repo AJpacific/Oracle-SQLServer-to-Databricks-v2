@@ -18,13 +18,15 @@ SOURCE_SYSTEM = "sqlserver"
 
 run_id = get_run_id()
 connection_id = CONNECTION_ID
+connection_id = require_connection_id(connection_id, "SQL Server inventory")
+require_valid_connection(connection_id, SOURCE_SYSTEM)
 repo = control_repo()
-print("run_id:", run_id, "| connection_id:", connection_id or "(all SQL Server rows)")
+print("run_id:", run_id, "| connection_id:", connection_id)
 
 # COMMAND ----------
 
 active = [
-    r for r in repo.active_tables(connection_id=(connection_id or None)).collect()
+    r for r in repo.active_tables_for_connection(connection_id).collect()
     if require_source_system(
         r.asDict().get("source_system"), "source_table_control row")
     == SOURCE_SYSTEM
@@ -48,18 +50,18 @@ for r in active:
         if not src_db:
             raise ValueError("SQL Server rows require source_database")
         if not src_id:
-            src_id = compute_source_table_id(SOURCE_SYSTEM, src_server, src_db,
-                                             src_schema, src_table)
-            repo.update_control_by_identity(SOURCE_SYSTEM, src_server, src_db,
-                                            src_schema, src_table,
-                                            {"source_table_id": src_id})
+            raise ValueError(
+                "source_table_id is required; run the identity-v2 migration "
+                "for legacy registrations")
         adapter = get_source_adapter_routed(r)
+        src_server = adapter.source_server
+        src_db = adapter.source_database
     except Exception as e:
         failed += 1
         safe = failcls.sanitize_message(e)
         if src_id:
             try:
-                repo.update_control(src_id, {
+                repo.update_control_for_connection(conn_id, src_id, {
                     "current_status": "INVENTORY_FAILED",
                     "error_message": f"source routing failed: {safe[:900]}"})
             except Exception as ctrl_err:
@@ -99,8 +101,9 @@ for r in active:
             inv_common.strategy_columns(col_dicts), pk_cols,
             d.get("watermark_column"))
         table_written = persist_inventory_rows(table_inventory_rows)
-        repo.update_control(
-            src_id, inv_common.build_strategy_payload(src_id, decision, pk_cols))
+        repo.update_control_for_connection(
+            conn_id, src_id,
+            inv_common.build_strategy_payload(src_id, decision, pk_cols))
         written += table_written
         succeeded += 1
         print(f"  [sqlserver] {src_schema}.{src_table}: {len(cols)} cols, "
@@ -110,8 +113,9 @@ for r in active:
         failed += 1
         safe = failcls.sanitize_message(e)
         try:
-            repo.update_control(src_id, {"current_status": "INVENTORY_FAILED",
-                                         "error_message": safe[:1000]})
+            repo.update_control_for_connection(
+                conn_id, src_id, {"current_status": "INVENTORY_FAILED",
+                                  "error_message": safe[:1000]})
         except Exception as ctrl_err:
             safe_ctrl_error = failcls.sanitize_message(ctrl_err)
             print(f"  [warn] control update failed: {safe_ctrl_error[:300]}")

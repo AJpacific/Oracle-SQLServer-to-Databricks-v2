@@ -21,12 +21,12 @@ cannot be `READY` while required live checks remain `NOT_EXECUTED`.
 | Check | Environment | Expected result | Actual result | Evidence | Status | Owner or reviewer | Notes |
 |---|---|---|---|---|---|---|---|
 | Compile source and tests | Windows 11 Enterprise build 26200, Python 3.12.10 | `python -m compileall -q src tests` exits 0 | Exit 0 | `artifacts/test-results/compileall-output.txt` | PASSED | Release reviewer | Quiet mode produced no diagnostic output |
-| Run pytest suite | Windows 11 Enterprise build 26200, Python 3.12.10, pytest 9.1.1 | `python -m pytest tests -q` exits 0 with runner-reported counts | Exit 0; 423 passed and 111 subtests passed in 1.98s | `artifacts/test-results/pytest-output.txt` | PASSED | Release reviewer | Runner emitted no failed, skipped, or warning count |
-| Run unittest discovery | Windows 11 Enterprise build 26200, Python 3.12.10 | `python -m unittest discover -s tests -v` exits 0 with runner-reported total | Exit 0; ran 423 tests in 1.257s; OK | `artifacts/test-results/unittest-output.txt` | PASSED | Release reviewer | No failures or errors reported |
+| Run pytest suite | Windows 11 Enterprise build 26200, Python 3.12.10, pytest 9.1.1 | `python -m pytest tests -q` exits 0 with runner-reported counts | Exit 0; 490 passed and 121 subtests passed in 2.63s | `artifacts/test-results/pytest-output.txt` | PASSED | Release reviewer | Runner emitted no failed, skipped, or warning count |
+| Run unittest discovery | Windows 11 Enterprise build 26200, Python 3.12.10 | `python -m unittest discover -s tests -v` exits 0 with runner-reported total | Exit 0; ran 490 tests in 1.464s; OK | `artifacts/test-results/unittest-output.txt` | PASSED | Release reviewer | No failures or errors reported |
 | Review test summary | Windows 11 Enterprise build 26200 | JSON records UTC timestamp, commands, exits, counts, and overall status | Summary records all exits as 0 and overall status PASSED | `artifacts/test-results/test-summary.json` | PASSED | Release reviewer | Unreported pytest zero categories remain null rather than inferred |
 | Run modularity scan | Repository source review and pytest | Shared code has no source branches, defaults, dialect SQL, credentials, or concrete adapter construction | Executable AST, text, and ownership scans passed | `artifacts/test-results/pytest-output.txt` and release delivery report | PASSED | Release reviewer | Compatibility facade and concrete mappers classified separately |
 | Run secret and raw-error scan | Repository source review | No committed secret and no unsanitized exception print/persistence | No raw exception print/persistence or credential value found; approved source keys and sanitizer patterns remain | Release delivery report | PASSED | Release reviewer | Synthetic test fixtures classified separately |
-| Review Delta schemas | Repository review | No new Delta table; any column change is explicitly approved and documented | No Delta table or column change | Git diff and NB00 review | PASSED | Release reviewer | Existing schema creation remains idempotent |
+| Review Delta schemas | Repository review | Identity-v2 additions are explicit, additive, and documented without dropping history | Added `source_identity_version`, `legacy_source_table_id`, ownership `connection_id` columns, and execution-only `source_table_identity_migration` mapping table | Git diff, NB00, and migration notebook review | PASSED | Release reviewer | Existing tables are upgraded additively; migration table is created only for an approved execution |
 | Review documentation | Repository review | Paths, source requirements, mapper ownership, evidence, and limitations match code | Required files and checklist updated; live checks remain NOT_EXECUTED | Documentation diff | PASSED | Release reviewer | No production claim from pure tests |
 
 ## B. Live Spark and Delta checks
@@ -41,6 +41,8 @@ cannot be `READY` while required live checks remain `NOT_EXECUTED`.
 | Quarantine replacement | Live Databricks workspace | Same run/table retry replaces quarantine rows without duplicates | Not recorded | Before/after queries | NOT_EXECUTED | TBD | Other runs remain |
 | Reconciliation persistence | Live Databricks workspace | Named checks persist exact values and failures block checkpoint movement | Not recorded | Reconciliation rows and run URL | NOT_EXECUTED | TBD | No target-greater-than-source shortcut |
 | Checkpoint ordering | Live Databricks workspace | Data apply precedes reconciliation, then checkpoint commit, then queue finalization | Not recorded | Queue timestamps, control row, audit rows | NOT_EXECUTED | TBD | Verify failure recovery paths |
+| Identity-v2 migration dry run | Live Databricks workspace | Every legacy owner and child row maps unambiguously; no table is mutated | Not recorded | Migration output and row-count snapshots | NOT_EXECUTED | TBD | Resolve every blocker before execution |
+| Identity-v2 migration execution | Live Databricks workspace | Control and all child histories use the v2 ID with no orphans; checkpoints and audit history remain intact | Not recorded | Before/after queries and migration table | NOT_EXECUTED | TBD | Run manually, never from an operational Job |
 
 ## C. Oracle checks
 
@@ -92,6 +94,10 @@ cannot be `READY` while required live checks remain `NOT_EXECUTED`.
 | connection_id propagation | Deployed Databricks Jobs | Connection-scoped tasks process only the selected connection | Not recorded | Task inputs and control queries | NOT_EXECUTED | TBD | No secret parameters |
 | source_table_id propagation | Deployed Databricks Jobs | Per-table tasks resolve exactly one eligible work unit | Not recorded | ForEach inputs and task logs | NOT_EXECUTED | TBD | Missing/unknown source fails |
 | ForEach one-table isolation | Deployed Databricks Jobs | Each iteration reads/writes/audits only its source_table_id | Not recorded | Parallel iteration evidence | NOT_EXECUTED | TBD | Test same schema/table names |
+| Global Full Load worklist | Deployed Databricks Jobs | Eligible Oracle and SQL Server registrations produce separate three-field work items; unused connections are absent | Not recorded | Task values and run output | NOT_EXECUTED | TBD | Include two IDs for one physical table |
+| Global Delta worklist | Deployed Databricks Jobs | Current-run QUEUED registrations produce unique connection-owned work items | Not recorded | Queue rows and task values | NOT_EXECUTED | TBD | Validate task-value size limit |
+| Lazy connection resolution | Deployed Databricks Jobs | Connections without eligible work do not create adapters, read scopes, open JDBC, or update state | Not recorded | Driver logs and audit queries | NOT_EXECUTED | TBD | Exercise inactive and FAILED connections |
+| Mixed-source ForEach | Deployed Databricks Jobs | One run processes Oracle and SQL Server work items using each item’s registered scope and target | Not recorded | Run graph, audit rows, target checks | NOT_EXECUTED | TBD | No global connection parameter |
 | Retry worklist routing | Deployed Databricks Jobs | Each recovery action invokes the existing correct notebook | Not recorded | Worklist and task-run graph | NOT_EXECUTED | TBD | No duplicate engine |
 | Child run lineage | Deployed Databricks Jobs | Child run records parent_run_id, attempt, and frozen bounds | Not recorded | table_run_log rows | NOT_EXECUTED | TBD | State-only recovery is audited |
 | Task retry configuration | Deployed Databricks Jobs | Platform retries align with application retry/idempotency policy | Not recorded | Exported task settings | NOT_EXECUTED | TBD | Avoid widening intervals |
@@ -116,7 +122,7 @@ cannot be `READY` while required live checks remain `NOT_EXECUTED`.
 
 | Check | Environment | Expected result | Actual result | Evidence | Status | Owner or reviewer | Notes |
 |---|---|---|---|---|---|---|---|
-| Run shared control initialization | Live Databricks | NB00 succeeds idempotently | Not recorded | Run URL | NOT_EXECUTED | TBD | Review skipped legacy count |
+| Run shared control initialization | Live Databricks | NB00 succeeds idempotently after identity migration; before migration it adds columns then fails with a safe migration-required result | Not recorded | Run URL | NOT_EXECUTED | TBD | Do not treat the expected pre-migration failure as readiness |
 | Validate Oracle connection | Live Databricks and Oracle | Registered Oracle connection becomes VALID | Not recorded | Run URL and connection row | NOT_EXECUTED | TBD | Output sanitized |
 | Validate SQL Server connection | Live Databricks and SQL Server | Registered SQL Server connection becomes VALID | Not recorded | Run URL and connection row | NOT_EXECUTED | TBD | Output sanitized |
 | Run Oracle source assessment | Live Databricks and Oracle | Complete discovery returns `business_status=COMPLETE`; optional failure returns `PARTIAL`; mandatory failure fails the task | Not recorded | Assessment rows and run URL | NOT_EXECUTED | TBD | No per-table count claim; SIZE_MB assumes 8 KiB blocks |
@@ -143,7 +149,7 @@ cannot be `READY` while required live checks remain `NOT_EXECUTED`.
 | Run full loads | Live Databricks and sources | Both targets are exact overwrites of selected source snapshots | Not recorded | Run URLs and Delta history | NOT_EXECUTED | TBD | Per-table ForEach |
 | Reconcile exact counts | Live Databricks and sources | Exact source and Bronze counts pass | Not recorded | Reconciliation rows | NOT_EXECUTED | TBD | No greater-than shortcut |
 | Commit initial state | Live Databricks | Initial state commits only after reconciliation | Not recorded | Control row timestamps | NOT_EXECUTED | TBD | Empty temporal table policy checked |
-| Verify no cross-connection processing | Live Databricks | Each run touches only its supplied connection/table | Not recorded | Before/after control and target queries | NOT_EXECUTED | TBD | Include same-name objects if possible |
+| Verify no cross-connection processing | Live Databricks | Each work item touches only its supplied connection/table | Not recorded | Before/after control and target queries | NOT_EXECUTED | TBD | Include the same physical object under two IDs |
 
 ### G3. Delta validation
 

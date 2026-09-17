@@ -42,7 +42,7 @@ connection_id = clean["connection_id"]
 # COMMAND ----------
 
 repo.upsert_connection({**clean, "connection_status": "REGISTERED",
-                        "is_active": True, "error_message": None})
+                        "is_active": False, "error_message": None})
 print(f"Upserted SQL Server connection {connection_id} "
       f"(database={clean['source_database']}).")
 
@@ -69,8 +69,10 @@ except Exception as e:
 
 set_task_value("connection_id", connection_id)
 set_task_value("status", status)
+set_task_value("connection_status", status)
 dbutils.notebook.exit(json.dumps({
     "status": status,
+    "connection_status": status,
     "run_id": run_id,
     "connection_id": connection_id,
     "source_system": SOURCE_SYSTEM,

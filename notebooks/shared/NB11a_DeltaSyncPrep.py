@@ -22,6 +22,19 @@ set_task_value("run_id", run_id)
 print("run_id:", run_id)
 repo = control_repo()
 
+dbutils.widgets.text("only_connection_ids", "")
+dbutils.widgets.text("only_source_table_ids", "")
+only_connection_ids = {
+    value.strip()
+    for value in dbutils.widgets.get("only_connection_ids").split(",")
+    if value.strip()
+}
+only_source_table_ids = {
+    value.strip()
+    for value in dbutils.widgets.get("only_source_table_ids").split(",")
+    if value.strip()
+}
+
 def ctrl(t):
     return f"{quote_databricks(CATALOG)}.{quote_databricks(CONTROL_SCHEMA)}.{quote_databricks(t)}"
 
@@ -81,27 +94,77 @@ def capture_upper_watermark(adapter, database, schema, table, wm_col, wm_type, s
 
 # COMMAND ----------
 
+connection_filter = (
+    " AND c.connection_id IN (" + ", ".join(
+        escape_string_literal(value) for value in sorted(only_connection_ids)
+    ) + ")" if only_connection_ids else ""
+)
+table_filter = (
+    " AND c.source_table_id IN (" + ", ".join(
+        escape_string_literal(value) for value in sorted(only_source_table_ids)
+    ) + ")" if only_source_table_ids else ""
+)
 eligible = spark.sql(f"""
-    SELECT * FROM {ctrl('source_table_control')}
-    WHERE is_active = true
-      AND initial_load_completed = true
-      AND table_decision = 'AUTO_MIGRATE'
-      AND load_strategy IN ('WATERMARK','PRIMARY_KEY','HYBRID','FULL_LOAD')
-      {f"AND connection_id = {escape_string_literal(CONNECTION_ID)}" if CONNECTION_ID else ""}
+    SELECT c.*
+    FROM {ctrl('source_table_control')} c
+    JOIN {ctrl('source_connection')} sc
+      ON c.connection_id = sc.connection_id
+    WHERE c.is_active = true
+      AND c.initial_load_completed = true
+      AND c.table_decision = 'AUTO_MIGRATE'
+      AND c.load_strategy IN ('WATERMARK','PRIMARY_KEY','HYBRID','FULL_LOAD')
+      AND c.source_identity_version = {SOURCE_IDENTITY_VERSION}
+      AND sc.is_active = true
+      AND sc.connection_status = 'VALID'
+      AND sc.secret_scope IS NOT NULL AND trim(sc.secret_scope) <> ''
+      AND lower(trim(c.source_system)) = lower(trim(sc.source_system))
+      {connection_filter}
+      {table_filter}
+    ORDER BY c.connection_id, c.source_schema, c.source_table,
+             c.source_table_id
 """).collect()
 print("Eligible tables for delta:", len(eligible))
+
+existing_queue_rows = spark.sql(f"""
+    SELECT connection_id, source_table_id
+    FROM {ctrl('delta_sync_queue')}
+    WHERE run_id = {escape_string_literal(run_id)}
+""").collect()
+existing_queue_keys = {
+    (row["connection_id"], row["source_table_id"])
+    for row in existing_queue_rows
+}
+if len(existing_queue_keys) != len(existing_queue_rows):
+    raise ValueError(
+        "delta_sync_queue contains duplicate run_id + connection_id + "
+        "source_table_id keys")
 
 # COMMAND ----------
 
 queue = []
 skipped = []
+connection_cache = {}
+adapter_cache = {}
 for r in eligible:
     d = r.asDict()
+    conn_id = require_connection_id(
+        d.get("connection_id"), "delta preparation registration")
     src_id = d["source_table_id"]
     src_system = require_source_system(
         d.get("source_system"), "source_table_control row")
-    src_server = d.get("source_server")
-    src_db = d.get("source_database")
+    if (conn_id, src_id) in existing_queue_keys:
+        skipped.append((conn_id, src_id, "EXISTING_FROZEN_WORK_UNIT"))
+        print(f"  SKIP {conn_id}/{src_id}: queue row already exists for run")
+        continue
+
+    if conn_id not in connection_cache:
+        connection_cache[conn_id] = require_valid_connection(
+            conn_id, src_system)
+    connection = connection_cache[conn_id]
+    assert_current_source_table_identity(r, connection)
+    connection_data = connection.asDict()
+    src_server = connection_data.get("source_server")
+    src_db = connection_data.get("source_database")
     s_schema, s_table = r["source_schema"], r["source_table"]
     t_catalog = r["target_catalog"] or CATALOG
     t_schema = r["target_schema"] or s_schema.lower()
@@ -115,35 +178,61 @@ for r in eligible:
     upper_wm = None
 
     try:
-        adapter = get_source_adapter_routed(r)
+        if conn_id not in adapter_cache:
+            adapter_cache[conn_id] = get_source_adapter_for_connection(connection)
+        adapter = adapter_cache[conn_id]
 
         # Use only the latest approved AUTO target columns. The adapter projects
         # source values according to its approved target and watermark policy.
-        approved_columns = [
-            x["column_name"]
-            for x in spark.sql(f"""
-                SELECT column_name, ordinal_position
-                FROM {ctrl('resolved_column_mappings')}
-                WHERE source_table_id = {escape_string_literal(src_id)}
-                  AND mapping_status = 'AUTO'
-                QUALIFY ROW_NUMBER() OVER (
-                    PARTITION BY column_name ORDER BY captured_ts DESC
-                ) = 1
-                ORDER BY ordinal_position
-            """).collect()
+        latest_mapping_rows = spark.sql(f"""
+            SELECT column_name, ordinal_position, mapping_status,
+                   databricks_delta_type, include_column
+            FROM (
+              SELECT column_name, ordinal_position, mapping_status,
+                     databricks_delta_type, include_column,
+                     ROW_NUMBER() OVER (
+                       PARTITION BY column_name
+                       ORDER BY captured_ts DESC NULLS LAST, run_id DESC
+                     ) AS rn
+              FROM {ctrl('resolved_column_mappings')}
+              WHERE connection_id = {escape_string_literal(conn_id)}
+                AND source_table_id = {escape_string_literal(src_id)}
+            )
+            WHERE rn = 1
+            ORDER BY ordinal_position
+        """).collect()
+        included_mappings = [
+            row for row in latest_mapping_rows
+            if row["include_column"] is not False
         ]
+        unsafe_mappings = [
+            row["column_name"] for row in included_mappings
+            if (row["mapping_status"] or "").upper() != "AUTO"
+            or not row["databricks_delta_type"]
+        ]
+        if unsafe_mappings:
+            raise ValueError(
+                "latest mappings are not safe for delta extraction: "
+                + ", ".join(unsafe_mappings))
+        approved_columns = [row["column_name"] for row in included_mappings]
         if not approved_columns:
             raise ValueError("no approved AUTO columns found for delta extraction")
 
         if strategy in ("PRIMARY_KEY", "HYBRID") and not pk:
             message = f"{strategy} strategy requires primary_key_columns"
-            repo.update_control(src_id, {
+            repo.update_control_for_connection(conn_id, src_id, {
                 "current_status": "DELTA_CONFIG_ERROR",
                 "error_message": message,
             })
             skipped.append((s_schema, s_table, "NO_PRIMARY_KEY"))
             print(f"  SKIP {s_schema}.{s_table}: {message}")
             continue
+        missing_projected_pk = [column for column in pk
+                                if column not in approved_columns]
+        if strategy in ("PRIMARY_KEY", "HYBRID") and missing_projected_pk:
+            raise ValueError(
+                "primary-key column(s) are not approved for extraction: "
+                + ", ".join(missing_projected_pk))
         # FULL_LOAD refreshes the whole table: complete extract, no PK or
         # watermark required; the queue row carries null watermark fields.
         if strategy == "FULL_LOAD":
@@ -161,7 +250,7 @@ for r in eligible:
             # WATERMARK / HYBRID uses one frozen interval per table and run.
             if not wm_col or not wm_type:
                 message = "watermark column/type missing"
-                repo.update_control(src_id, {
+                repo.update_control_for_connection(conn_id, src_id, {
                     "current_status": "DELTA_CONFIG_ERROR",
                     "error_message": message,
                 })
@@ -179,7 +268,7 @@ for r in eligible:
                     f"watermark type; received {wm_type!r} "
                     f"for column {wm_col!r}"
                 )
-                repo.update_control(src_id, {
+                repo.update_control_for_connection(conn_id, src_id, {
                     "current_status": "DELTA_CONFIG_ERROR",
                     "error_message": message,
                 })
@@ -188,7 +277,7 @@ for r in eligible:
                 continue
             if last_wm is None:
                 message = "no committed last_watermark_value after initial load"
-                repo.update_control(src_id, {
+                repo.update_control_for_connection(conn_id, src_id, {
                     "current_status": "DELTA_CONFIG_ERROR",
                     "error_message": message,
                 })
@@ -199,7 +288,7 @@ for r in eligible:
             upper_raw, upper_wm = capture_upper_watermark(
                 adapter, src_db, s_schema, s_table, wm_col, wm_type, src_server)
             if upper_raw is None:
-                repo.update_control(src_id, {
+                repo.update_control_for_connection(conn_id, src_id, {
                     "current_status": "NO_SOURCE_WATERMARK",
                     "error_message": None,
                 })
@@ -209,7 +298,7 @@ for r in eligible:
             last_cmp = coerce_watermark(last_wm, wm_type, adapter)
             upper_cmp = coerce_watermark(upper_raw, wm_type, adapter)
             if not (upper_cmp > last_cmp):
-                repo.update_control(src_id, {
+                repo.update_control_for_connection(conn_id, src_id, {
                     "current_status": "NO_CHANGES",
                     "error_message": None,
                 })
@@ -223,7 +312,7 @@ for r in eligible:
 
         queue_row = Row(
             run_id=run_id, source_table_id=src_id,
-            connection_id=d.get("connection_id"), source_system=src_system,
+            connection_id=conn_id, source_system=src_system,
             source_server=src_server, source_database=src_db,
             source_schema=s_schema, source_table=s_table,
             target_catalog=t_catalog, target_schema=t_schema, target_table=t_table,
@@ -236,15 +325,16 @@ for r in eligible:
         )
         queued_status = ("DELTA_FULL_REFRESH_QUEUED"
                          if strategy == "FULL_LOAD" else "DELTA_QUEUED")
-        repo.update_control(src_id, {
+        repo.update_control_for_connection(conn_id, src_id, {
             "current_status": queued_status,
             "error_message": None,
         })
         queue.append(queue_row)
+        existing_queue_keys.add((conn_id, src_id))
     except Exception as e:
         safe_error = failcls.sanitize_message(e)
         try:
-            repo.update_control(src_id, {
+            repo.update_control_for_connection(conn_id, src_id, {
                 "current_status": "DELTA_PREP_FAILED",
                 "error_message": safe_error[:1000],
             })
@@ -263,7 +353,7 @@ if queue:
     queue_schema = StructType([
         StructField("run_id", StringType(), False),
         StructField("source_table_id", StringType(), False),
-        StructField("connection_id", StringType(), True),
+        StructField("connection_id", StringType(), False),
         StructField("source_system", StringType(), False),
         StructField("source_server", StringType(), True),
         StructField("source_database", StringType(), True),

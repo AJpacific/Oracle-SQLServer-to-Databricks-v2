@@ -18,12 +18,18 @@ dbutils.widgets.text("pipeline_name", "")
 dbutils.widgets.dropdown("notification_mode", "NONE", ["NONE", "TEAMS_WEBHOOK"])
 dbutils.widgets.text("teams_webhook_secret_scope", "")
 dbutils.widgets.text("teams_webhook_secret_key", "")
+dbutils.widgets.text("only_connection_ids", "")
 
 run_id = dbutils.widgets.get("run_id").strip() or get_run_id()
 pipeline_name = dbutils.widgets.get("pipeline_name").strip() or "PIPELINE"
 mode = dbutils.widgets.get("notification_mode").strip()
 wh_scope = dbutils.widgets.get("teams_webhook_secret_scope").strip()
 wh_key = dbutils.widgets.get("teams_webhook_secret_key").strip()
+only_connection_ids = {
+    value.strip()
+    for value in dbutils.widgets.get("only_connection_ids").split(",")
+    if value.strip()
+}
 
 def ctrl(t):
     return f"{quote_databricks(CATALOG)}.{quote_databricks(CONTROL_SCHEMA)}.{quote_databricks(t)}"
@@ -31,23 +37,31 @@ def ctrl(t):
 # COMMAND ----------
 
 # ---- collect failures (sanitized, no source data / credentials) ------------
+connection_filter = (
+    " AND connection_id IN (" + ", ".join(
+        escape_string_literal(value) for value in sorted(only_connection_ids)
+    ) + ")" if only_connection_ids else ""
+)
 table_failures = spark.sql(f"""
     SELECT source_table_id, connection_id, source_schema, source_table, operation,
            failure_stage, error_category, retry_eligible, error_message
     FROM {ctrl('table_run_log')}
-    WHERE run_id = {escape_string_literal(run_id)} AND status = 'FAILED'
+        WHERE run_id = {escape_string_literal(run_id)} AND status = 'FAILED'
+            {connection_filter}
 """).collect()
 
 recon_failures = spark.sql(f"""
-    SELECT source_table_id, check_type, status, message
+        SELECT connection_id, source_table_id, check_type, status, message
     FROM {ctrl('reconciliation_results')}
     WHERE run_id = {escape_string_literal(run_id)} AND status = 'FAIL'
+            {connection_filter}
 """).collect()
 
 dq_failures = spark.sql(f"""
-    SELECT source_table_id, rule_type, failed_count, status
+        SELECT connection_id, source_table_id, rule_type, failed_count, status
     FROM {ctrl('dq_result')}
     WHERE run_id = {escape_string_literal(run_id)} AND status = 'FAIL'
+            {connection_filter}
 """).collect()
 
 job_failures = spark.sql(f"""
@@ -61,7 +75,7 @@ total = len(table_failures) + len(recon_failures) + len(dq_failures) + len(job_f
 # table count is reported separately from the per-category counts. The sum is
 # never presented as a number of distinct failures.
 distinct_failed_tables = len({
-    r["source_table_id"] for r in
+    (r["connection_id"], r["source_table_id"]) for r in
     (list(table_failures) + list(recon_failures) + list(dq_failures))
     if r["source_table_id"]
 })
@@ -83,10 +97,12 @@ for r in table_failures[:50]:
         f"stage={r['failure_stage']} cat={r['error_category']} "
         f"retry={r['retry_eligible']}: {failcls.sanitize_message(r['error_message'])[:200]}")
 for r in recon_failures[:50]:
-    lines.append(f"- RECON {str(r['source_table_id'])[:12]} {r['check_type']}: "
+    lines.append(f"- RECON conn={r['connection_id']} "
+                 f"{str(r['source_table_id'])[:12]} {r['check_type']}: "
                  f"{failcls.sanitize_message(r['message'])[:160]}")
 for r in dq_failures[:50]:
-    lines.append(f"- DQ {str(r['source_table_id'])[:12]} {r['rule_type']} "
+    lines.append(f"- DQ conn={r['connection_id']} "
+                 f"{str(r['source_table_id'])[:12]} {r['rule_type']} "
                  f"failed={r['failed_count']}")
 for r in job_failures[:20]:
     lines.append(f"- JOB {r['job_name']} {r['status']}: "

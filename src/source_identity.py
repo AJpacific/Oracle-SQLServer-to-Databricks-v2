@@ -1,17 +1,16 @@
 """
-source_identity.py - deterministic, source-qualified table identity.
+source_identity.py - deterministic, connection-owned table identity.
 
-A single source table is uniquely identified by the five-part key:
+A source-table registration is uniquely identified by the six-part key:
 
-    source_system, source_server, source_database, source_schema, source_table
+    connection_id, source_system, source_server, source_database,
+    source_schema, source_table
 
 Oracle and SQL Server can both contain the same ``schema.table`` (e.g.
-``dbo.Customers`` / ``sales.Orders``), and the same ``schema.table`` can exist in
-two databases or on two servers. Identifying a table only by
-``source_schema + source_table`` is therefore unsafe once more than one source is
-onboarded. This module derives a stable ``source_table_id`` = SHA-256 over the
-normalized five-part key, so every operational control/queue table can carry and
-join on a single collision-free identity.
+``dbo.Customers`` / ``sales.Orders``), and the same physical object can be
+registered through different credentials. This module derives a stable
+``source_table_id`` = SHA-256 over a versioned, normalized six-part key, so each
+connection registration owns independent state and history.
 
 Normalization policy:
   * source_system / source_server / source_database are normalized
@@ -48,6 +47,9 @@ SQLSERVER = "sqlserver"
 # Declared here so connection validation stays declarative: a future source
 # opts in by adding its token rather than by adding another branch.
 SOURCES_REQUIRING_DATABASE = frozenset({SQLSERVER})
+
+LEGACY_SOURCE_IDENTITY_VERSION = 1
+SOURCE_IDENTITY_VERSION = 2
 
 
 def normalize_source_system(value) -> str:
@@ -96,18 +98,34 @@ def _require(value, field: str) -> str:
     return str(value).strip()
 
 
-def compute_source_table_id(source_system, source_server, source_database,
-                            source_schema, source_table) -> str:
-    """Return the deterministic SHA-256 ``source_table_id`` for the 5-part key.
-
-    system/server/database are normalized case-insensitively; schema/table casing
-    is preserved. source_schema and source_table are mandatory; a missing
-    server/database is allowed (normalizes to '').
-    """
+def compute_legacy_source_table_id(source_system, source_server, source_database,
+                                   source_schema, source_table) -> str:
+    """Return the legacy physical-source ID for explicit migration only."""
     system = require_source_system(source_system, "source table identity")
     server = _normalize_identity_component(source_server)
     database = _normalize_identity_component(source_database)
     schema = _require(source_schema, "source_schema")
     table = _require(source_table, "source_table")
     payload = "\n".join([system, server, database, schema, table])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def compute_source_table_id(connection_id, source_system, source_server,
+                            source_database, source_schema, source_table) -> str:
+    """Return the deterministic SHA-256 ``source_table_id`` for identity v2.
+
+    connection_id is mandatory and trimmed. System/server/database are
+    normalized case-insensitively; schema/table casing is preserved. A missing
+    server/database is allowed (normalizes to '').
+    """
+    connection = _require(connection_id, "connection_id")
+    system = require_source_system(source_system, "source table identity")
+    server = _normalize_identity_component(source_server)
+    database = _normalize_identity_component(source_database)
+    schema = _require(source_schema, "source_schema")
+    table = _require(source_table, "source_table")
+    payload = "\n".join([
+        f"v{SOURCE_IDENTITY_VERSION}", connection, system, server, database,
+        schema, table,
+    ])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()

@@ -14,7 +14,9 @@
 from pyspark.sql import functions as F
 from collections import defaultdict
 run_id = get_run_id()
-print("run_id:", run_id)
+connection_id = require_connection_id(CONNECTION_ID, "table decision generation")
+connection = require_valid_connection(connection_id)
+print("run_id:", run_id, "| connection_id:", connection_id)
 repo = control_repo()
 
 def ctrl(t):
@@ -22,13 +24,11 @@ def ctrl(t):
 
 # COMMAND ----------
 
-_conn_filter = (f" AND connection_id = {escape_string_literal(CONNECTION_ID)}"
-                if CONNECTION_ID else "")
-
 maps = spark.sql(
     f"SELECT source_table_id, connection_id, source_system, source_schema, "
     f"source_table, mapping_status FROM {ctrl('resolved_column_mappings')} "
-    f"WHERE run_id = {escape_string_literal(run_id)}{_conn_filter}"
+    f"WHERE run_id = {escape_string_literal(run_id)} "
+    f"AND connection_id = {escape_string_literal(connection_id)}"
 ).collect()
 
 # Aggregate by the source-qualified id so two sources that share a schema.table
@@ -37,7 +37,9 @@ agg = defaultdict(lambda: {"total": 0, "blocked": 0, "review": 0,
                            "system": None, "schema": None, "table": None,
                            "connection_id": None})
 for r in maps:
-    key = r["source_table_id"]
+    assert_table_connection_match(r, connection_id)
+    assert_source_identity_match(r, connection)
+    key = (r["connection_id"], r["source_table_id"])
     source_system = require_source_system(
         r["source_system"], "resolved mapping row")
     agg[key]["total"] += 1
@@ -54,7 +56,8 @@ for r in maps:
 # COMMAND ----------
 
 decisions = []
-for src_id, c in agg.items():
+for ownership_key, c in agg.items():
+    conn_id, src_id = ownership_key
     schema, table = c["schema"], c["table"]
     if c["total"] == 0:
         decision, reason = "BLOCKED", "No columns mapped"
@@ -72,7 +75,7 @@ for src_id, c in agg.items():
                       decision, reason, c["blocked"], c["review"], c["total"]))
 
     # Write the decision back to the master control table (keyed by id).
-    repo.update_control(src_id, {
+    repo.update_control_for_connection(conn_id, src_id, {
         "table_decision": decision,
         "mapping_status": "OK" if decision == "AUTO_MIGRATE" else decision,
         "current_status": (
@@ -92,6 +95,18 @@ from pyspark.sql.types import (
     StringType,
     IntegerType
 )
+
+spark.sql(f"""
+    DELETE FROM {ctrl('table_load_decisions')}
+    WHERE run_id = {escape_string_literal(run_id)}
+      AND connection_id = {escape_string_literal(connection_id)}
+""")
+spark.sql(f"""
+        UPDATE {ctrl('review_queue')}
+        SET review_status = 'RESOLVED', captured_ts = current_timestamp()
+        WHERE run_id = {escape_string_literal(run_id)}
+            AND connection_id = {escape_string_literal(connection_id)}
+""")
 
 if decisions:
 
@@ -153,7 +168,9 @@ if decisions:
         spark.sql(f"""
             MERGE INTO {ctrl('review_queue')} tgt
             USING rq_pending src
-            ON tgt.source_table_id = src.source_table_id
+            ON tgt.run_id = src.run_id
+           AND tgt.connection_id = src.connection_id
+           AND tgt.source_table_id = src.source_table_id
             WHEN MATCHED THEN UPDATE SET *
             WHEN NOT MATCHED THEN INSERT *
         """)
@@ -162,7 +179,7 @@ if decisions:
     resolved = (
         df.filter(F.col("decision") == "AUTO_MIGRATE")
           .select(
-              "source_table_id"
+              "run_id", "connection_id", "source_table_id"
           )
     )
 
@@ -172,7 +189,9 @@ if decisions:
         spark.sql(f"""
             MERGE INTO {ctrl('review_queue')} tgt
             USING rq_resolved src
-            ON tgt.source_table_id = src.source_table_id
+            ON tgt.run_id = src.run_id
+           AND tgt.connection_id = src.connection_id
+           AND tgt.source_table_id = src.source_table_id
             WHEN MATCHED THEN UPDATE SET review_status = 'RESOLVED',
                                          captured_ts = current_timestamp()
         """)
@@ -184,6 +203,7 @@ dbutils.notebook.exit(
     json.dumps({
         "status": "SUCCEEDED",
         "run_id": run_id,
+        "connection_id": connection_id,
         "tables": len(decisions)
     })
 )

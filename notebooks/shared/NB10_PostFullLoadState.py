@@ -28,13 +28,15 @@ def ctrl(t):
 loaded = spark.sql(f"""
     SELECT DISTINCT c.* FROM {ctrl('source_table_control')} c
     JOIN {ctrl('table_run_log')} l
-      ON c.source_table_id = l.source_table_id
+            ON c.connection_id = l.connection_id
+         AND c.source_table_id = l.source_table_id
     WHERE l.run_id = {escape_string_literal(run_id)}
       AND l.operation = 'FULL_LOAD' AND l.status = 'SUCCEEDED'
       AND c.table_decision = 'AUTO_MIGRATE'
             AND EXISTS (
                 SELECT 1 FROM {ctrl('reconciliation_results')} rr
                 WHERE rr.run_id = {escape_string_literal(run_id)}
+                    AND rr.connection_id = c.connection_id
                     AND rr.source_table_id = c.source_table_id
                     AND rr.check_type = 'FULL_SNAPSHOT_COUNT'
                     AND rr.status = 'PASS'
@@ -42,6 +44,7 @@ loaded = spark.sql(f"""
       AND NOT EXISTS (
         SELECT 1 FROM {ctrl('reconciliation_results')} rr
         WHERE rr.run_id = {escape_string_literal(run_id)}
+                    AND rr.connection_id = c.connection_id
           AND rr.source_table_id = c.source_table_id
           AND rr.status = 'FAIL'
       )
@@ -51,7 +54,12 @@ print("Tables eligible for state commit:", len(loaded))
 # COMMAND ----------
 
 committed, failed = 0, 0
+adapter_cache = {}
 for r in loaded:
+    conn_id = require_connection_id(
+        r["connection_id"], "post-full-load state row")
+    connection = require_valid_connection(conn_id, r["source_system"])
+    assert_current_source_table_identity(r, connection)
     src_id = r["source_table_id"]
     require_source_system(r["source_system"], "source_table_control row")
     s_schema, s_table = r["source_schema"], r["source_table"]
@@ -73,12 +81,15 @@ for r in loaded:
                    .agg(F.max(F.col(f"`{wm_col}`")).alias("mx"))
                    .collect()[0]["mx"])
             if val is None:
-                adapter = get_source_adapter_routed(r)
+                if conn_id not in adapter_cache:
+                    adapter_cache[conn_id] = get_source_adapter_for_connection(
+                        connection)
+                adapter = adapter_cache[conn_id]
                 new_wm = adapter.initial_watermark_value(r["watermark_data_type"])
             else:
                 new_wm = wm.canonical_watermark_string(val, strict=True)
 
-        repo.update_control(src_id, {
+        repo.update_control_for_connection(conn_id, src_id, {
             "initial_load_completed": True,
             "last_watermark_value": new_wm,
             "last_successful_run_id": run_id,
@@ -92,7 +103,7 @@ for r in loaded:
         failed += 1
         safe_error = failcls.sanitize_message(e)
         try:
-            repo.update_control(src_id, {
+            repo.update_control_for_connection(conn_id, src_id, {
                 "current_status": "STATE_COMMIT_FAILED",
                 "error_message": safe_error[:1000],
             })

@@ -54,6 +54,14 @@ SECRET_FIELD_KEYS = frozenset({
 SANITIZED_CONTROL_FIELDS = frozenset({"error_message", "etl_error_message"})
 
 
+def require_connection_id(value, context="operation") -> str:
+    """Return a trimmed connection ID or raise with a safe context message."""
+    connection_id = str(value or "").strip()
+    if not connection_id:
+        raise ValueError(f"{context} requires connection_id")
+    return connection_id
+
+
 def _to_long(value):
     """Coerce to int for a BIGINT column; null stays null."""
     if value is None:
@@ -239,16 +247,26 @@ class ControlRepository:
 
         return self.spark.sql(sql)
 
+    def active_tables_for_connection(self, connection_id: str,
+                                     decision: str = None):
+        """Return active registrations owned by exactly one connection."""
+        connection_id = require_connection_id(
+            connection_id, "active_tables_for_connection")
+        return self.active_tables(connection_id=connection_id, decision=decision)
+
     # ---------------------------------------------------- connection registry
 
     def get_connection(self, connection_id: str):
-        """Return the source_connection row for an id, or None."""
-        if not connection_id:
-            return None
+        """Return one source_connection row, or None; reject duplicate IDs."""
+        connection_id = require_connection_id(connection_id, "get_connection")
         rows = self.spark.sql(
             f"SELECT * FROM {self.ctrl('source_connection')} "
             f"WHERE connection_id = {escape_string_literal(connection_id)}"
         ).collect()
+        if len(rows) > 1:
+            raise ValueError(
+                f"connection_id {connection_id!r} resolves to {len(rows)} "
+                "source_connection rows; expected at most one")
         return rows[0] if rows else None
 
     def active_connections(self, connection_ids=None):
@@ -262,16 +280,34 @@ class ControlRepository:
             sql += f" AND connection_id IN ({in_list})"
         return self.spark.sql(sql)
 
+    def valid_active_connections(self, connection_ids=None):
+        """Return operational connections with VALID status and a scope."""
+        sql = (
+            f"SELECT * FROM {self.ctrl('source_connection')} "
+            "WHERE is_active = true "
+            "AND connection_status = 'VALID' "
+            "AND secret_scope IS NOT NULL AND trim(secret_scope) <> ''"
+        )
+        if connection_ids:
+            normalized = [
+                require_connection_id(value, "valid_active_connections")
+                for value in connection_ids
+            ]
+            in_list = ", ".join(
+                escape_string_literal(value) for value in normalized)
+            sql += f" AND connection_id IN ({in_list})"
+        return self.spark.sql(sql)
+
     def upsert_connection(self, connection: dict):
         """Insert or update one source_connection row by connection_id.
 
         Only non-secret metadata is stored. A username, password, token, or a
         credential-bearing JDBC URL must never be passed here.
         """
-        connection_id = connection.get("connection_id")
-        if not connection_id:
-            raise ValueError("upsert_connection requires connection_id")
         connection = dict(connection)
+        connection_id = require_connection_id(
+            connection.get("connection_id"), "upsert_connection")
+        connection["connection_id"] = connection_id
         connection["source_system"] = require_source_system(
             connection.get("source_system"), "registered connection")
         if connection.get("error_message") is not None:
@@ -285,6 +321,24 @@ class ControlRepository:
         )
         existing = self.get_connection(connection_id)
         if existing is not None:
+            prior = existing.asDict() if hasattr(existing, "asDict") else dict(existing)
+            prior_system = prior.get("source_system")
+            if prior_system:
+                assert_source_system_match(
+                    connection["source_system"], prior_system)
+            revalidation_fields = (
+                "source_server", "source_database", "secret_scope",
+                "trust_server_certificate",
+            )
+            changed = any(
+                connection.get(field) != prior.get(field)
+                for field in revalidation_fields
+                if field in connection and field in prior
+            )
+            if changed:
+                connection["connection_status"] = "REGISTERED"
+                connection["is_active"] = False
+                connection["last_validated_ts"] = None
             assignments = [
                 f"{quote_databricks(k)} = {self._render_value(connection[k])}"
                 for k in writable if k in connection
@@ -296,6 +350,9 @@ class ControlRepository:
                 f"WHERE connection_id = {escape_string_literal(connection_id)}"
             )
         else:
+            connection["connection_status"] = "REGISTERED"
+            connection["is_active"] = False
+            connection["last_validated_ts"] = None
             cols = ["connection_id"] + [k for k in writable if k in connection]
             vals = [escape_string_literal(connection_id)] + [
                 self._render_value(connection[k]) for k in writable
@@ -312,12 +369,13 @@ class ControlRepository:
     def update_connection_status(self, connection_id: str, status: str,
                                  error_message: str = None):
         """Set a connection's status (and optional error, sanitized on write)."""
-        if not connection_id:
-            raise ValueError("update_connection_status requires connection_id")
+        connection_id = require_connection_id(
+            connection_id, "update_connection_status")
         safe_error = (sanitize_error_message(error_message)
                       if error_message is not None else None)
         assignments = [
             f"`connection_status` = {escape_string_literal(status)}",
+            f"`is_active` = {'true' if status == 'VALID' else 'false'}",
             f"`error_message` = {escape_string_literal(safe_error)}",
             "`updated_ts` = current_timestamp()",
         ]
@@ -372,6 +430,25 @@ class ControlRepository:
 
         return rows[0] if rows else None
 
+    def get_source_table(self, connection_id: str, source_table_id: str):
+        """Return one table registration by its complete ownership key."""
+        connection_id = require_connection_id(
+            connection_id, "get_source_table")
+        source_table_id = str(source_table_id or "").strip()
+        if not source_table_id:
+            raise ValueError("get_source_table requires source_table_id")
+        rows = self.spark.sql(
+            f"SELECT * FROM {self.ctrl('source_table_control')} "
+            f"WHERE connection_id = {escape_string_literal(connection_id)} "
+            f"AND source_table_id = {escape_string_literal(source_table_id)}"
+        ).collect()
+        if len(rows) > 1:
+            raise ValueError(
+                f"connection_id {connection_id!r} and source_table_id "
+                f"{source_table_id!r} resolve to {len(rows)} rows; expected "
+                "at most one")
+        return rows[0] if rows else None
+
     # ---------------------------------------------- writes / merges (need Spark)
 
     def update_control(
@@ -415,16 +492,42 @@ class ControlRepository:
 
         self.spark.sql(sql)
 
+    def update_control_for_connection(self, connection_id: str,
+                                      source_table_id: str, fields: dict):
+        """Update one registration using its complete ownership key."""
+        connection_id = require_connection_id(
+            connection_id, "update_control_for_connection")
+        source_table_id = str(source_table_id or "").strip()
+        if not source_table_id:
+            raise ValueError(
+                "update_control_for_connection requires source_table_id")
+        assignments = []
+        for key, value in (fields or {}).items():
+            if key in SANITIZED_CONTROL_FIELDS and value is not None:
+                value = sanitize_error_message(value)
+            assignments.append(
+                f"{quote_databricks(key)} = {self._render_value(value)}")
+        assignments.append("`updated_ts` = current_timestamp()")
+        self.spark.sql(
+            f"UPDATE {self.ctrl('source_table_control')} "
+            f"SET {', '.join(assignments)} "
+            f"WHERE connection_id = {escape_string_literal(connection_id)} "
+            f"AND source_table_id = {escape_string_literal(source_table_id)}"
+        )
+
     def update_control_by_identity(self, source_system, source_server,
                                    source_database, source_schema, source_table,
-                                   fields: dict):
-        """Update a control row matched by its full 5-part source identity.
+                                   fields: dict, connection_id=None):
+        """Compatibility helper for a connection-owned physical identity.
 
         Uses null-safe matching for source_server / source_database so legacy
-        Oracle rows (NULL server/database) match correctly. Primarily used to set
-        source_table_id on rows registered before the id existed; steady-state
-        updates use :meth:`update_control` keyed by source_table_id.
+        Oracle rows (NULL server/database) match correctly, but requires an
+        explicit connection owner so the same physical object under another
+        connection is never changed. Operational code uses
+        :meth:`update_control_for_connection`.
         """
+        connection_id = require_connection_id(
+            connection_id, "update_control_by_identity")
         source_system = require_source_system(
             source_system, "source table identity")
         assignments = []
@@ -436,7 +539,8 @@ class ControlRepository:
         assignments.append("`updated_ts` = current_timestamp()")
         set_clause = ", ".join(assignments)
         where = (
-            f"source_schema = {escape_string_literal(source_schema)} "
+            f"connection_id = {escape_string_literal(connection_id)} "
+            f"AND source_schema = {escape_string_literal(source_schema)} "
             f"AND source_table = {escape_string_literal(source_table)} "
             f"AND (({self._null_or_eq('source_system', source_system)})) "
             f"AND (({self._null_or_eq('source_server', source_server)})) "
@@ -461,9 +565,15 @@ class ControlRepository:
 
         Every column declared in TABLE_RUN_LOG_COLUMNS is persisted, including
         the connection, retry-lineage, and row-count metrics the retry selector,
-        dashboard views, and notification notebook read back. Legacy callers that
-        supply only the original fields keep working; the rest stay null.
+        dashboard views, and notification notebook read back. Operational
+        ownership and attempt fields are mandatory; optional metrics stay null.
         """
+
+        for required in (
+            "run_id", "connection_id", "source_table_id", "operation",
+            "attempt_number"):
+            if fields.get(required) is None or not str(fields.get(required)).strip():
+                raise ValueError(f"table_run_log requires {required}")
 
         from pyspark.sql.types import (
             StructType, StructField, StringType, IntegerType, BooleanType,
@@ -479,7 +589,21 @@ class ControlRepository:
             for name, token in TABLE_RUN_LOG_COLUMNS
         ])
 
-        df = self.spark.createDataFrame([build_table_run_row(fields)], schema)
+        normalized_row = build_table_run_row(fields)
+        normalized = dict(zip(
+            (name for name, _token in TABLE_RUN_LOG_COLUMNS), normalized_row))
+        self.spark.sql(
+            f"DELETE FROM {self.ctrl('table_run_log')} "
+            f"WHERE run_id = {escape_string_literal(normalized['run_id'])} "
+            f"AND connection_id = "
+            f"{escape_string_literal(normalized['connection_id'])} "
+            f"AND source_table_id = "
+            f"{escape_string_literal(normalized['source_table_id'])} "
+            f"AND operation = {escape_string_literal(normalized['operation'])} "
+            f"AND COALESCE(attempt_number, 1) = "
+            f"{self._render_value(normalized['attempt_number'])}"
+        )
+        df = self.spark.createDataFrame([normalized_row], schema)
 
         df.write.format("delta").mode("append").option(
             "mergeSchema", "true").saveAsTable(

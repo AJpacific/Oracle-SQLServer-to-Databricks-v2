@@ -14,30 +14,31 @@
 from pyspark.sql import functions as F
 
 run_id = get_run_id()
-print("run_id:", run_id)
+connection_id = require_connection_id(CONNECTION_ID, "mapping generation")
+connection = require_valid_connection(connection_id)
+print("run_id:", run_id, "| connection_id:", connection_id)
 
 # One adapter per registered source, resolved through the factory. The adapter
 # supplies both the type rules and the column policy, so this notebook contains
 # no source-specific branch.
 _adapter_cache = {}
 
-def adapter_for(source_system):
-    key = require_source_system(source_system, "normalized inventory row")
-    if key not in _adapter_cache:
-        _adapter_cache[key] = build_adapter(key)
-    return _adapter_cache[key]
+def adapter_for(row):
+    assert_table_connection_match(row, connection_id)
+    assert_source_identity_match(row, connection)
+    if connection_id not in _adapter_cache:
+        _adapter_cache[connection_id] = get_source_adapter_for_connection(connection)
+    return _adapter_cache[connection_id]
 
 def ctrl(t):
     return f"{quote_databricks(CATALOG)}.{quote_databricks(CONTROL_SCHEMA)}.{quote_databricks(t)}"
 
 # COMMAND ----------
 
-_conn_filter = (f" AND connection_id = {escape_string_literal(CONNECTION_ID)}"
-                if CONNECTION_ID else "")
-
 norm = spark.sql(
     f"SELECT * FROM {ctrl('normalized_source_inventory')} "
-    f"WHERE run_id = {escape_string_literal(run_id)}{_conn_filter}"
+    f"WHERE run_id = {escape_string_literal(run_id)} "
+    f"AND connection_id = {escape_string_literal(connection_id)}"
 ).collect()
 print("Columns to map:", len(norm))
 
@@ -48,7 +49,7 @@ for r in norm:
     src_system = require_source_system(
         r["source_system"], "normalized inventory row")
     try:
-        adapter = adapter_for(src_system)
+        adapter = adapter_for(r)
         res = adapter.load_type_mapper().map_column(
             source_type=r["raw_type"],
             precision=r["precision"],
@@ -103,6 +104,12 @@ from pyspark.sql.types import (
     IntegerType,
     BooleanType
 )
+
+spark.sql(f"""
+    DELETE FROM {ctrl('resolved_column_mappings')}
+    WHERE run_id = {escape_string_literal(run_id)}
+      AND connection_id = {escape_string_literal(connection_id)}
+""")
 
 if mapped:
 
@@ -159,6 +166,7 @@ dbutils.notebook.exit(
     json.dumps({
         "status": "SUCCEEDED",
         "run_id": run_id,
+        "connection_id": connection_id,
         "columns": len(mapped)
     })
 )

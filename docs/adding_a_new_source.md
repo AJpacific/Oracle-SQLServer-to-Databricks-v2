@@ -24,6 +24,12 @@ build if such a comparison, a dialect catalog string, a source credential key,
 a dialect query-builder import, or a direct concrete-adapter construction
 appears.
 
+Connections are data, not code branches. Adding another connection for any
+registered source requires no adapter, mapper, or shared-notebook change. One
+endpoint may have several connection IDs and secret scopes. Each selected table
+is assigned a v2 ID over `connection_id + source identity`, so registrations of
+the same physical object remain independent.
+
 ## Steps
 
 ### 1. Write the adapter
@@ -171,13 +177,17 @@ Copy the shape of `notebooks/sources/sqlserver/`. Each begins with
 | `NB01_SourceInventory` | Call adapter metadata queries, build one complete table batch with `inv_common.normalize_inventory_row()`, then call `persist_inventory_rows()` before updating control state | Write `source_inventory` directly; mark `INVENTORIED` before persistence |
 | `NB01A_SourceAssessment` | Discover objects, call `assess_common.build_assessment_record()` and `summarize_table_compatibility()`, `persist_assessment_records()` | Run a per-table `COUNT(*)`; claim an exact row count |
 | `NB13_SQLObjectAssessmentAndConversion` | Extract definitions, call `sqlobj_common.build_sql_object_record()`, `persist_sql_object_records()` | Execute or deploy generated SQL |
-| `TEST_CONNECTION` | Treat a registered `connection_id` as authoritative for server/database/scope | Let a widget override a registered connection |
+| `TEST_CONNECTION` | Treat a registered `connection_id` as authoritative for server/database/scope; require explicit `allow_legacy_mode=true` for manual fallback | Let a widget override a registered connection |
 
 ### 5. Point the job at the new notebooks
 
 In your Databricks job definition, set the source-specific tasks (`T01`, `T02`,
 `T04`, `T14` in `docs/databricks_job_task_mapping.md`) at
 `sources/postgresql/...`. Every shared task is unchanged.
+
+Do not add source-specific worklist, Full Load, or Delta notebooks. Global
+worklists contain only `run_id`, `connection_id`, and `source_table_id`; the
+shared table task resolves the adapter lazily from that registered connection.
 
 ### 6. Prove it
 

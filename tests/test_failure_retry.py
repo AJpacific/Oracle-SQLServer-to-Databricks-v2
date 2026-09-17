@@ -144,8 +144,18 @@ class TestRetrySelectionPolicy(unittest.TestCase):
         ])
         self.assertEqual(
             {fc.retry_work_identity(row) for row in selected},
-            {("table_001", "FULL_LOAD"),
-             ("table_001", "ETL_INCREMENTAL")})
+            {("connection_1", "table_001", "FULL_LOAD"),
+             ("connection_1", "table_001", "ETL_INCREMENTAL")})
+
+    def test_same_table_operation_on_two_connections_remains_independent(self):
+        selected = fc.latest_failed_attempts([
+            _failed_row("FULL_LOAD", connection_id="ORA_FIN_READ"),
+            _failed_row("FULL_LOAD", connection_id="ORA_FIN_MIGRATION"),
+        ])
+        self.assertEqual(len(selected), 2)
+        self.assertEqual(
+            {row["connection_id"] for row in selected},
+            {"ORA_FIN_READ", "ORA_FIN_MIGRATION"})
 
     def test_same_table_ingest_operations_are_both_selected(self):
         selected = fc.select_failed_attempts([
@@ -229,12 +239,12 @@ class TestRetrySelectionPolicy(unittest.TestCase):
         ])
         self.assertEqual(selected[0]["attempt_number"], 2)
 
-    def test_run_id_is_final_deterministic_tie_breaker(self):
+    def test_connection_is_part_of_retry_identity(self):
         selected = fc.latest_failed_attempts([
             _failed_row("FULL_LOAD", run_id="run_a", connection_id="old"),
             _failed_row("FULL_LOAD", run_id="run_b", connection_id="new"),
         ])
-        self.assertEqual(selected[0]["connection_id"], "new")
+        self.assertEqual(len(selected), 2)
 
     def test_retry_limit_is_operation_specific(self):
         full_work, full_manual, _ = fc.build_retry_collections(
@@ -275,7 +285,12 @@ class TestRetrySelectionPolicy(unittest.TestCase):
         self.assertEqual(len(worklist), 1)
         self.assertEqual(
             duplicates,
-            [("table_001", "FULL_LOAD", fc.RETRY_FULL_LOAD)])
+            [("connection_1", "table_001", "FULL_LOAD",
+              fc.RETRY_FULL_LOAD)])
+
+    def test_retry_row_requires_connection_id(self):
+        with self.assertRaisesRegex(ValueError, "connection_id"):
+            fc.retry_work_identity(_failed_row("FULL_LOAD", connection_id=""))
 
     def test_executable_output_contract(self):
         work_item, manual_item = fc.build_retry_item(

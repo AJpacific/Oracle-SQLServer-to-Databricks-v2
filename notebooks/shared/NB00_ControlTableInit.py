@@ -59,6 +59,9 @@ CREATE TABLE IF NOT EXISTS {ctrl('source_connection')} (
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {ctrl('source_table_control')} (
   source_table_id          STRING,
+  connection_id            STRING,
+  source_identity_version  INT,
+  legacy_source_table_id   STRING,
   source_system            STRING,
   source_server            STRING,
   source_database          STRING,
@@ -88,7 +91,7 @@ CREATE TABLE IF NOT EXISTS {ctrl('source_table_control')} (
 
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {ctrl('source_inventory')} (
-  run_id STRING, source_table_id STRING, source_system STRING,
+  run_id STRING, connection_id STRING, source_table_id STRING, source_system STRING,
   source_server STRING, source_database STRING,
   source_schema STRING, source_table STRING, column_name STRING,
   ordinal_position INT, is_nullable STRING, data_type STRING,
@@ -101,7 +104,7 @@ CREATE TABLE IF NOT EXISTS {ctrl('source_inventory')} (
 
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {ctrl('normalized_source_inventory')} (
-  run_id STRING, source_table_id STRING, source_system STRING,
+  run_id STRING, connection_id STRING, source_table_id STRING, source_system STRING,
   source_schema STRING, source_table STRING, column_name STRING,
   ordinal_position INT, raw_type STRING, normalized_type STRING,
   precision INT, scale INT, length INT, is_nullable BOOLEAN,
@@ -113,7 +116,7 @@ CREATE TABLE IF NOT EXISTS {ctrl('normalized_source_inventory')} (
 
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {ctrl('resolved_column_mappings')} (
-  run_id STRING, source_table_id STRING, source_system STRING,
+  run_id STRING, connection_id STRING, source_table_id STRING, source_system STRING,
   source_schema STRING, source_table STRING, column_name STRING,
   ordinal_position INT, source_type STRING, databricks_delta_type STRING,
   mapping_status STRING, fidelity STRING, notes STRING, is_nullable BOOLEAN,
@@ -125,7 +128,7 @@ CREATE TABLE IF NOT EXISTS {ctrl('resolved_column_mappings')} (
 
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {ctrl('mapping_validation_results')} (
-  run_id STRING, source_table_id STRING, source_system STRING,
+  run_id STRING, connection_id STRING, source_table_id STRING, source_system STRING,
   source_schema STRING, source_table STRING, column_name STRING,
   severity STRING, rule STRING, message STRING, captured_ts TIMESTAMP
 ) USING DELTA
@@ -133,7 +136,7 @@ CREATE TABLE IF NOT EXISTS {ctrl('mapping_validation_results')} (
 
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {ctrl('table_load_decisions')} (
-  run_id STRING, source_table_id STRING, source_system STRING,
+  run_id STRING, connection_id STRING, source_table_id STRING, source_system STRING,
   source_schema STRING, source_table STRING,
   decision STRING, reason STRING, blocked_columns INT, review_columns INT,
   total_columns INT, captured_ts TIMESTAMP
@@ -142,7 +145,7 @@ CREATE TABLE IF NOT EXISTS {ctrl('table_load_decisions')} (
 
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {ctrl('review_queue')} (
-  source_table_id STRING, source_system STRING,
+  connection_id STRING, source_table_id STRING, source_system STRING,
   source_schema STRING, source_table STRING, decision STRING, reason STRING,
   blocked_columns INT, review_columns INT, total_columns INT,
   review_status STRING, run_id STRING, captured_ts TIMESTAMP
@@ -158,7 +161,7 @@ CREATE TABLE IF NOT EXISTS {ctrl('job_run_log')} (
 
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {ctrl('table_run_log')} (
-  run_id STRING, source_table_id STRING, source_system STRING,
+  run_id STRING, connection_id STRING, source_table_id STRING, source_system STRING,
   source_server STRING, source_database STRING,
   source_schema STRING, source_table STRING, operation STRING,
   target_full_name STRING, source_row_count BIGINT, target_row_count BIGINT,
@@ -168,7 +171,7 @@ CREATE TABLE IF NOT EXISTS {ctrl('table_run_log')} (
 
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {ctrl('delta_sync_queue')} (
-  run_id STRING, source_table_id STRING, source_system STRING,
+  run_id STRING, connection_id STRING, source_table_id STRING, source_system STRING,
   source_server STRING, source_database STRING,
   source_schema STRING, source_table STRING,
   target_catalog STRING, target_schema STRING, target_table STRING,
@@ -182,7 +185,7 @@ CREATE TABLE IF NOT EXISTS {ctrl('delta_sync_queue')} (
 
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {ctrl('reconciliation_results')} (
-  run_id STRING, source_table_id STRING, source_system STRING,
+  run_id STRING, connection_id STRING, source_table_id STRING, source_system STRING,
   source_schema STRING, source_table STRING, check_type STRING,
   source_value STRING, target_value STRING, status STRING, message STRING,
   captured_ts TIMESTAMP
@@ -216,7 +219,7 @@ CREATE TABLE IF NOT EXISTS {ctrl('sql_object_assessment')} (
 # --- ETL: data-quality rules, results, and quarantine ----------------------
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {ctrl('dq_rule')} (
-  rule_id STRING, source_table_id STRING, rule_type STRING,
+  rule_id STRING, connection_id STRING, source_table_id STRING, rule_type STRING,
   column_name STRING, rule_value STRING, severity STRING,
   is_active BOOLEAN, created_ts TIMESTAMP, updated_ts TIMESTAMP
 ) USING DELTA
@@ -224,7 +227,8 @@ CREATE TABLE IF NOT EXISTS {ctrl('dq_rule')} (
 
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {ctrl('dq_result')} (
-  run_id STRING, source_table_id STRING, rule_id STRING, rule_type STRING,
+  run_id STRING, connection_id STRING, source_table_id STRING,
+  rule_id STRING, rule_type STRING,
   input_count BIGINT, checked_count BIGINT, failed_count BIGINT,
   passed_count BIGINT, status STRING, message STRING, captured_ts TIMESTAMP
 ) USING DELTA
@@ -232,7 +236,7 @@ CREATE TABLE IF NOT EXISTS {ctrl('dq_result')} (
 
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {ctrl('dq_quarantine')} (
-  run_id STRING, source_table_id STRING, rule_id STRING,
+  run_id STRING, connection_id STRING, source_table_id STRING, rule_id STRING,
   record_json STRING, failure_reason STRING, quarantined_ts TIMESTAMP
 ) USING DELTA
 """)
@@ -260,6 +264,8 @@ _ensure_columns(
         ("source_table_id", "STRING"),
         ("delete_policy", "STRING"),
         ("connection_id", "STRING"),
+        ("source_identity_version", "INT"),
+        ("legacy_source_table_id", "STRING"),
         # Bronze-to-Silver ETL fields (owned by the ETL pipeline). Source-ingest
         # watermarks and ETL watermarks are kept strictly separate.
         ("silver_catalog", "STRING"),
@@ -324,7 +330,8 @@ _CONNECTION_ID = [("connection_id", "STRING")]
 for _t in ("source_inventory", "normalized_source_inventory",
            "resolved_column_mappings", "mapping_validation_results",
            "table_load_decisions", "review_queue", "table_run_log",
-           "delta_sync_queue", "reconciliation_results"):
+           "delta_sync_queue", "reconciliation_results", "dq_rule",
+           "dq_result", "dq_quarantine"):
     _ensure_columns(_t, _CONNECTION_ID)
 
 # Retry / failure-classification lineage on the shared audit table (used by both
@@ -348,55 +355,282 @@ _ensure_columns("delta_sync_queue", [
     ("checkpoint_committed_ts", "TIMESTAMP"), ("finalized_ts", "TIMESTAMP"),
 ])
 
-# Backfill source_table_id for existing control rows that predate this upgrade
-# and have the source fields needed to compute a deterministic id. Rows missing
-# source_schema/source_table cannot be uniquely backfilled; they are preserved
-# but stay unusable by new runs (which require a source_table_id).
-_existing = spark.sql(f"""
-    SELECT source_system, source_server, source_database,
-           source_schema, source_table
-    FROM {ctrl('source_table_control')}
-    WHERE (source_table_id IS NULL OR source_table_id = '')
-      AND source_schema IS NOT NULL AND source_table IS NOT NULL
+# Identity upgrades are never performed during ordinary initialization. Legacy
+# rows remain untouched until the dry-run-first deployment migration is run.
+_legacy_identity_count = spark.sql(f"""
+  SELECT count(*) AS c
+  FROM {ctrl('source_table_control')}
+  WHERE source_identity_version IS NULL OR source_identity_version <> 2
+""").collect()[0]["c"]
+if _legacy_identity_count:
+  print(f"Found {_legacy_identity_count} legacy source identity row(s); run "
+      "deployment/NB_MigrateSourceTableIdentityV2 manually.")
+
+# Validate ownership metadata after all additive schema upgrades. Counts and
+# identifiers are safe to report; secret_scope values are never selected.
+_control_validation_errors = []
+_validation_checks = (
+  ("BLANK_CONNECTION_ID", f"""
+    SELECT count(*) AS c FROM {ctrl('source_connection')}
+    WHERE connection_id IS NULL OR trim(connection_id) = ''
+  """),
+  ("DUPLICATE_CONNECTION_ID", f"""
+    SELECT count(*) AS c FROM (
+      SELECT connection_id FROM {ctrl('source_connection')}
+      GROUP BY connection_id HAVING count(*) > 1
+    )
+  """),
+  ("BLANK_CONNECTION_SOURCE_SYSTEM", f"""
+    SELECT count(*) AS c FROM {ctrl('source_connection')}
+    WHERE source_system IS NULL OR trim(source_system) = ''
+  """),
+  ("BLANK_SECRET_SCOPE", f"""
+    SELECT count(*) AS c FROM {ctrl('source_connection')}
+    WHERE secret_scope IS NULL OR trim(secret_scope) = ''
+  """),
+  ("ACTIVE_CONNECTION_NOT_VALID", f"""
+    SELECT count(*) AS c FROM {ctrl('source_connection')}
+        WHERE is_active = true
+          AND (connection_status IS NULL OR connection_status <> 'VALID')
+  """),
+  ("BLANK_TABLE_CONNECTION_ID", f"""
+    SELECT count(*) AS c FROM {ctrl('source_table_control')}
+    WHERE connection_id IS NULL OR trim(connection_id) = ''
+  """),
+  ("BLANK_SOURCE_TABLE_ID", f"""
+    SELECT count(*) AS c FROM {ctrl('source_table_control')}
+    WHERE source_table_id IS NULL OR trim(source_table_id) = ''
+  """),
+  ("DUPLICATE_TABLE_OWNERSHIP", f"""
+    SELECT count(*) AS c FROM (
+      SELECT connection_id, source_table_id
+      FROM {ctrl('source_table_control')}
+      GROUP BY connection_id, source_table_id HAVING count(*) > 1
+    )
+  """),
+  ("ORPHAN_TABLE_CONNECTION", f"""
+    SELECT count(*) AS c
+    FROM {ctrl('source_table_control')} c
+    LEFT ANTI JOIN {ctrl('source_connection')} sc
+      ON c.connection_id = sc.connection_id
+  """),
+  ("TABLE_CONNECTION_SOURCE_MISMATCH", f"""
+    SELECT count(*) AS c
+    FROM {ctrl('source_table_control')} c
+    JOIN {ctrl('source_connection')} sc
+      ON c.connection_id = sc.connection_id
+        WHERE c.source_system IS NULL OR trim(c.source_system) = ''
+          OR lower(trim(c.source_system)) <> lower(trim(sc.source_system))
+  """),
+    ("TABLE_CONNECTION_ENDPOINT_MISMATCH", f"""
+        SELECT count(*) AS c
+        FROM {ctrl('source_table_control')} c
+        JOIN {ctrl('source_connection')} sc
+          ON c.connection_id = sc.connection_id
+        WHERE (c.source_server IS NOT NULL AND sc.source_server IS NOT NULL
+               AND lower(trim(c.source_server)) <>
+                   lower(trim(sc.source_server)))
+           OR (c.source_database IS NOT NULL AND sc.source_database IS NOT NULL
+               AND lower(trim(c.source_database)) <>
+                   lower(trim(sc.source_database)))
+    """),
+  ("ACTIVE_TABLE_INVALID_CONNECTION", f"""
+    SELECT count(*) AS c
+    FROM {ctrl('source_table_control')} c
+    JOIN {ctrl('source_connection')} sc
+      ON c.connection_id = sc.connection_id
+    WHERE c.is_active = true AND (
+          coalesce(sc.is_active, false) <> true
+          OR sc.connection_status IS NULL OR sc.connection_status <> 'VALID'
+      OR sc.secret_scope IS NULL OR trim(sc.secret_scope) = '')
+  """),
+  ("ACTIVE_TABLE_INCOMPLETE_TARGET", f"""
+    SELECT count(*) AS c FROM {ctrl('source_table_control')}
+    WHERE is_active = true AND (
+      target_catalog IS NULL OR trim(target_catalog) = ''
+      OR target_schema IS NULL OR trim(target_schema) = ''
+      OR target_table IS NULL OR trim(target_table) = '')
+  """),
+    ("DUPLICATE_SOURCE_ASSESSMENT_KEY", f"""
+        SELECT count(*) AS c FROM (
+          SELECT connection_id, assessment_id, source_schema,
+                 object_type, object_name
+          FROM {ctrl('source_assessment')}
+          GROUP BY connection_id, assessment_id, source_schema,
+                   object_type, object_name
+          HAVING count(*) > 1
+        )
+    """),
+    ("DUPLICATE_SOURCE_INVENTORY_KEY", f"""
+        SELECT count(*) AS c FROM (
+          SELECT run_id, connection_id, source_table_id, column_name
+          FROM {ctrl('source_inventory')}
+          GROUP BY run_id, connection_id, source_table_id, column_name
+          HAVING count(*) > 1
+        )
+    """),
+    ("DUPLICATE_NORMALIZED_INVENTORY_KEY", f"""
+        SELECT count(*) AS c FROM (
+          SELECT run_id, connection_id, source_table_id, column_name
+          FROM {ctrl('normalized_source_inventory')}
+          GROUP BY run_id, connection_id, source_table_id, column_name
+          HAVING count(*) > 1
+        )
+    """),
+    ("DUPLICATE_RESOLVED_MAPPING_KEY", f"""
+        SELECT count(*) AS c FROM (
+          SELECT run_id, connection_id, source_table_id, column_name
+          FROM {ctrl('resolved_column_mappings')}
+          GROUP BY run_id, connection_id, source_table_id, column_name
+          HAVING count(*) > 1
+        )
+    """),
+    ("DUPLICATE_MAPPING_VALIDATION_KEY", f"""
+        SELECT count(*) AS c FROM (
+          SELECT run_id, connection_id, source_table_id, column_name, rule
+          FROM {ctrl('mapping_validation_results')}
+          GROUP BY run_id, connection_id, source_table_id, column_name, rule
+          HAVING count(*) > 1
+        )
+    """),
+    ("DUPLICATE_TABLE_DECISION_KEY", f"""
+        SELECT count(*) AS c FROM (
+          SELECT run_id, connection_id, source_table_id
+          FROM {ctrl('table_load_decisions')}
+          GROUP BY run_id, connection_id, source_table_id
+          HAVING count(*) > 1
+        )
+    """),
+    ("DUPLICATE_REVIEW_QUEUE_KEY", f"""
+        SELECT count(*) AS c FROM (
+          SELECT run_id, connection_id, source_table_id
+          FROM {ctrl('review_queue')}
+          GROUP BY run_id, connection_id, source_table_id
+          HAVING count(*) > 1
+        )
+    """),
+    ("DUPLICATE_TABLE_RUN_KEY", f"""
+        SELECT count(*) AS c FROM (
+          SELECT run_id, connection_id, source_table_id, operation,
+                 coalesce(attempt_number, 1) AS attempt_number
+          FROM {ctrl('table_run_log')}
+          GROUP BY run_id, connection_id, source_table_id, operation,
+                   coalesce(attempt_number, 1)
+          HAVING count(*) > 1
+        )
+    """),
+    ("DUPLICATE_DELTA_QUEUE_KEY", f"""
+        SELECT count(*) AS c FROM (
+          SELECT run_id, connection_id, source_table_id
+          FROM {ctrl('delta_sync_queue')}
+          GROUP BY run_id, connection_id, source_table_id
+          HAVING count(*) > 1
+        )
+    """),
+    ("DUPLICATE_RECONCILIATION_KEY", f"""
+        SELECT count(*) AS c FROM (
+          SELECT run_id, connection_id, source_table_id, check_type
+          FROM {ctrl('reconciliation_results')}
+          GROUP BY run_id, connection_id, source_table_id, check_type
+          HAVING count(*) > 1
+        )
+    """),
+    ("DUPLICATE_DQ_RULE_KEY", f"""
+        SELECT count(*) AS c FROM (
+          SELECT connection_id, source_table_id, rule_id
+          FROM {ctrl('dq_rule')}
+          GROUP BY connection_id, source_table_id, rule_id
+          HAVING count(*) > 1
+        )
+    """),
+    ("DUPLICATE_DQ_RESULT_KEY", f"""
+        SELECT count(*) AS c FROM (
+          SELECT run_id, connection_id, source_table_id,
+                 coalesce(rule_id, rule_type) AS rule_identity
+          FROM {ctrl('dq_result')}
+          GROUP BY run_id, connection_id, source_table_id,
+                   coalesce(rule_id, rule_type)
+          HAVING count(*) > 1
+        )
+    """),
+)
+for _code, _query in _validation_checks:
+  _count = spark.sql(_query).collect()[0]["c"]
+  if _count:
+    _control_validation_errors.append(
+      {"code": _code, "count": int(_count)})
+
+_connection_metadata_rows = spark.sql(f"""
+  SELECT connection_id, source_system, source_server, source_database,
+       secret_scope, trust_server_certificate
+  FROM {ctrl('source_connection')}
+  WHERE source_system IS NOT NULL AND trim(source_system) <> ''
 """).collect()
-_backfilled = 0
-_skipped_missing_source = 0
-for _r in _existing:
-    if _r["source_system"] is None or not str(_r["source_system"]).strip():
-        _skipped_missing_source += 1
-        print(f"  [warn] skipped source_table_id backfill for "
-              f"{_r['source_schema']}.{_r['source_table']}: "
-              "source_system is missing; classify this legacy row manually")
-        continue
-    _source_system = require_source_system(
-        _r["source_system"], "legacy source_table_control row")
-    try:
-        _sid = compute_source_table_id(
-            _source_system, _r["source_server"],
-            _r["source_database"], _r["source_schema"], _r["source_table"])
-    except Exception as _e:
-        _safe_error = failcls.sanitize_message(_e)
-        print(f"  [warn] cannot backfill id for "
-              f"{_r['source_schema']}.{_r['source_table']}: {_safe_error[:300]}")
-        continue
-    # Match the historical row on the full identity (null-safe) to set its id.
-    spark.sql(f"""
-        UPDATE {ctrl('source_table_control')}
-        SET source_table_id = {escape_string_literal(_sid)},
-            source_system = {escape_string_literal(_source_system)},
-            updated_ts = current_timestamp()
-        WHERE (source_table_id IS NULL OR source_table_id = '')
-          AND source_schema = {escape_string_literal(_r['source_schema'])}
-          AND source_table = {escape_string_literal(_r['source_table'])}
-          AND ((source_server IS NULL AND {escape_string_literal(_r['source_server'])} IS NULL)
-               OR source_server = {escape_string_literal(_r['source_server'])})
-          AND ((source_database IS NULL AND {escape_string_literal(_r['source_database'])} IS NULL)
-               OR source_database = {escape_string_literal(_r['source_database'])})
-    """)
-    _backfilled += 1
-if _backfilled:
-    print(f"Backfilled source_table_id for {_backfilled} existing control row(s).")
-print(f"Skipped {_skipped_missing_source} legacy row(s) with missing source_system.")
+_unsupported_connections = 0
+_invalid_connection_metadata = 0
+for _connection_row in _connection_metadata_rows:
+  try:
+    _connection_system = require_source_system(
+      _connection_row["source_system"], "registered connection")
+    _connection_adapter = get_source_adapter(_connection_system)
+    _connection_adapter.validate_connection_metadata(
+      _connection_row.asDict())
+  except ValueError as _connection_error:
+    _safe_connection_error = failcls.sanitize_message(_connection_error)
+    if "Unsupported source_system" in _safe_connection_error:
+      _unsupported_connections += 1
+    else:
+      _invalid_connection_metadata += 1
+if _unsupported_connections:
+  _control_validation_errors.append({
+    "code": "UNSUPPORTED_CONNECTION_SOURCE_SYSTEM",
+    "count": _unsupported_connections,
+  })
+if _invalid_connection_metadata:
+  _control_validation_errors.append({
+    "code": "INVALID_CONNECTION_METADATA",
+    "count": _invalid_connection_metadata,
+  })
+
+if _legacy_identity_count:
+  _control_validation_errors.append({
+    "code": "SOURCE_IDENTITY_MIGRATION_REQUIRED",
+    "count": int(_legacy_identity_count),
+  })
+
+_v2_rows = spark.sql(f"""
+  SELECT c.connection_id, c.source_table_id, c.source_system,
+       sc.source_server AS source_server,
+       sc.source_database AS source_database,
+       c.source_schema, c.source_table
+  FROM {ctrl('source_table_control')} c
+  JOIN {ctrl('source_connection')} sc
+    ON c.connection_id = sc.connection_id
+  WHERE c.source_identity_version = {SOURCE_IDENTITY_VERSION}
+""").collect()
+_inconsistent_v2 = 0
+for _row in _v2_rows:
+  try:
+    _expected_id = compute_source_table_id(
+      _row["connection_id"], _row["source_system"],
+      _row["source_server"], _row["source_database"],
+      _row["source_schema"], _row["source_table"])
+    if _row["source_table_id"] != _expected_id:
+      _inconsistent_v2 += 1
+  except Exception:
+    _inconsistent_v2 += 1
+if _inconsistent_v2:
+  _control_validation_errors.append({
+    "code": "INCONSISTENT_SOURCE_IDENTITY_V2",
+    "count": _inconsistent_v2,
+  })
+
+if _control_validation_errors:
+  print("Control-table validation failed:",
+      json.dumps(_control_validation_errors))
+  raise RuntimeError(
+    "Control-table ownership validation failed; correct registry metadata "
+    "or run the explicit identity-v2 migration")
 
 print("All control & audit tables created.")
 
@@ -412,18 +646,23 @@ print("All control & audit tables created.")
 # COMMAND ----------
 
 dbutils.widgets.dropdown("seed_sqlserver_examples", "false", ["true", "false"])
+dbutils.widgets.text("seed_oracle_connection_id", "")
+dbutils.widgets.text("seed_sqlserver_connection_id", "")
 seed_sqlserver = dbutils.widgets.get("seed_sqlserver_examples") == "true"
 
 if seed_poc:
     from pyspark.sql import Row
     now = now_utc()
 
-    def _seed_row(source_system, source_server, source_database,
+    def _seed_row(connection_id, source_system, source_server, source_database,
                   source_schema, source_table, target_schema, target_table):
-        sid = compute_source_table_id(source_system, source_server,
-                                      source_database, source_schema, source_table)
+        sid = compute_source_table_id(
+            connection_id, source_system, source_server, source_database,
+            source_schema, source_table)
         return Row(
-            source_table_id=sid, source_system=source_system,
+            source_table_id=sid, connection_id=connection_id,
+            source_identity_version=SOURCE_IDENTITY_VERSION,
+            legacy_source_table_id=None, source_system=source_system,
             source_server=source_server, source_database=source_database,
             source_schema=source_schema, source_table=source_table,
             target_catalog=CATALOG, target_schema=target_schema,
@@ -436,18 +675,40 @@ if seed_poc:
             current_status="REGISTERED", error_message=None,
             created_ts=now, updated_ts=now)
 
+    oracle_connection_id = require_connection_id(
+        dbutils.widgets.get("seed_oracle_connection_id"), "POC Oracle seed")
+    oracle_connection = require_valid_connection(oracle_connection_id, "oracle")
+    oracle_data = oracle_connection.asDict()
     seed = [
-        _seed_row("oracle", None, None, "HR", "EMPLOYEES", "hr", "employees"),
-        _seed_row("oracle", None, None, "SALES", "CUSTOMERS", "sales", "customers"),
+        _seed_row(
+            oracle_connection_id, "oracle", oracle_data.get("source_server"),
+            oracle_data.get("source_database"), "HR", "EMPLOYEES",
+            "hr", "employees"),
+        _seed_row(
+            oracle_connection_id, "oracle", oracle_data.get("source_server"),
+            oracle_data.get("source_database"), "SALES", "CUSTOMERS",
+            "sales", "customers"),
     ]
-    # Optional, clearly-labeled SQL Server example registrations. These require a
-    # populated source_database and the sqlserver-migration secret scope.
+    # Optional, clearly-labeled SQL Server example registrations. These require
+    # a populated source_database on the selected registered connection.
     if seed_sqlserver:
+        sqlserver_connection_id = require_connection_id(
+            dbutils.widgets.get("seed_sqlserver_connection_id"),
+            "POC SQL Server seed")
+        sqlserver_connection = require_valid_connection(
+            sqlserver_connection_id, "sqlserver")
+        sqlserver_data = sqlserver_connection.asDict()
         seed += [
-            _seed_row("sqlserver", "sql-server-name", "AdventureWorks",
-                      "dbo", "Employees", "adventureworks_dbo", "employees"),
-            _seed_row("sqlserver", "sql-server-name", "AdventureWorks",
-                      "Sales", "Customer", "adventureworks_sales", "customer"),
+            _seed_row(
+                sqlserver_connection_id, "sqlserver",
+                sqlserver_data.get("source_server"),
+                sqlserver_data.get("source_database"), "dbo", "Employees",
+                "adventureworks_dbo", "employees"),
+            _seed_row(
+                sqlserver_connection_id, "sqlserver",
+                sqlserver_data.get("source_server"),
+                sqlserver_data.get("source_database"), "Sales", "Customer",
+                "adventureworks_sales", "customer"),
         ]
 
     df_new = spark.createDataFrame(seed)
@@ -457,10 +718,31 @@ if seed_poc:
     spark.sql(f"""
         MERGE INTO {ctrl('source_table_control')} t
         USING seed_rows s
-        ON t.source_table_id = s.source_table_id
-        WHEN NOT MATCHED THEN INSERT *
+        ON t.connection_id = s.connection_id
+       AND t.source_table_id = s.source_table_id
+        WHEN NOT MATCHED THEN INSERT (
+          source_table_id, connection_id, source_identity_version,
+          legacy_source_table_id, source_system, source_server,
+          source_database, source_schema, source_table, target_catalog,
+          target_schema, target_table, is_active, mapping_status,
+          table_decision, load_strategy, delete_policy, primary_key_columns,
+          watermark_column, watermark_data_type, last_watermark_value,
+          initial_load_completed, last_successful_run_id,
+          last_successful_run_ts, current_status, error_message,
+          created_ts, updated_ts
+        ) VALUES (
+          s.source_table_id, s.connection_id, s.source_identity_version,
+          s.legacy_source_table_id, s.source_system, s.source_server,
+          s.source_database, s.source_schema, s.source_table, s.target_catalog,
+          s.target_schema, s.target_table, s.is_active, s.mapping_status,
+          s.table_decision, s.load_strategy, s.delete_policy,
+          s.primary_key_columns, s.watermark_column, s.watermark_data_type,
+          s.last_watermark_value, s.initial_load_completed,
+          s.last_successful_run_id, s.last_successful_run_ts,
+          s.current_status, s.error_message, s.created_ts, s.updated_ts
+        )
     """)
-    print("Seeded POC control rows (merge on source_table_id, no duplicates).")
+    print("Seeded POC control rows (composite ownership key, no duplicates).")
 else:
     print("Skipped POC seeding.")
 

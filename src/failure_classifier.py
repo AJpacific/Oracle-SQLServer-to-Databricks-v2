@@ -281,15 +281,18 @@ def validate_pipeline_operation(pipeline_name, operation):
 
 
 def retry_work_identity(row):
-    """Return the source-table and operation identity of one failed work row."""
+    """Return the connection/table/operation identity of failed work."""
     item = _row_dict(row)
+    connection_id = str(item.get("connection_id") or "").strip()
     source_table_id = str(item.get("source_table_id") or "").strip()
     operation = str(item.get("operation") or "").strip().upper()
+    if not connection_id:
+        raise ValueError("retry row requires connection_id")
     if not source_table_id:
         raise ValueError("retry row requires source_table_id")
     if not operation:
         raise ValueError("retry row requires operation")
-    return source_table_id, operation
+    return connection_id, source_table_id, operation
 
 
 def _previous_attempt(row):
@@ -317,7 +320,7 @@ def _latest_attempt_rank(row):
 
 
 def latest_failed_attempts(records):
-    """Select the latest FAILED row per source_table_id and operation."""
+    """Select the latest FAILED row per connection/table/operation."""
     selected = {}
     for record in records or []:
         item = _row_dict(record)
@@ -349,10 +352,10 @@ def select_failed_attempts(records, pipeline_name, operation=""):
 
 def _manual_review_item(row, previous_attempt, reason):
     item = _row_dict(row)
-    source_table_id, operation = retry_work_identity(item)
+    connection_id, source_table_id, operation = retry_work_identity(item)
     return {
         "source_table_id": source_table_id,
-        "connection_id": item.get("connection_id"),
+        "connection_id": connection_id,
         "operation": operation,
         "failure_stage": item.get("failure_stage"),
         "error_category": item.get("error_category"),
@@ -366,7 +369,7 @@ def build_retry_item(row, child_run_id, parent_run_id, pipeline_name,
     """Build one executable item or one non-executable manual-review item."""
     item = _row_dict(row)
     pipeline = normalize_pipeline_name(pipeline_name)
-    source_table_id, operation = retry_work_identity(item)
+    connection_id, source_table_id, operation = retry_work_identity(item)
     previous_attempt = _previous_attempt(item)
     if operation not in PIPELINE_OPERATIONS[pipeline]:
         return None, _manual_review_item(
@@ -396,7 +399,7 @@ def build_retry_item(row, child_run_id, parent_run_id, pipeline_name,
     work_item = {
         "run_id": child_run_id,
         "parent_run_id": parent_run_id,
-        "connection_id": item.get("connection_id"),
+        "connection_id": connection_id,
         "source_table_id": source_table_id,
         "pipeline_name": pipeline,
         "operation": operation,
@@ -418,6 +421,7 @@ def deduplicate_retry_items(items):
     for raw_item in items or []:
         item = dict(raw_item)
         key = (
+            item.get("connection_id"),
             item.get("source_table_id"),
             item.get("operation"),
             item.get("recovery_action"),
