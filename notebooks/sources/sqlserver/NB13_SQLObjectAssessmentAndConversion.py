@@ -63,35 +63,68 @@ def _q(query):
     return read_source_jdbc(adapter, query, source_server=src_server,
                             source_database=src_db).collect()
 
+
+discovery_errors = []
+
+
+def _capture_discovery_error(stage, error, source_schema=None):
+    safe_message = failcls.sanitize_message(error)[:400]
+    detail = {
+        "stage": stage,
+        "source_schema": source_schema,
+        "exception_type": type(error).__name__,
+        "message": safe_message,
+    }
+    discovery_errors.append(detail)
+    location = f" for schema {source_schema}" if source_schema else ""
+    print(f"  [warn] {stage}{location}: {detail['exception_type']}: "
+          f"{safe_message}")
+
 # COMMAND ----------
 
-schemas = resolve_assessment_schemas(adapter, src_db, include_schemas, [])
+schema_discovery_failed = False
+try:
+    schemas = resolve_assessment_schemas(adapter, src_db, include_schemas, [])
+except Exception as e:
+    schemas = []
+    schema_discovery_failed = True
+    _capture_discovery_error("schema_discovery", e)
 
 # ---- SQL Server definition extraction (sys.sql_modules) --------------------
 definitions = []       # (schema, object_name, normalized_type, definition_text)
 skipped_types = []
+discovered_objects = 0
+inaccessible_definitions = 0
+object_discovery_attempts = 0
+object_discovery_successes = 0
 
 for schema in schemas:
+    object_discovery_attempts += 1
     try:
-        for m in _q(adapter.module_definition_query(src_db, schema)):
-            raw_code = m["OBJECT_TYPE"]
-            otype = adapter.normalize_sql_object_type(raw_code)
-            if not otype:
-                skipped_types.append((schema, m["OBJECT_NAME"], raw_code))
-                continue
-            if otype not in include_types:
-                continue
-            # A NULL definition means encrypted or not visible to this login.
-            definitions.append((schema, m["OBJECT_NAME"], otype,
-                                m["DEFINITION_TEXT"]))
+        modules = _q(adapter.module_definition_query(src_db, schema))
+        object_discovery_successes += 1
     except Exception as e:
-        print(f"  [warn] SQL Server module discovery {schema}: "
-              f"{failcls.sanitize_message(e)[:200]}")
+        modules = []
+        _capture_discovery_error("module_discovery", e, schema)
+    for m in modules:
+        raw_code = m["OBJECT_TYPE"]
+        otype = adapter.normalize_sql_object_type(raw_code)
+        if not otype:
+            skipped_types.append((schema, m["OBJECT_NAME"], raw_code))
+            discovered_objects += 1
+            continue
+        if otype not in include_types:
+            continue
+        discovered_objects += 1
+        # A NULL definition means encrypted or not visible to this login.
+        definition = m["DEFINITION_TEXT"]
+        if not definition or not str(definition).strip():
+            inaccessible_definitions += 1
+        definitions.append((schema, m["OBJECT_NAME"], otype, definition))
 
 print(f"Collected {len(definitions)} SQL Server object definition(s).")
 if skipped_types:
-    print(f"Skipped {len(skipped_types)} unsupported module type(s); "
-          f"examples: {skipped_types[:5]}")
+    print(f"Skipped {len(skipped_types)} unsupported module type(s).")
 
 # COMMAND ----------
 
@@ -107,7 +140,28 @@ records = [
 summary = persist_sql_object_records(records)
 print("Complexity summary:", summary)
 
-dbutils.notebook.exit(json.dumps({
-    "status": "SUCCEEDED", "run_id": run_id, "connection_id": connection_id,
-    "assessment_id": assessment_id, "objects": len(records), "summary": summary,
-}))
+business_status = sqlobj_common.discovery_business_status(
+    schema_discovery_failed=schema_discovery_failed,
+    object_discovery_attempts=object_discovery_attempts,
+    object_discovery_successes=object_discovery_successes,
+    discovery_failures=len(discovery_errors),
+    inaccessible_definitions=inaccessible_definitions,
+    unsupported_object_types=len(skipped_types))
+sql_object_result = {
+    "status": "SUCCEEDED",
+    "execution_status": "SUCCEEDED",
+    "business_status": business_status,
+    "run_id": run_id,
+    "connection_id": connection_id,
+    "assessment_id": assessment_id,
+    "discovered_objects": discovered_objects,
+    "persisted_objects": len(records),
+    "inaccessible_definitions": inaccessible_definitions,
+    "unsupported_object_types": len(skipped_types),
+    "discovery_failures": len(discovery_errors),
+    "errors": discovery_errors[:sqlobj_common.DISCOVERY_ERROR_LIMIT],
+    # Backward-compatible aliases.
+    "objects": len(records),
+    "summary": summary,
+}
+dbutils.notebook.exit(json.dumps(sql_object_result))

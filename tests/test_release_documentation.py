@@ -104,6 +104,16 @@ class TestReleaseDocumentation(unittest.TestCase):
         self.assertIn("cannot be inferred from unit tests", installation)
         self.assertIn("cannot validate a deployed Databricks Job", jobs)
 
+    def test_targeted_safety_behavior_is_documented(self):
+        combined = self.readme + self.supported + self.checklist
+        self.assertIn("ESTIMATED_8K_BLOCKS", combined)
+        self.assertIn("show_sample_values", combined)
+        self.assertIn("business_status=PARTIAL", combined)
+        self.assertIn("partial inventory", combined.lower())
+        for technology in ("Spark", "JDBC", "Delta", "Oracle", "SQL Server",
+                           "Databricks Job"):
+            self.assertIn(technology, combined)
+
 
 class TestSharedNotebookDescriptions(unittest.TestCase):
     def _top(self, name):

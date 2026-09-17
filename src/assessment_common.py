@@ -23,6 +23,9 @@ ESTIMATED = "ESTIMATED"      # Oracle optimizer dictionary statistics
 UNAVAILABLE = "UNAVAILABLE"  # not applicable / not retrievable
 ROW_COUNT_METHODS = (CATALOG, ESTIMATED, UNAVAILABLE)
 
+ASSESSMENT_ERROR_LIMIT = 20
+MANDATORY_DISCOVERY_STAGES = ("schema_discovery", "table_discovery")
+
 OBJECT_TYPES = ("TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE",
                 "PACKAGE_BODY")
 
@@ -153,3 +156,13 @@ def summarize_compatibility(records):
         status = r.get("compatibility_status")
         summary[status] = summary.get(status, 0) + 1
     return summary
+
+
+def assessment_business_status(errors):
+    """Return coverage status from sanitized discovery error records."""
+    stages = {error.get("stage") for error in (errors or [])}
+    if stages.intersection(MANDATORY_DISCOVERY_STAGES):
+        return "FAILED"
+    if errors:
+        return "PARTIAL"
+    return "COMPLETE"

@@ -415,7 +415,17 @@ class TestSourceContractParity(unittest.TestCase):
     @staticmethod
     def _exit_keys(code):
         tail = code.split("dbutils.notebook.exit(")[-1]
-        return set(re.findall(r'"([a-z_]+)":', tail))
+        keys = set(re.findall(r'"([a-z_]+)":', tail))
+        if keys:
+            return keys
+        result = re.search(r"json\.dumps\(([A-Za-z_][A-Za-z0-9_]*)\)", tail)
+        if not result:
+            return set()
+        assignment = code.rsplit(f"{result.group(1)} = {{", 1)
+        if len(assignment) != 2:
+            return set()
+        result_dict = assignment[1].split("\n}", 1)[0]
+        return set(re.findall(r'"([a-z_]+)":', result_dict))
 
     def test_connection_notebook_contract(self):
         widgets = [self._widgets(source_nb(t, "NB00A_UpsertAndValidateConnection.py"))
@@ -448,21 +458,29 @@ class TestSourceContractParity(unittest.TestCase):
                 for t in SOURCE_TOKENS]
         self.assertEqual(keys[0], keys[1])
         for expected in ("status", "run_id", "connection_id", "assessment_id",
-                         "objects", "summary"):
+                         "objects", "summary", "execution_status",
+                         "business_status", "objects_assessed", "error_count",
+                         "errors", "compatibility_summary"):
             self.assertIn(expected, keys[0])
 
     def test_inventory_notebook_outputs(self):
         keys = [self._exit_keys(source_nb(t, "NB01_SourceInventory.py"))
                 for t in SOURCE_TOKENS]
         self.assertEqual(keys[0], keys[1])
-        for expected in ("status", "run_id", "connection_id", "source_system"):
+        for expected in ("status", "run_id", "connection_id", "source_system",
+                         "execution_status", "business_status",
+                         "tables_succeeded", "tables_failed", "columns_written"):
             self.assertIn(expected, keys[0])
 
     def test_sql_object_notebook_outputs(self):
         keys = [self._exit_keys(source_nb(t, "NB13_SQLObjectAssessmentAndConversion.py"))
                 for t in SOURCE_TOKENS]
         self.assertEqual(keys[0], keys[1])
-        for expected in ("status", "assessment_id", "objects", "summary"):
+        for expected in ("status", "assessment_id", "objects", "summary",
+                         "execution_status", "business_status",
+                         "discovered_objects", "persisted_objects",
+                         "inaccessible_definitions", "unsupported_object_types",
+                         "discovery_failures", "errors"):
             self.assertIn(expected, keys[0])
 
     def test_both_sources_use_shared_persistence(self):

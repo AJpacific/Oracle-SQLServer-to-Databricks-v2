@@ -51,6 +51,33 @@ class TestConnectionRouting(unittest.TestCase):
         self.assertIn("assert_source_system_match", common)
         self.assertIn("not found in source_connection", common)
         self.assertIn("is not VALID", common)
+        self.assertIn("has a blank", common)
+        self.assertIn('"secret_scope"', common)
+
+    def test_routing_requires_registered_table_binding(self):
+        common = shared_nb("_common.py")
+        routed = common.split("def get_source_adapter_routed(", 1)[1]
+        routed = routed.split("def read_source_jdbc(", 1)[0]
+        self.assertIn("require a registered connection_id", routed)
+        self.assertIn("control_repo().get_control_row(src_id)", routed)
+        self.assertIn("control_connection_id != conn_id", routed)
+        self.assertNotIn("get_source_adapter_for_row(", routed)
+
+    def test_registered_connection_metadata_is_authoritative(self):
+        common = shared_nb("_common.py")
+        routed = common.split("def get_source_adapter_routed(", 1)[1]
+        routed = routed.split("def read_source_jdbc(", 1)[0]
+        self.assertIn('(\"source_server\", \"source_database\")', routed)
+        self.assertIn("row_value != registered_value", routed)
+        self.assertNotIn("source_database=d.get", routed)
+
+    def test_shared_operational_notebooks_have_no_source_branches(self):
+        for name in self.ROUTED:
+            code = shared_nb(name).lower()
+            self.assertNotRegex(
+                code,
+                r"if\s+[^\n]*(source_system|src_system)\s*==\s*['\"]",
+                name)
 
     def test_no_legacy_oracle_read_jdbc_outside_common(self):
         for name in SHARED_NOTEBOOKS:
@@ -466,8 +493,31 @@ class TestDiagnostics(unittest.TestCase):
         for token in SOURCE_TOKENS:
             code = source_nb(token, "TEST_CONNECTION.py")
             self.assertIn("sample_count = 0", code)
+            self.assertIn("sample_columns = []", code)
+            self.assertIn("sample_query_succeeded = False", code)
             self.assertIn("meta_count = 0", code)
             self.assertIn("pk_count = 0", code)
+
+    def test_sample_values_default_to_hidden(self):
+        for token in SOURCE_TOKENS:
+            code = source_nb(token, "TEST_CONNECTION.py")
+            self.assertIn(
+                'widgets.dropdown("show_sample_values", "false"', code,
+                token)
+            display_block = code.split("if show_sample_values:")[-1]
+            self.assertIn("sample_df.show(", display_block, token)
+            before_guard = code.split("if show_sample_values:")[-2]
+            self.assertNotIn("sample_df.show(", before_guard, token)
+
+    def test_default_sample_output_contains_no_row_values(self):
+        for token in SOURCE_TOKENS:
+            code = source_nb(token, "TEST_CONNECTION.py")
+            self.assertIn('print("Sample query succeeded.")', code, token)
+            self.assertIn('print("Sample rows returned:", sample_count)',
+                          code, token)
+            self.assertIn('print("Sample column names:", sample_columns)',
+                          code, token)
+            self.assertIn("approved non-sensitive test data", code, token)
 
     def test_registered_connection_is_authority(self):
         for token in SOURCE_TOKENS:

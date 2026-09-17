@@ -9,12 +9,14 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(os.path.dirname(HERE), "src")
-for p in (SRC, os.path.dirname(HERE)):
+for p in (SRC, HERE, os.path.dirname(HERE)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+import assessment_common as assess  # noqa: E402
 import sql_builder as ora  # noqa: E402
 import sqlserver_sql_builder as ss  # noqa: E402
+from _nbsource import source_nb  # noqa: E402
 from crosssourcetypemapper import classify_table_compatibility  # noqa: E402
 from source_adapters.factory import get_source_adapter  # noqa: E402
 
@@ -36,7 +38,11 @@ class TestOracleDiscovery(unittest.TestCase):
         self.assertIn("owner = 'HR'", q)
 
     def test_table_statistics_labelled_estimated(self):
-        self.assertIn("'ESTIMATED' AS ROW_COUNT_METHOD", ora.table_statistics_query())
+        query = ora.table_statistics_query()
+        self.assertIn("'ESTIMATED' AS ROW_COUNT_METHOD", query)
+        self.assertIn("'ESTIMATED_8K_BLOCKS' AS SIZE_MB_METHOD", query)
+        self.assertIn("blocks,0) * 8192", query)
+        self.assertNotIn("'CATALOG'", query)
 
     def test_list_routines_covers_package(self):
         q = ora.list_routines_query()
@@ -132,6 +138,58 @@ class TestCompatibilityClassification(unittest.TestCase):
 
     def test_empty_is_unable(self):
         self.assertEqual(classify_table_compatibility([]), "UNABLE_TO_ASSESS")
+
+
+class TestAssessmentDiscoveryStatus(unittest.TestCase):
+    def test_mandatory_discovery_failure_is_failed(self):
+        for stage in assess.MANDATORY_DISCOVERY_STAGES:
+            self.assertEqual(
+                assess.assessment_business_status([{"stage": stage}]),
+                "FAILED")
+
+    def test_optional_discovery_failure_is_partial(self):
+        self.assertEqual(
+            assess.assessment_business_status([{"stage": "view_discovery"}]),
+            "PARTIAL")
+
+    def test_no_discovery_errors_is_complete(self):
+        self.assertEqual(assess.assessment_business_status([]), "COMPLETE")
+
+    def test_source_notebooks_collect_only_sanitized_errors(self):
+        for source in ("oracle", "sqlserver"):
+            code = source_nb(source, "NB01A_SourceAssessment.py")
+            capture = code.split("def _capture_assessment_error", 1)[1]
+            capture = capture.split("# COMMAND ----------", 1)[0]
+            sanitize = capture.index("failcls.sanitize_message(error)")
+            append = capture.index("assessment_errors.append(detail)")
+            logged = capture.index("print(")
+            self.assertLess(sanitize, append, source)
+            self.assertLess(sanitize, logged, source)
+            self.assertNotIn("str(error)", capture, source)
+
+    def test_source_notebooks_fail_mandatory_coverage(self):
+        for source in ("oracle", "sqlserver"):
+            code = source_nb(source, "NB01A_SourceAssessment.py")
+            self.assertIn(
+                '_capture_assessment_error("schema_discovery", e)', code,
+                source)
+            self.assertIn(
+                '_capture_assessment_error("table_discovery", e, schema)',
+                code, source)
+            result = code.split("business_status =", 1)[1]
+            self.assertIn('if business_status == "FAILED":', result, source)
+            self.assertIn("raise RuntimeError(", result, source)
+
+    def test_source_notebooks_return_bounded_error_details(self):
+        for source in ("oracle", "sqlserver"):
+            code = source_nb(source, "NB01A_SourceAssessment.py")
+            for key in ("execution_status", "business_status",
+                        "objects_assessed", "error_count", "errors",
+                        "compatibility_summary"):
+                self.assertIn(f'"{key}"', code, source)
+            self.assertIn(
+                "assessment_errors[:assess_common.ASSESSMENT_ERROR_LIMIT]",
+                code, source)
 
 
 class TestAdapterDiscoveryRouting(unittest.TestCase):

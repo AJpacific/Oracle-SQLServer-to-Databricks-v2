@@ -19,6 +19,16 @@
   (Oracle `ALL_TABLES.NUM_ROWS` optimizer statistics), or `UNAVAILABLE`. A broad
   assessment never executes a per-table `COUNT(*)` / `COUNT_BIG(*)`, so no label
   claims an executed exact count.
+- Schema and table discovery are mandatory. A failure in either stage fails the
+  assessment task after a sanitized report. Optional view, routine, package,
+  column, or statistics errors are counted and return
+  `execution_status=SUCCEEDED`, `business_status=PARTIAL`; no errors returns
+  `business_status=COMPLETE`.
+- **Oracle `SIZE_MB` is an estimate**, labelled
+  `SIZE_MB_METHOD=ESTIMATED_8K_BLOCKS`. It multiplies optimizer
+  `ALL_TABLES.BLOCKS` metadata by an assumed 8 KiB block size. The current
+  adapter contract has no reliable block-size metadata source that avoids new
+  DBA-level privileges, so this value must not be represented as exact.
 - **SQL Server `SIZE_MB` is the total reserved size** of the table: heap or
   clustered base storage plus all nonclustered indexes, summing `total_pages`
   across every allocation-unit type - IN_ROW_DATA (type 1) and ROW_OVERFLOW_DATA
@@ -37,7 +47,9 @@
   Incoming duplicate `(run_id, source_table_id, column_name)` keys fail before
   persistence. A same-run retry replaces the full table snapshot, so a dropped
   source column is removed; older run history and unrelated tables remain.
-  `INVENTORIED` is set only after the inventory write succeeds.
+  `INVENTORIED` is set only after the inventory write succeeds. The notebook
+  attempts every intended table, then raises `RuntimeError` when any table
+  failed so a partial inventory cannot return task success.
 - Assessment-based, collision-safe registration (`NB01B`). New rows are inactive
   (`REGISTERED`); `MANUAL` / `UNABLE_TO_ASSESS` are never auto-activated.
 - Full load (`NB09`, overwrite) and delta sync (`NB11a`/`NB11b`) with
@@ -68,7 +80,9 @@
   operational state lives on `source_table_control` / `delta_sync_queue`, and
   `failure_stage` + `error_category` carry the precise meaning.
 - SQL-object assessment and limited deterministic conversion drafts (`NB13`);
-  every generated draft is `PENDING_REVIEW` and is never executed.
+  every generated draft is `PENDING_REVIEW` and is never executed. Discovery
+  query failures are counted separately from inaccessible definitions, which
+  persist as `UNABLE_TO_ASSESS`; coverage is `COMPLETE`, `PARTIAL`, or `FAILED`.
 
 ### Datatype mapper ownership
 - Shared mapping calls `adapter.load_type_mapper().map_column(...)` and consumes
@@ -155,8 +169,13 @@
   ever stored in Delta, returned by a task, or written to logs.
 - The registered `source_connection.secret_scope` is **authoritative**. Shared
   code never infers a scope from the source system; a blank registered scope
-  fails clearly. Legacy global scope widgets remain only as a documented
-  compatibility path and are named by the adapter, not by shared code.
+  fails clearly. Source operations require an active `VALID` registered
+  connection and verify that queue/control rows retain the same `connection_id`.
+  Legacy global scope widgets remain only for explicit diagnostic compatibility
+  and are named by the adapter, not by shared operational code.
+- Connection diagnostics report sample-query success, row count, and column
+  names only. `show_sample_values` defaults to `false`; enabling it prints a
+  warning and is permitted only with approved non-sensitive test data.
 - An unregistered source fails explicitly. It never falls through to Oracle or
   SQL Server behavior.
 - Legacy control rows with missing `source_system` no longer run. NB00 skips
@@ -190,11 +209,10 @@ mapping regressions, and static notebook/modularity contracts. They do not
 establish runtime production readiness.
 
 **NOT executed** (requires a live environment; nothing below is claimed as
-passing): Spark execution, Delta MERGE/DELETE, Unity Catalog permissions, JDBC
-authentication and networking, Oracle dictionary and SQL Server catalog grants,
-Databricks job/ForEach orchestration, task-value propagation, secret-scope
-resolution, and the numeric accuracy of SQL Server `SIZE_MB` and `ROW_COUNT`
-against a real instance.
+passing): Spark execution, JDBC authentication/networking, Delta operations,
+Unity Catalog permissions, Oracle and SQL Server behavior/permissions,
+Databricks Job/ForEach orchestration, task-value propagation, secret-scope
+resolution, and live validation of reported metadata values.
 
 Use `docs/production_readiness_checklist.md` for repository and live evidence.
 Allowed statuses are `NOT_EXECUTED`, `PASSED`, `FAILED`, `BLOCKED`, and

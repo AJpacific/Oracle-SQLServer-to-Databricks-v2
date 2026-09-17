@@ -1,8 +1,8 @@
 # Production readiness checklist
 
 This checklist separates repository evidence from live runtime evidence. Pure
-Python tests and static scans do not validate Spark, Delta, JDBC, Unity Catalog,
-source permissions, or Databricks Job orchestration.
+Python tests and static scans do not prove live Spark, JDBC, Delta, Oracle,
+SQL Server, Unity Catalog, or Databricks Job readiness.
 
 Allowed status values:
 
@@ -53,6 +53,8 @@ cannot be `READY` while required live checks remain `NOT_EXECUTED`.
 | Oracle secret resolution | Databricks workspace | Required secret keys resolve only at runtime | Not recorded | Redacted validation evidence | NOT_EXECUTED | TBD | No secret stored in Delta |
 | Oracle data dictionary permissions | Oracle | Required `ALL_*` metadata and definition views are readable | Not recorded | Permission review and queries | NOT_EXECUTED | TBD | Least privilege |
 | Oracle metadata discovery | Databricks and Oracle | Schemas, tables, columns, keys, statistics, and object types are discovered correctly | Not recorded | Assessment/inventory runs | NOT_EXECUTED | TBD | Include casing behavior |
+| Oracle SIZE_MB estimate | Databricks and Oracle | `ESTIMATED_8K_BLOCKS` is understood and compared with approved metadata for representative tables | Not recorded | Comparison output | NOT_EXECUTED | TBD | Do not treat the 8 KiB assumption as exact |
+| Oracle diagnostic sample privacy | Databricks and Oracle | Default diagnostic output contains row count and column names but no source values | Not recorded | Redacted diagnostic run | NOT_EXECUTED | TBD | Leave `show_sample_values=false` |
 | Oracle full extraction | Databricks and Oracle | Small selected table extracts and overwrites Bronze with exact count | Not recorded | Source/target queries and run URL | NOT_EXECUTED | TBD | Verify no cross-connection work |
 | Oracle incremental extraction | Databricks and Oracle | Frozen temporal interval returns exactly expected rows | Not recorded | Queue bounds and source query evidence | NOT_EXECUTED | TBD | Test retry with newer rows |
 | Oracle datatype round trips | Databricks and Oracle | Representative mapped values preserve documented fidelity | Not recorded | Source/Bronze comparison | NOT_EXECUTED | TBD | Include NUMBER and temporal families |
@@ -70,6 +72,7 @@ cannot be `READY` while required live checks remain `NOT_EXECUTED`.
 | SQL Server secret resolution | Databricks workspace | Required secret keys resolve only at runtime | Not recorded | Redacted validation evidence | NOT_EXECUTED | TBD | No secret stored in Delta |
 | SQL Server database selection | Databricks and SQL Server | Registered `source_database` is authoritative and queries target it | Not recorded | Diagnostic and catalog queries | NOT_EXECUTED | TBD | Blank database must fail |
 | SQL Server catalog permissions | SQL Server | Required `sys.*` metadata and definition views are readable | Not recorded | Permission review and queries | NOT_EXECUTED | TBD | Include VIEW DEFINITION |
+| SQL Server diagnostic sample privacy | Databricks and SQL Server | Default diagnostic output contains row count and column names but no source values | Not recorded | Redacted diagnostic run | NOT_EXECUTED | TBD | Leave `show_sample_values=false` |
 | Hidden/computed metadata | Databricks and SQL Server | Hidden columns are blocked/excluded and computed columns require review | Not recorded | Inventory/mapping rows | NOT_EXECUTED | TBD | Verify identity metadata too |
 | Rowversion handling | Databricks and SQL Server | `timestamp`/`rowversion` maps to BINARY and is never a temporal watermark | Not recorded | Mapping and extraction comparison | NOT_EXECUTED | TBD | Verify 8-byte values |
 | Datetime2 precision | Databricks and SQL Server | `datetime2` uses documented six-digit source policy and Delta microseconds | Not recorded | Boundary and round-trip evidence | NOT_EXECUTED | TBD | Include a seventh-digit sample |
@@ -116,8 +119,8 @@ cannot be `READY` while required live checks remain `NOT_EXECUTED`.
 | Run shared control initialization | Live Databricks | NB00 succeeds idempotently | Not recorded | Run URL | NOT_EXECUTED | TBD | Review skipped legacy count |
 | Validate Oracle connection | Live Databricks and Oracle | Registered Oracle connection becomes VALID | Not recorded | Run URL and connection row | NOT_EXECUTED | TBD | Output sanitized |
 | Validate SQL Server connection | Live Databricks and SQL Server | Registered SQL Server connection becomes VALID | Not recorded | Run URL and connection row | NOT_EXECUTED | TBD | Output sanitized |
-| Run Oracle source assessment | Live Databricks and Oracle | Selected metadata is assessed with honest count methods | Not recorded | Assessment rows and run URL | NOT_EXECUTED | TBD | No per-table count claim |
-| Run SQL Server source assessment | Live Databricks and SQL Server | Selected metadata is assessed with honest count methods | Not recorded | Assessment rows and run URL | NOT_EXECUTED | TBD | SIZE_MB remains unclaimed pending comparison |
+| Run Oracle source assessment | Live Databricks and Oracle | Complete discovery returns `business_status=COMPLETE`; optional failure returns `PARTIAL`; mandatory failure fails the task | Not recorded | Assessment rows and run URL | NOT_EXECUTED | TBD | No per-table count claim; SIZE_MB assumes 8 KiB blocks |
+| Run SQL Server source assessment | Live Databricks and SQL Server | Complete discovery returns `business_status=COMPLETE`; optional failure returns `PARTIAL`; mandatory failure fails the task | Not recorded | Assessment rows and run URL | NOT_EXECUTED | TBD | SIZE_MB remains unclaimed pending comparison |
 | Run Oracle inventory twice with same run ID | Live Databricks and Oracle | Second run exactly replaces each same-run table snapshot | Not recorded | Two run attempts | NOT_EXECUTED | TBD | Use stable source metadata first |
 | Verify no duplicate Oracle inventory rows | Live Databricks | Grouped merge keys have count 1 | Not recorded | SQL query output | NOT_EXECUTED | TBD | Key is run/table/column |
 | Run SQL Server inventory twice with same run ID | Live Databricks and SQL Server | Second run exactly replaces each same-run table snapshot | Not recorded | Two run attempts | NOT_EXECUTED | TBD | Include computed/hidden metadata |
@@ -131,6 +134,7 @@ cannot be `READY` while required live checks remain `NOT_EXECUTED`.
 | Select one small Oracle table | Live Oracle and Databricks | Test table and connection are reviewed and isolated | Not recorded | Test manifest | NOT_EXECUTED | TBD | Non-sensitive sample |
 | Select one small SQL Server table | Live SQL Server and Databricks | Test table and connection are reviewed and isolated | Not recorded | Test manifest | NOT_EXECUTED | TBD | Non-sensitive sample |
 | Inventory both tables | Live Databricks and sources | Complete current metadata persists | Not recorded | Inventory rows | NOT_EXECUTED | TBD | One connection at a time |
+| Force one inventory table failure | Live Databricks and sources | Remaining intended tables are attempted, counts are safe, and the inventory task fails | Not recorded | Failed task run and inventory audit | NOT_EXECUTED | TBD | Downstream tasks must not continue |
 | Normalize both tables | Live Databricks | Target-neutral rows and schema hashes persist | Not recorded | Normalized rows | NOT_EXECUTED | TBD | Explicit source_system retained |
 | Map both tables | Live Databricks | Registered adapter mapper produces expected outcomes | Not recorded | Mapping rows | NOT_EXECUTED | TBD | Compare regression expectations |
 | Validate mappings | Live Databricks | Policy findings match approved source behavior | Not recorded | Validation rows | NOT_EXECUTED | TBD | Unsafe columns do not pass |

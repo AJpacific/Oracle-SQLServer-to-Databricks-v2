@@ -175,5 +175,41 @@ class TestInventoryPersistenceWiring(unittest.TestCase):
                 source)
 
 
+class TestInventoryTaskStatus(unittest.TestCase):
+    def _result_block(self, source):
+        code = source_nb(source, "NB01_SourceInventory.py")
+        return code.split("inventory_result =", 1)[1]
+
+    def test_failed_inventory_raises_after_processing(self):
+        for source in ("oracle", "sqlserver"):
+            block = self._result_block(source)
+            self.assertIn("if failed:", block, source)
+            self.assertIn("raise RuntimeError(", block, source)
+            self.assertLess(block.index("print(json.dumps(inventory_result))"),
+                            block.index("raise RuntimeError("), source)
+            self.assertLess(block.index("raise RuntimeError("),
+                            block.index("dbutils.notebook.exit("), source)
+
+    def test_successful_inventory_exits_succeeded(self):
+        for source in ("oracle", "sqlserver"):
+            block = self._result_block(source)
+            self.assertIn('"status": "FAILED" if failed else "SUCCEEDED"',
+                          block, source)
+            self.assertIn('"business_status": "PARTIAL" if failed and succeeded',
+                          block, source)
+            self.assertTrue(block.rstrip().endswith(
+                "dbutils.notebook.exit(json.dumps(inventory_result))"), source)
+
+    def test_source_output_contracts_are_identical(self):
+        blocks = [self._result_block(source)
+                  for source in ("oracle", "sqlserver")]
+        self.assertEqual(blocks[0], blocks[1])
+        for key in ("status", "execution_status", "business_status", "run_id",
+                    "connection_id", "source_system", "tables_succeeded",
+                    "tables_failed", "columns_written", "tables", "failed",
+                    "columns"):
+            self.assertIn(f'"{key}"', blocks[0])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -327,41 +327,62 @@ def get_source_adapter_for_connection(connection, source_database=None,
     source_system = require_source_system(
         c.get("source_system"), "registered connection")
     database = source_database or c.get("source_database")
+    secret_scope = (c.get("secret_scope") or "").strip()
+    if not secret_scope:
+        raise ValueError(
+            f"registered connection {c.get('connection_id')!r} has a blank "
+            "secret_scope")
     extra = {}
     if c.get("trust_server_certificate") is not None:
         extra["trust_server_certificate"] = bool(c.get("trust_server_certificate"))
     adapter = _build_adapter(
         source_system, source_server=c.get("source_server"),
-        source_database=database, secret_scope=(c.get("secret_scope") or "").strip()
-        or None, extra_config=extra)
+        source_database=database, secret_scope=secret_scope, extra_config=extra)
     # The source states its own metadata requirements (e.g. a mandatory database).
     adapter.validate_connection_metadata(c)
     return adapter
 
 
 def get_source_adapter_routed(row, require_valid=True):
-    """Route a control/queue row to its adapter, preferring its connection_id.
+    """Route a control/queue row through its authoritative registered connection.
 
-    When the row carries a ``connection_id`` the adapter (source system, server,
-    database, secret scope, TLS trust) is taken from the registered connection,
-    and its source_system must not conflict with the row's. A legacy row without
-    a connection_id falls back to per-row routing with a warning, preserving
-    existing behavior. Never prints secrets or credential-bearing URLs.
+    Source operations require a registered connection. A queue row must still
+    belong to the same connection as its source_table_control row, and copied
+    server/database metadata must match the registry. Never prints secrets or
+    credential-bearing URLs.
     """
     d = row.asDict() if hasattr(row, "asDict") else dict(row)
     conn_id = d.get("connection_id")
     if not conn_id:
-        print("[_common] row has no connection_id; using legacy per-row "
-              "source routing (fallback).")
-        return get_source_adapter_for_row(row)
+        raise ValueError(
+            "source operations require a registered connection_id")
     connection = get_connection(conn_id)
     if connection is None:
         raise ValueError(f"connection_id {conn_id!r} not found in source_connection")
     cd = connection.asDict()
     assert_source_system_match(d.get("source_system"), cd.get("source_system"))
+
+    src_id = d.get("source_table_id")
+    if src_id:
+        control_row = control_repo().get_control_row(src_id)
+        if control_row is None:
+            raise ValueError(
+                f"source_table_id {src_id!r} not found in source_table_control")
+        control_connection_id = control_row["connection_id"]
+        if control_connection_id != conn_id:
+            raise ValueError(
+                f"source_table_id {src_id!r} belongs to connection_id "
+                f"{control_connection_id!r}, not {conn_id!r}")
+
+    for field in ("source_server", "source_database"):
+        row_value = str(d.get(field) or "").strip().casefold()
+        registered_value = str(cd.get(field) or "").strip().casefold()
+        if row_value != registered_value:
+            raise ValueError(
+                f"source row {field} does not match registered connection "
+                f"{conn_id!r}")
     return get_source_adapter_for_connection(
-        connection, source_database=d.get("source_database"),
-        require_valid=require_valid)
+        connection, require_valid=require_valid)
 
 
 def read_source_jdbc(adapter, dbtable, source_server=None, source_database=None,

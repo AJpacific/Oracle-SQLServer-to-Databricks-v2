@@ -61,38 +61,85 @@ def _q(query):
     return read_source_jdbc(adapter, query, source_server=src_server,
                             source_database=src_db).collect()
 
+
+discovery_errors = []
+
+
+def _capture_discovery_error(stage, error, source_schema=None):
+    safe_message = failcls.sanitize_message(error)[:400]
+    detail = {
+        "stage": stage,
+        "source_schema": source_schema,
+        "exception_type": type(error).__name__,
+        "message": safe_message,
+    }
+    discovery_errors.append(detail)
+    location = f" for schema {source_schema}" if source_schema else ""
+    print(f"  [warn] {stage}{location}: {detail['exception_type']}: "
+          f"{safe_message}")
+
 # COMMAND ----------
 
-schemas = resolve_assessment_schemas(adapter, src_db, include_schemas, [])
+schema_discovery_failed = False
+try:
+    schemas = resolve_assessment_schemas(adapter, src_db, include_schemas, [])
+except Exception as e:
+    schemas = []
+    schema_discovery_failed = True
+    _capture_discovery_error("schema_discovery", e)
 
 # ---- Oracle definition extraction ------------------------------------------
 definitions = []       # (schema, object_name, normalized_type, definition_text)
 skipped_types = []
+discovered_objects = 0
+inaccessible_definitions = 0
+object_discovery_attempts = 0
+object_discovery_successes = 0
 
 for schema in schemas:
     if "VIEW" in include_types:
+        object_discovery_attempts += 1
         try:
-            for v in _q(adapter.list_views_query(src_db, schema)):
-                name = v["OBJECT_NAME"]
-                text = _q(adapter.view_text_query(src_db, schema, name))
-                definitions.append(
-                    (schema, name, "VIEW",
-                     text[0]["DEFINITION_TEXT"] if text else None))
+            views = _q(adapter.list_views_query(src_db, schema))
+            object_discovery_successes += 1
         except Exception as e:
-            print(f"  [warn] Oracle view discovery {schema}: "
-                  f"{failcls.sanitize_message(e)[:200]}")
+            views = []
+            _capture_discovery_error("view_discovery", e, schema)
+        for v in views:
+            name = v["OBJECT_NAME"]
+            discovered_objects += 1
+            try:
+                text = _q(adapter.view_text_query(src_db, schema, name))
+                definition = text[0]["DEFINITION_TEXT"] if text else None
+            except Exception as e:
+                definition = None
+                safe_message = failcls.sanitize_message(e)[:200]
+                print(f"  [warn] inaccessible view definition "
+                      f"{schema}.{name}: {safe_message}")
+            if not definition or not str(definition).strip():
+                inaccessible_definitions += 1
+            definitions.append((schema, name, "VIEW", definition))
 
-    try:
-        for rt in _q(adapter.list_routines_query(src_db, schema)):
+    if include_types & {"PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY"}:
+        object_discovery_attempts += 1
+        try:
+            routines = _q(adapter.list_routines_query(src_db, schema))
+            object_discovery_successes += 1
+        except Exception as e:
+            routines = []
+            _capture_discovery_error("routine_discovery", e, schema)
+        for rt in routines:
             raw_type = rt["OBJECT_TYPE"]
             otype = adapter.normalize_sql_object_type(raw_type)
             if not otype:
                 skipped_types.append((schema, rt["OBJECT_NAME"], raw_type))
+                discovered_objects += 1
                 continue
             requested = (otype in include_types
                          or (otype == "PACKAGE_BODY" and "PACKAGE" in include_types))
             if not requested:
                 continue
+            discovered_objects += 1
             try:
                 # ALL_SOURCE returns one row per line; assemble in line order.
                 lines = _q(adapter.object_source_query(
@@ -101,17 +148,16 @@ for schema in schemas:
                               if lines else None)
             except Exception as e:
                 definition = None
+                safe_message = failcls.sanitize_message(e)[:200]
                 print(f"  [warn] ALL_SOURCE {schema}.{rt['OBJECT_NAME']}: "
-                      f"{failcls.sanitize_message(e)[:150]}")
+                      f"{safe_message}")
+            if not definition or not str(definition).strip():
+                inaccessible_definitions += 1
             definitions.append((schema, rt["OBJECT_NAME"], otype, definition))
-    except Exception as e:
-        print(f"  [warn] Oracle routine discovery {schema}: "
-              f"{failcls.sanitize_message(e)[:200]}")
 
 print(f"Collected {len(definitions)} Oracle object definition(s).")
 if skipped_types:
-    print(f"Skipped {len(skipped_types)} unsupported object type(s); "
-          f"examples: {skipped_types[:5]}")
+    print(f"Skipped {len(skipped_types)} unsupported object type(s).")
 
 # COMMAND ----------
 
@@ -127,7 +173,28 @@ records = [
 summary = persist_sql_object_records(records)
 print("Complexity summary:", summary)
 
-dbutils.notebook.exit(json.dumps({
-    "status": "SUCCEEDED", "run_id": run_id, "connection_id": connection_id,
-    "assessment_id": assessment_id, "objects": len(records), "summary": summary,
-}))
+business_status = sqlobj_common.discovery_business_status(
+    schema_discovery_failed=schema_discovery_failed,
+    object_discovery_attempts=object_discovery_attempts,
+    object_discovery_successes=object_discovery_successes,
+    discovery_failures=len(discovery_errors),
+    inaccessible_definitions=inaccessible_definitions,
+    unsupported_object_types=len(skipped_types))
+sql_object_result = {
+    "status": "SUCCEEDED",
+    "execution_status": "SUCCEEDED",
+    "business_status": business_status,
+    "run_id": run_id,
+    "connection_id": connection_id,
+    "assessment_id": assessment_id,
+    "discovered_objects": discovered_objects,
+    "persisted_objects": len(records),
+    "inaccessible_definitions": inaccessible_definitions,
+    "unsupported_object_types": len(skipped_types),
+    "discovery_failures": len(discovery_errors),
+    "errors": discovery_errors[:sqlobj_common.DISCOVERY_ERROR_LIMIT],
+    # Backward-compatible aliases.
+    "objects": len(records),
+    "summary": summary,
+}
+dbutils.notebook.exit(json.dumps(sql_object_result))

@@ -176,7 +176,13 @@ reads a source secret scope.
 ### Source assessment and registration
 - `NB01A_SourceAssessment` discovers objects via data-dictionary/catalog views
   and classifies table compatibility (`COMPATIBLE` / `REVIEW` / `MANUAL` /
-  `UNABLE_TO_ASSESS`) without per-table `COUNT(*)`.
+  `UNABLE_TO_ASSESS`) without per-table `COUNT(*)`. Mandatory schema/table
+  discovery failures fail the task. Optional discovery failures return
+  `execution_status=SUCCEEDED` and `business_status=PARTIAL`; full coverage is
+  `business_status=COMPLETE`.
+- Oracle `SIZE_MB` is labelled `ESTIMATED_8K_BLOCKS`: it uses
+  `ALL_TABLES.BLOCKS` with an 8 KiB block assumption because the current
+  least-privilege adapter contract has no reliable database block-size source.
 - `NB01B_RegisterSelectedTables` registers only explicitly selected COMPATIBLE/
   REVIEW tables as **inactive** rows, computes the deterministic
   `source_table_id`, blocks target collisions, and preserves existing state.
@@ -346,6 +352,11 @@ com.microsoft.sqlserver.jdbc.SQLServerDriver
 
 The generated direct JDBC URL enables encryption and does not trust the server certificate by default.
 
+Diagnostics do not display sampled source values by default. They report only
+sample-query success, sampled row count, and column names. The
+`show_sample_values` widget defaults to `false`; set it to `true` only for
+approved non-sensitive test data.
+
 ## INGEST onboarding workflow
 
 Run in this order (source-specific tasks pick the matching `sources/<source>/`
@@ -380,7 +391,9 @@ snapshot, duplicate `(run_id, source_table_id, column_name)` keys fail before
 any write, then that table's existing same-run snapshot is deleted and replaced.
 A dropped source column therefore disappears on retry, while older run history
 and every other table remain untouched. The table is marked `INVENTORIED` only
-after persistence succeeds.
+after persistence succeeds. All intended tables are attempted; if any table
+fails, the notebook safely reports succeeded/failed counts and raises
+`RuntimeError` so downstream tasks cannot treat a partial inventory as success.
 
 See `docs/databricks_job_task_mapping.md` for the exact task keys and parameters.
 
@@ -527,9 +540,9 @@ artifacts/test-results/unittest-output.txt
 artifacts/test-results/test-summary.json
 ```
 
-These files report repository checks only. They do not constitute Spark, Delta,
-JDBC, Unity Catalog, source-system, or Databricks Job validation. The release
-checklist uses `NOT_EXECUTED`, `PASSED`, `FAILED`, `BLOCKED`, and
+These files report repository checks only. They do not prove live Spark, JDBC,
+Delta, Oracle, SQL Server, Unity Catalog, or Databricks Job readiness. The
+release checklist uses `NOT_EXECUTED`, `PASSED`, `FAILED`, `BLOCKED`, and
 `NOT_APPLICABLE`; no runtime item is treated as passed without live evidence.
 
 ## Deployment validation

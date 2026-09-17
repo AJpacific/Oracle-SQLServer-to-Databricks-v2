@@ -49,6 +49,8 @@ INACCESSIBLE_REASON = (
     "definition text is not accessible (encrypted module, missing "
     "SELECT/VIEW DEFINITION grant, or no source rows)")
 
+DISCOVERY_ERROR_LIMIT = 20
+
 
 def resolve_review_status(conversion_status):
     """Every generated draft requires human review before any use."""
@@ -117,3 +119,20 @@ def summarize_complexity(records):
         key = r.get("complexity_category")
         summary[key] = summary.get(key, 0) + 1
     return summary
+
+
+def discovery_business_status(schema_discovery_failed,
+                              object_discovery_attempts,
+                              object_discovery_successes,
+                              discovery_failures=0,
+                              inaccessible_definitions=0,
+                              unsupported_object_types=0):
+    """Return SQL-object assessment coverage without conflating failure types."""
+    if schema_discovery_failed:
+        return "FAILED"
+    if object_discovery_attempts and not object_discovery_successes:
+        return "FAILED"
+    if (discovery_failures or inaccessible_definitions
+            or unsupported_object_types):
+        return "PARTIAL"
+    return "COMPLETE"

@@ -56,6 +56,7 @@ src_server, src_db = cd.get("source_server"), cd.get("source_database")
 adapter = get_source_adapter_for_connection(connection)   # requires VALID
 mapper = load_type_mapper(SOURCE_SYSTEM)
 print(f"Assessing Oracle connection {connection_id}; assessment_id={assessment_id}")
+print("Oracle SIZE_MB is estimated from ALL_TABLES.BLOCKS using an 8 KiB block assumption.")
 
 
 def _q(query):
@@ -69,10 +70,31 @@ def _record(**kwargs):
         source_system=SOURCE_SYSTEM, source_server=src_server,
         source_database=src_db, **kwargs)
 
+
+assessment_errors = []
+
+
+def _capture_assessment_error(stage, error, source_schema=None):
+    safe_message = failcls.sanitize_message(error)[:400]
+    detail = {
+        "stage": stage,
+        "source_schema": source_schema,
+        "exception_type": type(error).__name__,
+        "message": safe_message,
+    }
+    assessment_errors.append(detail)
+    location = f" for schema {source_schema}" if source_schema else ""
+    print(f"  [warn] {stage}{location}: {detail['exception_type']}: "
+          f"{safe_message}")
+
 # COMMAND ----------
 
-schemas = resolve_assessment_schemas(adapter, src_db, include_schemas,
-                                     exclude_schemas)
+try:
+    schemas = resolve_assessment_schemas(adapter, src_db, include_schemas,
+                                         exclude_schemas)
+except Exception as e:
+    schemas = []
+    _capture_assessment_error("schema_discovery", e)
 
 # COMMAND ----------
 
@@ -85,8 +107,7 @@ for schema in schemas:
             stats[s["OBJECT_NAME"]] = (s["ROW_COUNT"], s["SIZE_MB"],
                                        s["ROW_COUNT_METHOD"])
     except Exception as e:
-        print(f"  [warn] Oracle statistics unavailable for {schema}: "
-              f"{failcls.sanitize_message(e)[:200]}")
+        _capture_assessment_error("statistics_discovery", e, schema)
 
     # ---- TABLES (ALL_TABLES) ----
     if "TABLE" in include_types:
@@ -94,8 +115,7 @@ for schema in schemas:
             tables = _q(adapter.list_tables_query(src_db, schema))
         except Exception as e:
             tables = []
-            print(f"  [warn] Oracle table discovery failed for {schema}: "
-                  f"{failcls.sanitize_message(e)[:200]}")
+            _capture_assessment_error("table_discovery", e, schema)
         for t in tables:
             obj = t["OBJECT_NAME"]
             row_count, size_mb, method = stats.get(
@@ -117,6 +137,7 @@ for schema in schemas:
             except Exception as e:
                 msg = f"column assessment failed: {failcls.sanitize_message(e)[:400]}"
                 print(f"  [warn] {schema}.{obj}: {msg}")
+                _capture_assessment_error("column_assessment", e, schema)
             records.append(_record(
                 source_schema=schema, object_name=obj, object_type="TABLE",
                 row_count=row_count, row_count_method=method or ROW_COUNT_METHOD,
@@ -133,8 +154,7 @@ for schema in schemas:
                     object_type="VIEW", compatibility_status="REVIEW",
                     assessment_message="assess conversion in NB13"))
         except Exception as e:
-            print(f"  [warn] Oracle view discovery failed for {schema}: "
-                  f"{failcls.sanitize_message(e)[:200]}")
+            _capture_assessment_error("view_discovery", e, schema)
 
     # ---- ROUTINES + PACKAGES (ALL_OBJECTS) ----
     if include_types & {"PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE_BODY"}:
@@ -153,8 +173,7 @@ for schema in schemas:
                     object_type=otype, compatibility_status="MANUAL",
                     assessment_message="assess conversion in NB13"))
         except Exception as e:
-            print(f"  [warn] Oracle routine discovery failed for {schema}: "
-                  f"{failcls.sanitize_message(e)[:200]}")
+            _capture_assessment_error("routine_discovery", e, schema)
 
 print(f"Assessed {len(records)} Oracle object(s).")
 
@@ -163,7 +182,27 @@ print(f"Assessed {len(records)} Oracle object(s).")
 summary = persist_assessment_records(records)
 print("Compatibility summary:", summary)
 
-dbutils.notebook.exit(json.dumps({
-    "status": "SUCCEEDED", "run_id": run_id, "connection_id": connection_id,
-    "assessment_id": assessment_id, "objects": len(records), "summary": summary,
-}))
+business_status = assess_common.assessment_business_status(assessment_errors)
+execution_status = "FAILED" if business_status == "FAILED" else "SUCCEEDED"
+assessment_result = {
+    "status": execution_status,
+    "execution_status": execution_status,
+    "business_status": business_status,
+    "assessment_id": assessment_id,
+    "run_id": run_id,
+    "connection_id": connection_id,
+    "objects_assessed": len(records),
+    "error_count": len(assessment_errors),
+    "errors": assessment_errors[:assess_common.ASSESSMENT_ERROR_LIMIT],
+    "compatibility_summary": summary,
+    # Backward-compatible aliases.
+    "objects": len(records),
+    "summary": summary,
+}
+if business_status == "FAILED":
+    print(json.dumps(assessment_result))
+    raise RuntimeError(
+        "Source assessment failed during mandatory discovery: "
+        f"error_count={len(assessment_errors)}")
+
+dbutils.notebook.exit(json.dumps(assessment_result))

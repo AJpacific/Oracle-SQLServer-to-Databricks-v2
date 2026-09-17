@@ -6,14 +6,17 @@ Nothing here executes or deploys SQL; only classification/text transforms.
 import os
 import sys
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(os.path.dirname(HERE), "src")
-for p in (SRC, os.path.dirname(HERE)):
+for p in (SRC, HERE, os.path.dirname(HERE)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+import sql_object_assessment_common as common  # noqa: E402
 import sql_object_converter as sc  # noqa: E402
+from _nbsource import source_nb  # noqa: E402
 
 
 class TestClassify(unittest.TestCase):
@@ -116,6 +119,79 @@ class TestConvert(unittest.TestCase):
     def test_missing_source_fails(self):
         with self.assertRaises(ValueError):
             sc.convert_sql_object_deterministic(None, "VIEW", "SELECT 1")
+
+
+class TestSqlObjectCoverage(unittest.TestCase):
+    def test_complete_discovery_query_failure_is_failed(self):
+        self.assertEqual(common.discovery_business_status(
+            schema_discovery_failed=False,
+            object_discovery_attempts=1,
+            object_discovery_successes=0,
+            discovery_failures=1), "FAILED")
+
+    def test_inaccessible_definition_is_partial_not_discovery_failure(self):
+        self.assertEqual(common.discovery_business_status(
+            schema_discovery_failed=False,
+            object_discovery_attempts=1,
+            object_discovery_successes=1,
+            inaccessible_definitions=1), "PARTIAL")
+        record = common.build_sql_object_record(
+            assessment_id="a1", run_id="r1", connection_id="c1",
+            source_system="oracle", source_database=None, source_schema="S",
+            object_name="V", object_type="VIEW", source_definition=None)
+        self.assertEqual(record["complexity_category"], sc.UNABLE_TO_ASSESS)
+
+    def test_notebooks_return_coverage_counters_and_sanitized_errors(self):
+        for source in ("oracle", "sqlserver"):
+            code = source_nb(source, "NB13_SQLObjectAssessmentAndConversion.py")
+            for key in ("execution_status", "business_status",
+                        "discovered_objects", "persisted_objects",
+                        "inaccessible_definitions", "unsupported_object_types",
+                        "discovery_failures", "errors"):
+                self.assertIn(f'"{key}"', code, source)
+            capture = code.split("def _capture_discovery_error", 1)[1]
+            capture = capture.split("# COMMAND ----------", 1)[0]
+            self.assertLess(capture.index("failcls.sanitize_message(error)"),
+                            capture.index("discovery_errors.append(detail)"),
+                            source)
+            self.assertNotIn("str(error)", capture, source)
+
+
+class TestAiSafety(unittest.TestCase):
+    def _record(self, use_ai):
+        return common.build_sql_object_record(
+            assessment_id="a1", run_id="r1", connection_id="c1",
+            source_system="oracle", source_database=None, source_schema="S",
+            object_name="P", object_type="PROCEDURE",
+            source_definition="BEGIN NULL; END;", mode="CONVERT",
+            use_ai=use_ai)
+
+    def test_use_ai_false_cannot_invoke_an_ai_endpoint(self):
+        with mock.patch.object(
+                common.converter, "convert_sql_object_ai", create=True,
+                side_effect=AssertionError("AI endpoint invoked")) as ai_endpoint:
+            record = self._record(use_ai=False)
+        ai_endpoint.assert_not_called()
+        self.assertEqual(record["conversion_status"], sc.NOT_SUPPORTED)
+
+    def test_unconfigured_ai_preserves_deterministic_output(self):
+        baseline = self._record(use_ai=False)
+        requested = self._record(use_ai=True)
+        self.assertEqual(requested["conversion_status"], sc.NOT_CONFIGURED)
+        self.assertEqual(requested["converted_definition"],
+                         baseline["converted_definition"])
+        self.assertEqual(requested["complexity_category"],
+                         baseline["complexity_category"])
+
+    def test_generated_output_remains_pending_review(self):
+        record = common.build_sql_object_record(
+            assessment_id="a1", run_id="r1", connection_id="c1",
+            source_system="sqlserver", source_database="db", source_schema="S",
+            object_name="V", object_type="VIEW",
+            source_definition="CREATE VIEW v AS SELECT a FROM t",
+            mode="CONVERT", use_ai=True)
+        self.assertEqual(record["conversion_status"], sc.GENERATED)
+        self.assertEqual(record["review_status"], common.PENDING_REVIEW)
 
 
 if __name__ == "__main__":

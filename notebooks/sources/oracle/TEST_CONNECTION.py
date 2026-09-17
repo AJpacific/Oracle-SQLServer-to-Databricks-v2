@@ -20,13 +20,20 @@ SOURCE_SYSTEM = "oracle"
 
 dbutils.widgets.text("test_schema", "", "Oracle source owner (optional)")
 dbutils.widgets.text("test_table", "", "Oracle source table (optional)")
+dbutils.widgets.dropdown("show_sample_values", "false", ["true", "false"])
 
 test_schema = dbutils.widgets.get("test_schema").strip().upper()
 test_table = dbutils.widgets.get("test_table").strip().upper()
+show_sample_values = (
+    dbutils.widgets.get("show_sample_values").strip().lower() == "true")
+if show_sample_values:
+    print("WARNING: show_sample_values=true should only be used with approved non-sensitive test data.")
 
 # Optional object diagnostics are skipped when no schema/table is supplied, so
 # these counters must always be defined for the final summary.
 sample_count = 0
+sample_columns = []
+sample_query_succeeded = False
 meta_count = 0
 pk_count = 0
 
@@ -97,9 +104,14 @@ else:
     sample_df = read_source_jdbc(
         adapter, adapter.top_n_probe_query(test_database, test_schema, test_table, 5),
         source_server=test_server, source_database=test_database, fetchsize=5)
-    sample_df.show(n=5, truncate=False)
     sample_count = sample_df.count()
+    sample_columns = list(sample_df.columns)
+    sample_query_succeeded = True
+    print("Sample query succeeded.")
     print("Sample rows returned:", sample_count)
+    print("Sample column names:", sample_columns)
+    if show_sample_values:
+        sample_df.show(n=5, truncate=False)
 
     meta = read_source_jdbc(
         adapter, adapter.columns_metadata_query(test_database, test_schema, test_table),
@@ -125,8 +137,12 @@ else:
 # COMMAND ----------
 
 dbutils.notebook.exit(json.dumps({
-    "status": "SUCCEEDED", "source_system": SOURCE_SYSTEM,
+    "status": "SUCCEEDED", "execution_status": "SUCCEEDED",
+    "business_status": "COMPLETE", "source_system": SOURCE_SYSTEM,
     "connection_id": CONNECTION_ID or None,
-    "sample_rows": sample_count, "metadata_columns": meta_count,
+    "sample_query_succeeded": sample_query_succeeded,
+    "sample_rows": sample_count, "sample_columns": sample_columns,
+    "sample_values_displayed": show_sample_values and sample_query_succeeded,
+    "metadata_columns": meta_count,
     "primary_key_columns": pk_count,
 }))

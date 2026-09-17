@@ -116,8 +116,26 @@ for r in active:
 
 print(f"Wrote {written} inventory rows. succeeded={succeeded} failed={failed}")
 
-dbutils.notebook.exit(json.dumps({
-    "status": "SUCCEEDED", "run_id": run_id, "connection_id": connection_id,
-    "source_system": SOURCE_SYSTEM, "tables": succeeded, "failed": failed,
+inventory_result = {
+    "status": "FAILED" if failed else "SUCCEEDED",
+    "execution_status": "FAILED" if failed else "SUCCEEDED",
+    "business_status": "PARTIAL" if failed and succeeded else
+                       ("FAILED" if failed else "COMPLETE"),
+    "run_id": run_id,
+    "connection_id": connection_id,
+    "source_system": SOURCE_SYSTEM,
+    "tables_succeeded": succeeded,
+    "tables_failed": failed,
+    "columns_written": written,
+    # Backward-compatible aliases.
+    "tables": succeeded,
+    "failed": failed,
     "columns": written,
-}))
+}
+if failed:
+    print(json.dumps(inventory_result))
+    raise RuntimeError(
+        f"Source inventory failed: tables_succeeded={succeeded}, "
+        f"tables_failed={failed}")
+
+dbutils.notebook.exit(json.dumps(inventory_result))

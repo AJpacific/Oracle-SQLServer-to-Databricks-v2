@@ -305,12 +305,15 @@ def table_statistics_query(owner: str = None) -> str:
     """Estimated table statistics from the data dictionary (ROW_COUNT_METHOD=ESTIMATED).
 
     NUM_ROWS/BLOCKS come from the optimizer dictionary, so they are ESTIMATED
-    unless statistics were just gathered; SIZE_MB assumes the common 8 KiB block.
+    unless statistics were just gathered. SIZE_MB is explicitly labelled as an
+    estimate based on an 8 KiB block; obtaining the database block size would
+    require metadata outside the current least-privilege adapter contract.
     """
     return (
         "(SELECT owner AS SCHEMA_NAME, table_name AS OBJECT_NAME, "
         "num_rows AS ROW_COUNT, "
         "CAST(NVL(blocks,0) * 8192 / 1048576 AS NUMBER(18,2)) AS SIZE_MB, "
+        "'ESTIMATED_8K_BLOCKS' AS SIZE_MB_METHOD, "
         "'ESTIMATED' AS ROW_COUNT_METHOD FROM all_tables "
         f"WHERE {_oracle_owner_filter(owner)}) q"
     )
