@@ -592,11 +592,11 @@ if _invalid_connection_metadata:
     "count": _invalid_connection_metadata,
   })
 
+# Legacy v1 identities are reported as a business status (MIGRATION_REQUIRED)
+# rather than structural corruption, so additive installation completes safely.
 if _legacy_identity_count:
-  _control_validation_errors.append({
-    "code": "SOURCE_IDENTITY_MIGRATION_REQUIRED",
-    "count": int(_legacy_identity_count),
-  })
+  print(f"Notice: {_legacy_identity_count} legacy source identity row(s) require migration; "
+        "NB00 will report business_status='MIGRATION_REQUIRED'.")
 
 _v2_rows = spark.sql(f"""
   SELECT c.connection_id, c.source_table_id, c.source_system,
@@ -626,11 +626,11 @@ if _inconsistent_v2:
   })
 
 if _control_validation_errors:
-  print("Control-table validation failed:",
+  print("Control-table structural validation failed:",
       json.dumps(_control_validation_errors))
   raise RuntimeError(
     "Control-table ownership validation failed; correct registry metadata "
-    "or run the explicit identity-v2 migration")
+    "or repair structural corruption")
 
 print("All control & audit tables created.")
 
@@ -748,10 +748,23 @@ else:
 
 # COMMAND ----------
 
+business_status = "MIGRATION_REQUIRED" if _legacy_identity_count else "READY"
+set_task_value("status", "SUCCEEDED")
+set_task_value("business_status", business_status)
+set_task_value("legacy_identity_count", int(_legacy_identity_count or 0))
+set_task_value("run_id", run_id)
+
 spark.sql(f"""
 INSERT INTO {ctrl('job_run_log')}
 VALUES ({escape_string_literal(run_id)}, 'NB00_ControlTableInit', 'SUCCEEDED',
         current_timestamp(), current_timestamp(), 'control tables ready')
 """)
-print("NB00 complete.")
-dbutils.notebook.exit(json.dumps({"status": "SUCCEEDED", "run_id": run_id}))
+print(f"NB00 complete: status=SUCCEEDED, business_status={business_status}, "
+      f"legacy_identity_count={int(_legacy_identity_count or 0)}")
+dbutils.notebook.exit(json.dumps({
+    "status": "SUCCEEDED",
+    "business_status": business_status,
+    "legacy_identity_count": int(_legacy_identity_count or 0),
+    "fatal_validation_error_count": 0,
+    "run_id": run_id,
+}))

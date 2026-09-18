@@ -25,17 +25,28 @@ reconciliation, retries, DQ history, and checkpoints.
 2. Back up or clone the control schema according to your platform policy.
 3. Deploy this repository revision.
 4. Run `shared/NB00_ControlTableInit` once. It adds the v2 lineage and ownership
-   columns but does not rewrite an identity. A validation failure reporting
-   `SOURCE_IDENTITY_MIGRATION_REQUIRED` is expected for legacy rows.
+   columns but does not rewrite an identity. It completes with `status = "SUCCEEDED"`
+   and reports `business_status = "MIGRATION_REQUIRED"` when legacy rows exist,
+   allowing additive installation to succeed while legacy rows await migration.
 5. Run `deployment/NB_MigrateSourceTableIdentityV2` with `dry_run=true`.
 6. Resolve every blocked row. Missing ownership must be reviewed; never infer a
    connection from object names or credentials.
 7. Run the migration with `dry_run=false`. Use `only_connection_ids` and
    `batch_size` only when an operationally reviewed batch is required.
-8. Rerun the dry run. Every in-scope row must report `ALREADY_MIGRATED`, with no
+8. Review the final status. The notebook returns:
+   - `status`: `"SUCCEEDED"` or `"FAILED"`
+   - `business_status`:
+     - `COMPLETE`: All selected candidates migrated; no unmigrated rows remain in scope (`remaining_unmigrated_count = 0`).
+     - `DRY_RUN_COMPLETE`: Dry run passed for all selected candidates with 0 blocked rows.
+     - `MORE_WORK_REMAINS`: The batch succeeded, but unmigrated candidates remain outside the batch (`remaining_unmigrated_count > 0`).
+     - `BLOCKED`: One or more candidate rows cannot be migrated due to validation, missing lineage, or target collisions (`rows_blocked > 0`).
+     - `PARTIAL`: Execution encountered a mutation error on a candidate.
+     - `FAILED`: Fatal or unhandled exception during processing.
+   - Batch metrics: `total_unmigrated_count`, `batch_candidate_count`, `rows_ready`, `rows_already_migrated`, `rows_blocked`, `rows_migrated`, `remaining_unmigrated_count`, `child_rows_updated`, `error_count`, `errors`.
+9. Rerun the dry run. Every in-scope row must report `ALREADY_MIGRATED`, with no
    blocked rows or errors.
-9. Run the live validation scenarios in the production-readiness checklist
-   before enabling global operational Jobs.
+10. Run the live validation scenarios in the production-readiness checklist
+    before enabling global operational Jobs.
 
 ## Updated tables
 

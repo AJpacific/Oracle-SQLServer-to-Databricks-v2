@@ -75,14 +75,36 @@ errors = []
 
 # COMMAND ----------
 
-all_control_rows = spark.table(
-    ctrl("source_table_control").replace("`", "")).collect()
-control_rows = all_control_rows
+from pyspark.sql import functions as F
+
+base_control = spark.table(ctrl("source_table_control").replace("`", ""))
 if only_connection_ids:
-    control_rows = [
-        row for row in control_rows
-        if str(row["connection_id"] or "").strip() in only_connection_ids
-    ]
+    base_control = base_control.filter(
+        F.col("connection_id").isin(list(only_connection_ids))
+    )
+
+unmigrated_candidates = (
+    base_control.filter(
+        (F.col("source_identity_version").isNull())
+        | (F.col("source_identity_version") != F.lit(SOURCE_IDENTITY_VERSION))
+    )
+    .orderBy("connection_id", "source_schema", "source_table", "source_table_id")
+)
+
+total_unmigrated_count = unmigrated_candidates.count()
+
+if total_unmigrated_count > 0:
+    batch_query = unmigrated_candidates
+    if batch_size > 0:
+        batch_query = batch_query.limit(batch_size)
+else:
+    batch_query = base_control.orderBy(
+        "connection_id", "source_schema", "source_table", "source_table_id"
+    )
+    if batch_size > 0:
+        batch_query = batch_query.limit(batch_size)
+
+control_rows = batch_query.collect()
 
 connection_ids = sorted({
     str(row["connection_id"] or "").strip()
@@ -190,11 +212,24 @@ for mapping in mappings:
         mapping["migration_status"] = "BLOCKED"
         mapping["migration_message"] = failcls.sanitize_message(error)
 
+new_ids = {
+    mapping.get("new_source_table_id")
+    for mapping in mappings
+    if mapping.get("new_source_table_id")
+}
 existing_id_owners = {}
-for row in all_control_rows:
-    source_table_id = str(row["source_table_id"] or "").strip()
-    owner = (str(row["connection_id"] or "").strip(), source_table_id)
-    existing_id_owners.setdefault(source_table_id, set()).add(owner)
+if new_ids:
+    in_new_ids = ", ".join(escape_string_literal(nid) for nid in sorted(new_ids))
+    conflicting_ctrl_rows = spark.sql(f"""
+        SELECT connection_id, source_table_id
+        FROM {ctrl('source_table_control')}
+        WHERE source_table_id IN ({in_new_ids})
+    """).collect()
+    for row in conflicting_ctrl_rows:
+        source_table_id = str(row["source_table_id"] or "").strip()
+        owner = (str(row["connection_id"] or "").strip(), source_table_id)
+        existing_id_owners.setdefault(source_table_id, set()).add(owner)
+
 for mapping in mappings:
     new_key = (mapping.get("connection_id"), mapping.get("new_source_table_id"))
     old_key = (mapping.get("connection_id"), mapping.get("old_source_table_id"))
@@ -302,25 +337,19 @@ for mapping in ready_mappings:
             mapping["migration_message"] = failcls.sanitize_message(error)
             break
 
+batch_candidate_count = len(mappings)
 rows_examined = len(mappings)
 rows_already_migrated = sum(
     mapping["migration_status"] == "ALREADY_MIGRATED" for mapping in mappings)
 rows_blocked = sum(
     mapping["migration_status"] == "BLOCKED" for mapping in mappings)
-rows_ready = sum(mapping["migration_status"] == "READY" for mapping in mappings)
-if batch_size > 0:
-    ready_batch = sorted(
-        (mapping for mapping in mappings
-         if mapping["migration_status"] == "READY"),
-        key=lambda mapping: (
-            mapping["connection_id"], mapping["source_schema"],
-            mapping["source_table"], mapping["old_source_table_id"]),
-    )[:batch_size]
-else:
-    ready_batch = [
-        mapping for mapping in mappings
-        if mapping["migration_status"] == "READY"
-    ]
+rows_ready = sum(
+    mapping["migration_status"] == "READY" for mapping in mappings
+)
+ready_batch = [
+    mapping for mapping in mappings
+    if mapping["migration_status"] == "READY"
+]
 
 from pyspark.sql.types import IntegerType, StringType, StructField, StructType
 
@@ -361,12 +390,20 @@ child_rows_updated = 0
 if not dry_run:
     if rows_blocked or errors:
         result = {
-            "status": "FAILED", "dry_run": False,
-            "rows_examined": rows_examined, "rows_ready": rows_ready,
-            "rows_migrated": 0,
-            "rows_already_migrated": rows_already_migrated,
+            "status": "FAILED",
+            "business_status": "BLOCKED" if rows_blocked else "FAILED",
+            "dry_run": False,
+            "migration_id": migration_id,
+            "total_unmigrated_count": total_unmigrated_count,
+            "batch_candidate_count": batch_candidate_count,
+            "rows_examined": rows_examined,
+            "rows_ready": rows_ready,
             "rows_blocked": rows_blocked,
-            "child_rows_updated": 0, "error_count": len(errors),
+            "rows_already_migrated": rows_already_migrated,
+            "rows_migrated": 0,
+            "remaining_unmigrated_count": total_unmigrated_count,
+            "child_rows_updated": 0,
+            "error_count": len(errors),
             "errors": errors[:ERROR_LIMIT],
         }
         print(json.dumps(result))
@@ -393,12 +430,6 @@ if not dry_run:
         new_id = mapping["new_source_table_id"]
         source_system = mapping["source_system"]
         try:
-            spark.sql(f"""
-                UPDATE {ctrl('source_connection')}
-                SET source_system = {escape_string_literal(source_system)},
-                    updated_ts = current_timestamp()
-                WHERE connection_id = {escape_string_literal(connection_id)}
-            """)
             spark.sql(f"""
                 MERGE INTO {ctrl('source_table_identity_migration')} t
                 USING (SELECT
@@ -545,31 +576,72 @@ if not dry_run:
 
     if errors:
         result = {
-            "status": "PARTIAL", "dry_run": False,
-            "rows_examined": rows_examined, "rows_ready": rows_ready,
-            "rows_migrated": rows_migrated,
-            "rows_already_migrated": rows_already_migrated,
+            "status": "PARTIAL" if rows_migrated > 0 else "FAILED",
+            "business_status": "PARTIAL" if rows_migrated > 0 else "FAILED",
+            "dry_run": False,
+            "migration_id": migration_id,
+            "total_unmigrated_count": total_unmigrated_count,
+            "batch_candidate_count": batch_candidate_count,
+            "rows_examined": rows_examined,
+            "rows_ready": rows_ready,
             "rows_blocked": rows_blocked,
+            "rows_already_migrated": rows_already_migrated,
+            "rows_migrated": rows_migrated,
+            "remaining_unmigrated_count": max(0, total_unmigrated_count - rows_migrated),
             "child_rows_updated": child_rows_updated,
-            "error_count": len(errors), "errors": errors[:ERROR_LIMIT],
+            "error_count": len(errors),
+            "errors": errors[:ERROR_LIMIT],
         }
         print(json.dumps(result))
         raise RuntimeError(
             "Identity v2 migration stopped after a partial table update")
 
 remaining_ready = rows_ready - rows_migrated if not dry_run else rows_ready
-status = (
-    "FAILED" if rows_blocked or errors else
-    ("PARTIAL" if not dry_run and remaining_ready > 0 else "SUCCEEDED")
+remaining_unmigrated_count = (
+    max(0, total_unmigrated_count - rows_migrated) if not dry_run
+    else max(0, total_unmigrated_count - rows_ready)
 )
+
+if dry_run:
+    if rows_blocked:
+        business_status = "BLOCKED"
+        status = "FAILED"
+    elif total_unmigrated_count == 0:
+        business_status = "COMPLETE"
+        status = "SUCCEEDED"
+    elif remaining_unmigrated_count > 0:
+        business_status = "MORE_WORK_REMAINS"
+        status = "SUCCEEDED"
+    else:
+        business_status = "DRY_RUN_COMPLETE"
+        status = "SUCCEEDED"
+else:
+    if errors:
+        business_status = "PARTIAL" if rows_migrated > 0 else "FAILED"
+        status = "PARTIAL" if rows_migrated > 0 else "FAILED"
+    elif rows_blocked:
+        business_status = "BLOCKED"
+        status = "FAILED"
+    elif remaining_unmigrated_count > 0:
+        business_status = "MORE_WORK_REMAINS"
+        status = "PARTIAL" if not dry_run and remaining_ready > 0 else "SUCCEEDED"
+    else:
+        business_status = "COMPLETE"
+        status = "SUCCEEDED"
+
 result = {
     "status": status,
+    "business_status": business_status,
     "dry_run": dry_run,
+    "migration_id": migration_id,
+    "total_unmigrated_count": total_unmigrated_count,
+    "batch_candidate_count": batch_candidate_count,
     "rows_examined": rows_examined,
     "rows_ready": rows_ready,
-    "rows_migrated": rows_migrated,
-    "rows_already_migrated": rows_already_migrated,
     "rows_blocked": rows_blocked,
+    "rows_already_migrated": rows_already_migrated,
+    "rows_migrated": rows_migrated,
+    "remaining_unmigrated_count": remaining_unmigrated_count,
     "child_rows_updated": child_rows_updated,
     "error_count": len(errors),
     "errors": errors[:ERROR_LIMIT],

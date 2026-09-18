@@ -28,8 +28,9 @@ def ctrl(t):
 # Onboarding is scoped to exactly one connection. Collision detection remains
 # global across all active registrations.
 auto = repo.active_tables_for_connection(
-    connection_id, decision="AUTO_MIGRATE").collect()
-all_active_auto = repo.active_tables(decision="AUTO_MIGRATE").collect()
+    connection_id, decision="AUTO_MIGRATE", include_onboarding=True).collect()
+all_active_auto = repo.active_tables(
+    decision="AUTO_MIGRATE", include_onboarding=True).collect()
 print("AUTO_MIGRATE tables:", len(auto))
 
 # COMMAND ----------
@@ -115,6 +116,7 @@ for r in auto:
                 "target_catalog": t_catalog,
                 "target_schema": t_schema,
                 "target_table": t_table,
+                "is_active": True,
                 "current_status": "PROVISIONED",
                 "error_message": None,
             },

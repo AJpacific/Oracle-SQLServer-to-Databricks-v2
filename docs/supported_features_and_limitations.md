@@ -11,6 +11,16 @@
   different secret scopes. The same physical table under different connection
   IDs has separate control state, targets, history, checkpoints, retries,
   reconciliation, inventory, mappings, and decisions.
+- **Endpoint change and secret-scope rotation policy:** Material endpoint changes
+  (`source_server` or `source_database`) on an existing `connection_id` with existing
+  dependent `source_table_control` registrations are blocked to preserve identity
+  integrity and prevent checkpoint rebinding. Operators must create a new
+  `connection_id` for a new endpoint. Material changes with zero dependent registrations
+  are allowed and reset connection status to `REGISTERED` (requiring revalidation).
+  `secret_scope` rotation and `trust_server_certificate` updates on an existing
+  endpoint are allowed and set status to `REGISTERED` for revalidation.
+  `connection_name` updates are allowed and preserve existing validation status.
+  `source_system` mutations are always rejected.
 - Mandatory explicit `source_system`; missing, blank, and unknown values fail
   before routing or identity generation.
 
@@ -23,7 +33,8 @@
   metadata from `sys.partitions`, heap/clustered partitions only), `ESTIMATED`
   (Oracle `ALL_TABLES.NUM_ROWS` optimizer statistics), or `UNAVAILABLE`. A broad
   assessment never executes a per-table `COUNT(*)` / `COUNT_BIG(*)`, so no label
-  claims an executed exact count.
+  claims an executed exact count. Assessment publishes `assessment_id` as a task
+  value, including on `business_status=PARTIAL`.
 - Schema and table discovery are mandatory. A failure in either stage fails the
   assessment task after a sanitized report. Optional view, routine, package,
   column, or statistics errors are counted and return
@@ -48,6 +59,17 @@
 - Source assessment and SQL-object assessment are retry-safe: re-running the
   same `assessment_id` updates its own rows instead of duplicating them, and an
   existing `APPROVED`/`REJECTED` review decision is preserved.
+- Assessment-based, collision-safe registration (`NB01B`). New rows are created
+  inactive (`is_active = false`, `current_status = 'REGISTERED'`).
+  Target collisions are checked across registrations by normalized target FQN.
+- **Onboarding activation flow:** Downstream metadata tasks—Source Inventory
+  (`NB01`), Type Normalization (`NB02`), Mapping Generation (`NB03`), Mapping
+  Validation (`NB04`), and Table Decision Generation (`NB07`)—operate on registered
+  tables in the current onboarding scope (`include_onboarding=True`). Target
+  Provisioning (`NB08`) re-verifies target collisions against all registrations,
+  provisions target Delta tables, and activates approved `AUTO_MIGRATE` tables
+  (`is_active = true`, `current_status = 'PROVISIONED'`). Unapproved, review, or
+  blocked tables remain inactive.
 - Source inventory is an exact replacement per
   `run_id + connection_id + source_table_id`.
   Incoming duplicate
@@ -57,11 +79,10 @@
   `INVENTORIED` is set only after the inventory write succeeds. The notebook
   attempts every intended table, then raises `RuntimeError` when any table
   failed so a partial inventory cannot return task success.
-- Assessment-based, collision-safe registration (`NB01B`). New rows are inactive
-  (`REGISTERED`); `MANUAL` / `UNABLE_TO_ASSESS` are never auto-activated.
 - Full load (`NB09`, overwrite) and delta sync (`NB11a`/`NB11b`) with
   `FULL_LOAD`, `WATERMARK`, `PRIMARY_KEY`, `HYBRID` strategies and frozen
-  incremental intervals.
+  incremental intervals. Full Load revalidates target ownership before overwrite
+  to prevent collision even if control rows were modified out-of-band.
 - Full Load and Delta worklists discover eligible registrations across active,
   `VALID` connections. They contain only `run_id`, `connection_id`, and
   `source_table_id`; adapters and secrets are resolved lazily, so a connection

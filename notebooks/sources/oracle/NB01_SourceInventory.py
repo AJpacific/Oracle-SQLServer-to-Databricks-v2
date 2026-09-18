@@ -25,7 +25,8 @@ print("run_id:", run_id, "| connection_id:", connection_id)
 # COMMAND ----------
 
 active = [
-    r for r in repo.active_tables_for_connection(connection_id).collect()
+    r for r in repo.active_tables_for_connection(
+        connection_id, include_onboarding=True).collect()
     if require_source_system(
         r.asDict().get("source_system"), "source_table_control row")
     == SOURCE_SYSTEM

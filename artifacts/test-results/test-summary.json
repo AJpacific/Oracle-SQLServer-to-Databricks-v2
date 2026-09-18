@@ -1,9 +1,9 @@
 {
-  "generated_at_utc": "2026-09-17T13:04:20.7201541Z",
+  "generated_at_utc": "2026-09-18T06:25:42.192773+00:00",
   "environment": {
     "operating_system": "Microsoft Windows 11 Enterprise, version 10.0.26200, build 26200",
     "python_version": "3.12.10",
-    "pytest_version": "9.1.1",
+    "pytest_version": "9.0.2",
     "environment_error": null
   },
   "commands": [
@@ -15,17 +15,17 @@
     {
       "command": "python -m pytest tests -q",
       "exit_code": 0,
-      "reported_passed": 490,
+      "reported_passed": 519,
       "reported_failed": null,
       "reported_skipped": null,
       "reported_warnings": null,
-      "reported_subtests_passed": 121,
+      "reported_subtests_passed": 155,
       "output_file": "artifacts/test-results/pytest-output.txt"
     },
     {
       "command": "python -m unittest discover -s tests -v",
       "exit_code": 0,
-      "reported_tests": 490,
+      "reported_tests": 519,
       "output_file": "artifacts/test-results/unittest-output.txt"
     }
   ],

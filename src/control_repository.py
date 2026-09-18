@@ -54,6 +54,16 @@ SECRET_FIELD_KEYS = frozenset({
 SANITIZED_CONTROL_FIELDS = frozenset({"error_message", "etl_error_message"})
 
 
+# Ownership and identity version fields are immutable under generic updates.
+# Only dedicated migration or provisioning flows may set them.
+PROTECTED_CONTROL_IDENTITY_FIELDS = frozenset({
+    "connection_id",
+    "source_table_id",
+    "source_identity_version",
+    "legacy_source_table_id",
+})
+
+
 def require_connection_id(value, context="operation") -> str:
     """Return a trimmed connection ID or raise with a safe context message."""
     connection_id = str(value or "").strip()
@@ -221,16 +231,24 @@ class ControlRepository:
 
     # ------------------------------------------------------ reads (need Spark)
 
-    def active_tables(self, connection_id: str = None, decision: str = None):
+    def active_tables(self, connection_id: str = None, decision: str = None,
+                      include_onboarding: bool = False):
         """Return active source tables.
 
         When ``connection_id`` is given the result is scoped to that connection;
         when omitted the behavior is unchanged (every active table), so existing
         callers keep working.
+        When ``include_onboarding=True``, includes unactivated onboarding registrations
+        (`current_status IN ('REGISTERED', 'INVENTORIED', 'PROVISIONED')`).
         """
+        if include_onboarding:
+            predicate = "(is_active = true OR current_status IN ('REGISTERED', 'INVENTORIED', 'PROVISIONED'))"
+        else:
+            predicate = "is_active = true"
+
         sql = (
             f"SELECT * FROM {self.ctrl('source_table_control')} "
-            f"WHERE is_active = true"
+            f"WHERE {predicate}"
         )
 
         if connection_id:
@@ -248,11 +266,21 @@ class ControlRepository:
         return self.spark.sql(sql)
 
     def active_tables_for_connection(self, connection_id: str,
-                                     decision: str = None):
-        """Return active registrations owned by exactly one connection."""
+                                     decision: str = None,
+                                     include_onboarding: bool = False):
+        """Return registrations owned by exactly one connection.
+
+        By default, returns operational active tables (`is_active = true`).
+        When ``include_onboarding=True``, includes unactivated onboarding registrations
+        (`current_status IN ('REGISTERED', 'INVENTORIED', 'PROVISIONED')`).
+        """
         connection_id = require_connection_id(
             connection_id, "active_tables_for_connection")
-        return self.active_tables(connection_id=connection_id, decision=decision)
+        return self.active_tables(
+            connection_id=connection_id,
+            decision=decision,
+            include_onboarding=include_onboarding,
+        )
 
     # ---------------------------------------------------- connection registry
 
@@ -326,6 +354,24 @@ class ControlRepository:
             if prior_system:
                 assert_source_system_match(
                     connection["source_system"], prior_system)
+            endpoint_fields = ("source_server", "source_database")
+            endpoint_changed = any(
+                str(connection.get(f) or "").strip().lower() != str(prior.get(f) or "").strip().lower()
+                for f in endpoint_fields
+                if f in connection and f in prior
+            )
+            if endpoint_changed:
+                dependent_count = self.spark.sql(
+                    f"SELECT count(*) AS c FROM {self.ctrl('source_table_control')} "
+                    f"WHERE connection_id = {escape_string_literal(connection_id)}"
+                ).collect()[0]["c"]
+                if dependent_count > 0:
+                    raise ValueError(
+                        f"Cannot change material endpoint ('source_server' or 'source_database') for "
+                        f"connection_id {connection_id!r} because {dependent_count} dependent table "
+                        "registration(s) exist. Create a new connection_id for the new endpoint."
+                    )
+
             revalidation_fields = (
                 "source_server", "source_database", "secret_scope",
                 "trust_server_certificate",
@@ -388,7 +434,11 @@ class ControlRepository:
         )
 
     def get_watermark(self, source_table_id: str):
-        """Return the last committed watermark value for one source table id."""
+        """[COMPATIBILITY ONLY - DEPRECATED] Return last watermark for a single-key id.
+
+        Deprecated: operational workflows resolve watermarks by connection_id + source_table_id.
+        Fails if source_table_id matches multiple registrations across connections.
+        """
         sql = (
             f"SELECT last_watermark_value "
             f"FROM {self.ctrl('source_table_control')} "
@@ -397,6 +447,10 @@ class ControlRepository:
         )
 
         rows = self.spark.sql(sql).collect()
+        if len(rows) > 1:
+            raise ValueError(
+                f"source_table_id {source_table_id!r} matches {len(rows)} "
+                "registrations; expected at most one")
 
         return (
             rows[0]["last_watermark_value"]
@@ -420,6 +474,11 @@ class ControlRepository:
         )
 
     def get_control_row(self, source_table_id: str):
+        """[COMPATIBILITY ONLY - DEPRECATED] Return one control row by single-key source_table_id.
+
+        Deprecated: operational workflows must use get_source_table(connection_id, source_table_id).
+        Fails if source_table_id matches multiple registrations across connections.
+        """
         sql = (
             f"SELECT * FROM {self.ctrl('source_table_control')} "
             f"WHERE source_table_id = "
@@ -427,6 +486,10 @@ class ControlRepository:
         )
 
         rows = self.spark.sql(sql).collect()
+        if len(rows) > 1:
+            raise ValueError(
+                f"source_table_id {source_table_id!r} matches {len(rows)} "
+                "registrations; expected at most one (use get_source_table)")
 
         return rows[0] if rows else None
 
@@ -456,17 +519,31 @@ class ControlRepository:
         source_table_id: str,
         fields: dict
     ):
-        """Update selected columns of the source_table_control row identified by
-        its source-qualified ``source_table_id``.
+        """[COMPATIBILITY ONLY - DEPRECATED] Update selected columns by single-key source_table_id.
 
-        A control row is never updated by ``source_schema + source_table`` alone,
-        so two sources that share a schema.table can never overwrite each other.
+        Deprecated: operational workflows must use update_control_for_connection() with
+        composite key (connection_id, source_table_id). Fails if source_table_id matches
+        multiple registrations across connections.
         """
 
         if not source_table_id:
             raise ValueError(
                 "update_control requires a source_table_id (source-qualified "
                 "identity); schema+table alone is not accepted")
+
+        for key in (fields or {}):
+            if key in PROTECTED_CONTROL_IDENTITY_FIELDS:
+                raise ValueError(
+                    f"Cannot update immutable identity field {key!r} via generic update")
+
+        existing = self.spark.sql(
+            f"SELECT connection_id FROM {self.ctrl('source_table_control')} "
+            f"WHERE source_table_id = {escape_string_literal(source_table_id)}"
+        ).collect()
+        if len(existing) > 1:
+            raise ValueError(
+                f"source_table_id {source_table_id!r} matches {len(existing)} "
+                "registrations; use update_control_for_connection")
 
         assignments = []
 
@@ -501,6 +578,10 @@ class ControlRepository:
         if not source_table_id:
             raise ValueError(
                 "update_control_for_connection requires source_table_id")
+        for key in (fields or {}):
+            if key in PROTECTED_CONTROL_IDENTITY_FIELDS:
+                raise ValueError(
+                    f"Cannot update immutable identity field {key!r} via generic update")
         assignments = []
         for key, value in (fields or {}).items():
             if key in SANITIZED_CONTROL_FIELDS and value is not None:

@@ -130,8 +130,9 @@ for r in auto:
             SELECT connection_id, source_table_id
             FROM {ctrl('source_table_control')}
             WHERE is_active = true
-              AND lower(concat_ws('.', target_catalog, target_schema,
-                                  target_table)) =
+              AND lower(concat_ws('.', coalesce(target_catalog, '{CATALOG}'),
+                                  coalesce(target_schema, lower(source_schema)),
+                                  coalesce(target_table, lower(source_table)))) =
                   {escape_string_literal(target_fqn.lower())}
         """).collect()
         if (len(target_owners) != 1

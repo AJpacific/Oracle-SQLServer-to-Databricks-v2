@@ -59,6 +59,21 @@ processes the selected rows for the run, scoped by `connection_id`. They are
 per-table; `shared/NB09_FullLoad` fails if a supplied `source_table_id` does not
 resolve to exactly one eligible AUTO_MIGRATE table.
 
+**Onboarding activation flow.** Registration (`T03`) creates candidate table rows
+in `source_table_control` as inactive (`is_active = false`, `current_status = 'REGISTERED'`).
+Tasks `T04`–`T08` operate across the selected onboarding registrations with
+`include_onboarding=True`. In `T09`, `NB08_TargetProvisioning` independently verifies
+that no target collision exists against any other registration, provisions the
+Delta tables, and activates approved `AUTO_MIGRATE` tables (`is_active = true`,
+`current_status = 'PROVISIONED'`). Tables with decisions other than `AUTO_MIGRATE`
+(e.g. `MANUAL_REVIEW`, `BLOCKED`) remain inactive (`is_active = false`). Next,
+`T10` discovers only active `AUTO_MIGRATE` tables for Full Load. In `T11`,
+`NB09_FullLoad` revalidates target ownership before overwriting data, providing
+end-to-end protection against target collisions. `T02` assessment notebooks always
+publish `assessment_id` as a task value (even on `PARTIAL` business status), allowing
+`T03` registration to dynamically receive `{{tasks.T02_Oracle_Source_Assessment.values.assessment_id}}`
+(or SQL Server equivalent).
+
 `T04` persists each table independently. Repeating it with the same `run_id`
 replaces that table's exact `run_id + connection_id + source_table_id`
 inventory snapshot after duplicate-key validation;
