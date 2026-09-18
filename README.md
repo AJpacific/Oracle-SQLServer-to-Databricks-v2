@@ -187,10 +187,13 @@ reads a source secret scope.
   source-table registration belongs to exactly one connection; the same physical
   table registered through two connections has two independent IDs, targets,
   checkpoints, retries, reconciliations, and audit histories.
-- `NB00A_UpsertAndValidateConnection` upserts metadata and validates
-  connectivity (`SELECT 1 FROM DUAL` / `SELECT 1`), setting the connection
-  active/`VALID` or inactive/`FAILED` with a sanitized error. Onboarding remains
-  one connection per execution.
+- `NB00A_UpsertAndValidateConnection` retains its historical filename for
+  workspace-path compatibility. It validates an existing `source_connection`
+  record by `connection_id` and updates only its validation status (`VALID` or
+  `FAILED` with a sanitized error). It does not upsert connection metadata;
+  connection metadata is populated separately by an operator or trusted
+  configuration process. Validation runs per connection (`SELECT 1 FROM DUAL` /
+  `SELECT 1`).
 - Operational worklists are discovered globally from eligible registrations and
   contain only `run_id`, `connection_id`, and `source_table_id`. Connections
   without eligible registrations are not resolved, connected, or updated.

@@ -161,16 +161,19 @@ VALUES (
 );
 ```
 
-## 6. Onboard a connection
+## 6. Validate a registered connection
 
-Run the connection notebook for your source:
+Populate non-secret connection metadata into `<catalog>.<control_schema>.source_connection`
+(`connection_id`, `connection_name`, `source_system`, `source_server`, `secret_scope`,
+and for SQL Server `source_database`). Then run the connection validation notebook
+for your source:
 `sources/oracle/NB00A_UpsertAndValidateConnection` or
-`sources/sqlserver/NB00A_UpsertAndValidateConnection`. Supply `connection_id`,
-`connection_name`, `secret_scope`, and (for SQL Server) `source_database`.
-`source_system` is fixed by the notebook, not a widget. It stores only
-non-secret metadata and runs the source's own connectivity probe; on success the
-connection becomes `VALID`. Missing, blank, or unregistered `source_system`
-values fail; shared routing has no Oracle fallback.
+`sources/sqlserver/NB00A_UpsertAndValidateConnection`. Supply only `connection_id`.
+`source_system` is fixed by the notebook, not a widget. It reads the registered row,
+validates ownership and metadata, and runs the source's own connectivity probe;
+on success the connection becomes `VALID` and active (`is_active = true`).
+Missing, blank, or unregistered `source_system` values fail; shared routing has no
+Oracle fallback.
 
 Inventory retries replace the complete snapshot for one
 `run_id + connection_id + source_table_id`. Duplicate incoming column keys fail

@@ -650,10 +650,10 @@ class TestConnectionNotebookSanitization(unittest.TestCase):
     def test_connection_starts_inactive_until_probe_succeeds(self):
         for token in SOURCE_TOKENS:
             code = source_nb(token, "NB00A_UpsertAndValidateConnection.py")
-            self.assertIn('"connection_status": "REGISTERED"', code, token)
-            self.assertIn('"is_active": False', code, token)
+            self.assertIn("repo.get_connection(connection_id)", code, token)
+            self.assertNotIn("repo.upsert_connection", code, token)
             self.assertIn(
-                'update_connection_status(connection_id, "VALID"', code,
+                'update_connection_status(connection_id, "VALID", None)', code,
                 token)
             self.assertIn(
                 'update_connection_status(connection_id, "FAILED"', code,

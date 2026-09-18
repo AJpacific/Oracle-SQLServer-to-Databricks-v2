@@ -173,7 +173,7 @@ Copy the shape of `notebooks/sources/sqlserver/`. Each begins with
 
 | Notebook | Must do | Must NOT do |
 |---|---|---|
-| `NB00A_UpsertAndValidateConnection` | Fix `SOURCE_SYSTEM` internally, call `normalize_connection_input()`, `repo.upsert_connection()`, `probe_connection()`; sanitize failures with `failcls.sanitize_message` | Accept a `source_system` widget; return or print a secret |
+| `NB00A_UpsertAndValidateConnection` | Fix `SOURCE_SYSTEM` internally, load existing row with `repo.get_connection(connection_id)`, validate ownership and metadata, run `probe_connection()`; update status to `VALID` (or `FAILED` with `failcls.sanitize_message`) | Accept a `source_system` or metadata widgets; return or print a secret; call `repo.upsert_connection()` |
 | `NB01_SourceInventory` | Call adapter metadata queries, build one complete table batch with `inv_common.normalize_inventory_row()`, then call `persist_inventory_rows()` before updating control state | Write `source_inventory` directly; mark `INVENTORIED` before persistence |
 | `NB01A_SourceAssessment` | Discover objects, call `assess_common.build_assessment_record()` and `summarize_table_compatibility()`, `persist_assessment_records()` | Run a per-table `COUNT(*)`; claim an exact row count |
 | `NB13_SQLObjectAssessmentAndConversion` | Extract definitions, call `sqlobj_common.build_sql_object_record()`, `persist_sql_object_records()` | Execute or deploy generated SQL |

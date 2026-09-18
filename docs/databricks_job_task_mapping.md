@@ -32,19 +32,58 @@ Rules that apply to every workflow:
 
 ---
 
-## Future Job 1A - Automated Source Assessment Workflow (Target Architecture)
+## Job 1A - Automated Connection Validation and Source Assessment Workflow (Target Architecture)
 
-Future Job 1A discovers all active `VALID` connections for a fixed internal `source_system` parameter and executes connection-scoped assessments in a For Each task, followed by summary aggregation. Operators supply zero connection metadata at runtime.
+Job 1A orchestrates end-to-end connection validation and assessment for an internally fixed `source_system` parameter (`oracle` or `sqlserver`). Connection metadata is maintained authoritatively in `da_accelerators.control.source_connection` and populated by an operator or trusted configuration process prior to execution. Job 1A never passes connection metadata (server, database, secret scope, or TLS settings) or credentials through Job parameters; it passes only `run_id`, `connection_id`, `catalog`, and `control_schema`.
+
+The workflow consists of two discovery phases:
+1. **Configured Connection Discovery (`T02`):** Discovers all candidate connections in `REGISTERED`, `VALID`, or `FAILED` status with complete metadata via `NB_GetConnectionWorklist` (`connection_mode=CONFIGURED`) without requiring `is_active = true`.
+2. **Connection Validation (`T03`):** Validates each existing registered connection using the source-specific `NB00A_UpsertAndValidateConnection` inside a For Each task. On successful JDBC probe, status transitions to `VALID` (`is_active = true`). On probe failure, status transitions to `FAILED` (`is_active = false`) with sanitized error message.
+3. **Valid Connection Discovery (`T04`):** Discovers only successfully validated, active connections (`connection_status = 'VALID'` and `is_active = true`) via `NB_GetConnectionWorklist` (`connection_mode=VALID`).
+4. **Source Assessment (`T05`):** Executes source assessment (`NB01A_SourceAssessment`) for each active, valid connection in a For Each task.
+5. **Assessment Summary (`T06`):** Aggregates objects and summary statistics across all assessed connections.
+
+No notification task (`NB16_NotifyFailures`) is included in Job 1A.
+
+```text
+T00 Create Run Context
+    |
+    v
+T01 Initialize Control Tables
+    |
+    v
+T02 Get CONFIGURED Connection Worklist
+    |
+    v
+T03 ForEach Validate Existing Connection with source-specific NB00A
+    |
+    v
+T04 Get VALID Connection Worklist
+    |
+    v
+T05 ForEach Source Assessment (NB01A)
+    |
+    v
+T06 Assessment Summary
+```
 
 | Task key | Notebook | Parameters | Output |
 |---|---|---|---|
 | `T00_Create_Run_Context` | `deployment/NB_CreateRunContext` | optional `run_id`, `run_prefix` | `run_id` only |
-| `T01_Get_Connection_Worklist` | `deployment/NB_GetConnectionWorklist` | `run_id`, `source_system` (fixed in YAML: `oracle` or `sqlserver`), optional `max_connections`, optional `only_connection_ids`, optional `exclude_connection_ids` | `worklist`, `worklist_count` |
-| `T02_ForEach_Connection_Assessment` | `sources/<source>/NB01A_SourceAssessment` (For Each `{{tasks.T01_Get_Connection_Worklist.values.worklist}}`) | `run_id`, `connection_id: {{input.connection_id}}` | `assessment_id`, `objects`, `summary` |
-| `T03_Assessment_Summary` | `deployment/NB_AssessmentSummary` (run_if: ALL_DONE) | `run_id`, `source_system` | `connections_assessed`, `assessments`, `objects_assessed`, `selected_table_count`, `business_status` |
-| `T04_Notify_Assessment_Failures` | `shared/NB16_NotifyFailures` (run_if: ALL_DONE) | `run_id`, `pipeline_name=INGEST_ASSESSMENT` | - |
+| `T01_Init_Control` | `shared/NB00_ControlTableInit` | `run_id` | `run_id` |
+| `T02_Get_Configured_Connection_Worklist` | `deployment/NB_GetConnectionWorklist` | `run_id`, `source_system` (fixed: `oracle` or `sqlserver`), `connection_mode: CONFIGURED`, optional `max_connections`, optional `only_connection_ids`, optional `exclude_connection_ids` | `worklist`, `worklist_count` |
+| `T03_ForEach_Validate_Connection` | `sources/<source>/NB00A_UpsertAndValidateConnection` (For Each `{{tasks.T02_Get_Configured_Connection_Worklist.values.worklist}}`) | `run_id: {{tasks.T00_Create_Run_Context.values.run_id}}`, `connection_id: {{input.connection_id}}`, `catalog: da_accelerators`, `control_schema: control` | `status`, `connection_status`, `run_id`, `connection_id`, `source_system`, `source_database` |
+| `T04_Get_Valid_Connection_Worklist` | `deployment/NB_GetConnectionWorklist` (depends_on: `T03_ForEach_Validate_Connection`) | `run_id`, `source_system` (fixed: `oracle` or `sqlserver`), `connection_mode: VALID`, optional `max_connections`, optional `only_connection_ids`, optional `exclude_connection_ids` | `worklist`, `worklist_count` |
+| `T05_ForEach_Connection_Assessment` | `sources/<source>/NB01A_SourceAssessment` (For Each `{{tasks.T04_Get_Valid_Connection_Worklist.values.worklist}}`) | `run_id`, `connection_id: {{input.connection_id}}` | `assessment_id`, `objects`, `summary` |
+| `T06_Assessment_Summary` | `deployment/NB_AssessmentSummary` (run_if: ALL_DONE, depends_on: `T05_ForEach_Connection_Assessment`) | `run_id`, `source_system` | `connections_assessed`, `assessments`, `objects_assessed`, `selected_table_count`, `business_status` |
 
-*Note on orchestration:* `source_system` is an internal fixed task parameter in Job YAML, not a user-entered `Run now` parameter. Worklist items contain strictly `{"connection_id": "..."}`. Databricks Job YAML files remain unchanged in this task and will be wired in a separate task.
+*Note on orchestration:*
+- `source_connection` is pre-populated by an operator or trusted configuration process; NB00A validates an existing row and never inserts or updates connection configuration metadata.
+- Job 1A passes only `connection_id` to NB00A; no metadata or secrets are passed through Job parameters.
+- `source_system` is an internal fixed task parameter in Job YAML (`oracle` or `sqlserver`), not a user-entered runtime parameter.
+- Both worklist tasks emit strictly `[{"connection_id": "..."}]`.
+- Assessment (`T05`) runs only for successfully validated, active connections discovered by `T04`.
+- No notification task is included.
 
 ---
 
@@ -160,7 +199,7 @@ Create Run Context (T00)
 | Task key | Notebook | Parameters | Output |
 |---|---|---|---|
 | `T00_Init_Control` | `shared/NB00_ControlTableInit` | - | `run_id` |
-| `T01_Validate_Oracle_Connection` *or* `T01_Validate_SQLServer_Connection` | `sources/oracle/NB00A_UpsertAndValidateConnection` *or* `sources/sqlserver/NB00A_UpsertAndValidateConnection` | `run_id`, `connection_id`, `connection_name`, `source_server`, `source_database`, `secret_scope`, `trust_server_certificate` | `status`, `connection_id`, `source_system`, `source_database` |
+| `T01_Validate_Oracle_Connection` *or* `T01_Validate_SQLServer_Connection` | `sources/oracle/NB00A_UpsertAndValidateConnection` *or* `sources/sqlserver/NB00A_UpsertAndValidateConnection` | `run_id`, `connection_id`, `catalog`, `control_schema` | `status`, `connection_status`, `run_id`, `connection_id`, `source_system`, `source_database` |
 | `T02_Oracle_Source_Assessment` *or* `T02_SQLServer_Source_Assessment` | `sources/oracle/NB01A_SourceAssessment` *or* `sources/sqlserver/NB01A_SourceAssessment` | `run_id`, `connection_id`, `assessment_id`, `include_schemas`, `exclude_schemas`, `include_object_types` | `assessment_id`, `objects`, `summary` |
 | `T03_Register_Selected_Tables` | `shared/NB01B_RegisterSelectedTables` | `assessment_id`, `connection_id`, `selected_schemas`, `selected_tables`, `target_catalog`, `target_schema_mode`, `target_schema` | worklist, conflicts |
 | `T04_Oracle_Source_Inventory` *or* `T04_SQLServer_Source_Inventory` | `sources/oracle/NB01_SourceInventory` *or* `sources/sqlserver/NB01_SourceInventory` | `run_id`, `connection_id` | tables, columns |

@@ -1,11 +1,15 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # Oracle / NB00A_UpsertAndValidateConnection
-# MAGIC INGEST task that onboards one **Oracle** source connection. `source_system`
-# MAGIC is fixed by this notebook, not accepted as a widget. It upserts only
-# MAGIC non-secret metadata into `source_connection`, then opens the real JDBC
-# MAGIC connection through the Oracle adapter (credentials stay in the connection's
-# MAGIC secret scope) and runs the Oracle connectivity probe.
+# MAGIC INGEST task that validates an existing registered **Oracle** source connection.
+# MAGIC `source_system` is fixed by this notebook, not accepted as a widget.
+# MAGIC The registered `source_connection` record is the sole authority for connection
+# MAGIC metadata; this notebook does not accept metadata widgets, does not insert or
+# MAGIC upsert rows, and does not mutate connection configuration.
+# MAGIC It opens the real JDBC connection through the Oracle adapter (credentials stay
+# MAGIC in the connection's secret scope) and runs the Oracle connectivity probe.
+# MAGIC On successful probe, connection status is updated to VALID (is_active = True).
+# MAGIC On failure, status is updated to FAILED (is_active = False) with sanitized error.
 # MAGIC It never stores, returns, or prints a credential or a JDBC URL.
 
 # COMMAND ----------
@@ -16,44 +20,33 @@
 
 SOURCE_SYSTEM = "oracle"
 
-dbutils.widgets.text("connection_id", "")
-dbutils.widgets.text("connection_name", "")
-dbutils.widgets.text("source_server", "")
-dbutils.widgets.text("source_database", "")
-dbutils.widgets.text("secret_scope", "")
-dbutils.widgets.dropdown("trust_server_certificate", "false", ["true", "false"])
-
 run_id = get_run_id()
+connection_id = require_connection_id(
+    CONNECTION_ID, "Oracle connection validation"
+)
 repo = control_repo()
 
-# Oracle identifies its database through the registered JDBC URL or service in
-# the secret scope, so source_database is optional metadata here.
-clean = normalize_connection_input({
-    "connection_id": dbutils.widgets.get("connection_id"),
-    "connection_name": dbutils.widgets.get("connection_name"),
-    "source_system": SOURCE_SYSTEM,
-    "source_server": dbutils.widgets.get("source_server"),
-    "source_database": dbutils.widgets.get("source_database"),
-    "secret_scope": dbutils.widgets.get("secret_scope"),
-    "trust_server_certificate":
-        dbutils.widgets.get("trust_server_certificate").strip() == "true",
-})
-connection_id = clean["connection_id"]
+connection = repo.get_connection(connection_id)
+if connection is None:
+    raise ValueError(f"connection_id '{connection_id}' was not found in source_connection")
 
-# COMMAND ----------
+connection_data = connection.asDict() if hasattr(connection, "asDict") else dict(connection)
 
-repo.upsert_connection({**clean, "connection_status": "REGISTERED",
-                        "is_active": False, "error_message": None})
-print(f"Upserted Oracle connection {connection_id}.")
+conn_system = require_source_system(
+    connection_data.get("source_system"), "Oracle connection validation"
+)
+assert_source_system_match(SOURCE_SYSTEM, conn_system)
 
 # COMMAND ----------
 
 status = "FAILED"
 try:
-    connection = repo.get_connection(connection_id)
+    if not (connection_data.get("source_server") or "").strip():
+        raise ValueError(f"connection {connection_id!r} has no source_server")
+
     adapter = get_source_adapter_for_connection(connection, require_valid=False)
-    probe_connection(adapter, source_server=clean["source_server"],
-                     source_database=clean["source_database"])
+    probe_connection(adapter, source_server=connection_data.get("source_server"),
+                     source_database=connection_data.get("source_database"))
     repo.update_connection_status(connection_id, "VALID", None)
     status = "VALID"
     print(f"Connection {connection_id} validated: VALID")
@@ -67,7 +60,9 @@ except Exception as e:
 
 # COMMAND ----------
 
+set_task_value("run_id", run_id)
 set_task_value("connection_id", connection_id)
+set_task_value("source_system", SOURCE_SYSTEM)
 set_task_value("status", status)
 set_task_value("connection_status", status)
 dbutils.notebook.exit(json.dumps({
@@ -76,5 +71,5 @@ dbutils.notebook.exit(json.dumps({
     "run_id": run_id,
     "connection_id": connection_id,
     "source_system": SOURCE_SYSTEM,
-    "source_database": clean["source_database"],
+    "source_database": connection_data.get("source_database"),
 }))

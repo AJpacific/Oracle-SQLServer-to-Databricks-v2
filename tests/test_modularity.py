@@ -436,12 +436,12 @@ class TestSourceContractParity(unittest.TestCase):
                    for t in SOURCE_TOKENS]
         self.assertEqual(widgets[0], widgets[1])
         for w in widgets:
-            for expected in ("connection_id", "connection_name", "source_server",
-                             "source_database", "secret_scope",
-                             "trust_server_certificate"):
-                self.assertIn(expected, w)
-            # source_system is fixed by the notebook, never a widget.
-            self.assertNotIn("source_system", w)
+            # NB00A validates an existing connection by connection_id;
+            # it does not expose metadata widgets or recreate connection_id widget.
+            for forbidden in ("connection_name", "source_server", "source_database",
+                              "secret_scope", "trust_server_certificate", "source_system",
+                              "connection_id"):
+                self.assertNotIn(forbidden, w)
 
     def test_connection_notebook_outputs(self):
         keys = [self._exit_keys(source_nb(t, "NB00A_UpsertAndValidateConnection.py"))

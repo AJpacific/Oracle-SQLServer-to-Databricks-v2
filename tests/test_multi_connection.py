@@ -699,11 +699,13 @@ class TestConnectionWorklistNotebook(unittest.TestCase):
     def test_connection_worklist_inputs_and_guards(self):
         self.assertIn('widgets.text("run_id"', self.code)
         self.assertIn('widgets.text("source_system"', self.code)
+        self.assertIn('widgets.dropdown("connection_mode", "VALID", ["VALID", "CONFIGURED"])', self.code)
         self.assertIn('widgets.text("max_connections"', self.code)
         self.assertIn('widgets.text("only_connection_ids"', self.code)
         self.assertIn('widgets.text("exclude_connection_ids"', self.code)
         self.assertIn("require_source_system(source_system_raw", self.code)
         self.assertIn("max_connections must be a non-negative integer", self.code)
+        self.assertIn("connection_mode must be 'VALID' or 'CONFIGURED'", self.code)
 
     def test_connection_worklist_emits_only_connection_id(self):
         item = self.code.split("worklist = [", 1)[1].split("for cid in conn_ids", 1)[0]
@@ -716,6 +718,7 @@ class TestConnectionWorklistNotebook(unittest.TestCase):
     def test_connection_worklist_task_values_and_exit(self):
         self.assertIn('taskValues.set(key="run_id"', self.code)
         self.assertIn('taskValues.set(key="source_system"', self.code)
+        self.assertIn('taskValues.set(key="connection_mode"', self.code)
         self.assertIn('taskValues.set(key="worklist", value=worklist)', self.code)
         self.assertIn('taskValues.set(key="worklist_count"', self.code)
         self.assertIn('"business_status": "NO_ELIGIBLE_CONNECTIONS"', self.code)
@@ -841,6 +844,55 @@ class TestConnectionDiscovery(unittest.TestCase):
     def test_projection_excludes_endpoints_and_secrets(self):
         repo = ControlRepository(FakeSpark(results=[[]]), "cat", "ctrl")
         repo.valid_active_connections_for_source("oracle")
+        sql = repo.spark.last_sql()
+        self.assertTrue(sql.startswith("SELECT connection_id FROM"))
+        prefix = sql.lower().split("from")[0]
+        for forbidden in ("source_server", "source_database", "secret_scope", "password", "jdbc"):
+            self.assertNotIn(forbidden, prefix)
+
+    def test_configured_discovery_oracle(self):
+        repo = ControlRepository(FakeSpark(results=[[]]), "cat", "ctrl")
+        repo.configured_connections_for_source("oracle")
+        sql = repo.spark.last_sql()
+        self.assertIn("lower(trim(source_system)) = 'oracle'", sql)
+        self.assertIn("upper(connection_status) IN ('REGISTERED', 'VALID', 'FAILED')", sql)
+        self.assertNotIn("is_active = true", sql)
+        self.assertIn("source_server IS NOT NULL", sql)
+        self.assertIn("secret_scope IS NOT NULL", sql)
+        self.assertIn("ORDER BY connection_id ASC", sql)
+
+    def test_configured_discovery_sqlserver(self):
+        repo = ControlRepository(FakeSpark(results=[[]]), "cat", "ctrl")
+        repo.configured_connections_for_source("sqlserver")
+        sql = repo.spark.last_sql()
+        self.assertIn("lower(trim(source_system)) = 'sqlserver'", sql)
+        self.assertIn("source_database IS NOT NULL", sql)
+        self.assertNotIn("is_active = true", sql)
+
+    def test_configured_discovery_filters_and_precedence(self):
+        repo = ControlRepository(FakeSpark(results=[[]]), "cat", "ctrl")
+        repo.configured_connections_for_source(
+            "oracle",
+            only_connection_ids=["c1", "c2"],
+            exclude_connection_ids=["c2", "c3"]
+        )
+        sql = repo.spark.last_sql()
+        self.assertIn("connection_id IN ('c1')", sql)
+        self.assertIn("connection_id NOT IN ('c2', 'c3')", sql)
+
+    def test_configured_discovery_exclusion_wins_entirely(self):
+        repo = ControlRepository(FakeSpark(results=[[]]), "cat", "ctrl")
+        repo.configured_connections_for_source(
+            "oracle",
+            only_connection_ids=["c1"],
+            exclude_connection_ids=["c1"]
+        )
+        sql = repo.spark.last_sql()
+        self.assertIn("1 = 0", sql)
+
+    def test_configured_discovery_projection(self):
+        repo = ControlRepository(FakeSpark(results=[[]]), "cat", "ctrl")
+        repo.configured_connections_for_source("oracle")
         sql = repo.spark.last_sql()
         self.assertTrue(sql.startswith("SELECT connection_id FROM"))
         prefix = sql.lower().split("from")[0]
@@ -1004,6 +1056,438 @@ class TestControlTableInitValidations(unittest.TestCase):
             "INVALID_ASSESSMENT_SELECTION_STATUS",
         ):
             self.assertIn(f'"{validation_code}"', code)
+
+
+class FakeDbUtilsTV:
+    def __init__(self, widgets_dict):
+        self._widgets = dict(widgets_dict)
+        self.task_values = {}
+        self.exit_payload = None
+        self.widgets = self
+
+    def get(self, name):
+        return str(self._widgets.get(name, ""))
+
+    def text(self, name, default=""):
+        if name not in self._widgets:
+            self._widgets[name] = default
+
+    def dropdown(self, name, default="", choices=None):
+        if name not in self._widgets:
+            self._widgets[name] = default
+
+    @property
+    def notebook(self):
+        outer = self
+        class _NB:
+            def exit(self, val):
+                outer.exit_payload = val
+        return _NB()
+
+    @property
+    def jobs(self):
+        outer = self
+        class _Jobs:
+            @property
+            def taskValues(self):
+                class _TV:
+                    def set(self, key, value):
+                        outer.task_values[key] = value
+                return _TV()
+        return _Jobs()
+
+
+def _run_nb00a(source_token, widgets_dict, connection_row=None, probe_side_effect=None):
+    dbutils = FakeDbUtilsTV(widgets_dict)
+    status_updates = []
+
+    class FakeRepo:
+        def get_connection(self, cid):
+            if connection_row is not None and connection_row.get("connection_id") == cid:
+                return FakeRow(**connection_row)
+            return None
+
+        def update_connection_status(self, cid, status, error_message=None):
+            status_updates.append({"connection_id": cid, "status": status, "error_message": error_message})
+
+        def upsert_connection(self, *args, **kwargs):
+            raise AssertionError("NB00A must not call repo.upsert_connection")
+
+    repo_instance = FakeRepo()
+    probe_calls = []
+
+    def fake_probe_connection(adapter, source_server=None, source_database=None):
+        probe_calls.append({"adapter": adapter, "server": source_server, "database": source_database})
+        if probe_side_effect:
+            if isinstance(probe_side_effect, Exception):
+                raise probe_side_effect
+            probe_side_effect()
+        return True
+
+    from source_identity import require_source_system
+    from control_repository import assert_source_system_match, require_connection_id
+    from failure_classifier import sanitize_message
+
+    class FakeFailCls:
+        @staticmethod
+        def sanitize_message(exc):
+            return sanitize_message(str(exc))
+
+    def fake_get_source_adapter(conn, require_valid=False):
+        c = conn.asDict() if hasattr(conn, "asDict") else dict(conn)
+        scope = (c.get("secret_scope") or "").strip()
+        if not scope:
+            raise ValueError(f"registered connection {c.get('connection_id')!r} has a blank secret_scope")
+        sys_token = require_source_system(c.get("source_system"), "test adapter")
+        if sys_token == "sqlserver" and not (c.get("source_database") or "").strip():
+            raise ValueError(f"connection {c.get('connection_id')!r} has no source_database; SQL Server connections require one")
+        class FakeAdapter:
+            source_system = sys_token
+        return FakeAdapter()
+
+    nb_code = source_nb(source_token, "NB00A_UpsertAndValidateConnection.py")
+    lines = [l for l in nb_code.splitlines() if not l.strip().startswith(("%", "# MAGIC"))]
+    clean_code = "\n".join(lines)
+
+    env = {
+        "dbutils": dbutils,
+        "get_run_id": lambda: widgets_dict.get("run_id", "test_run_01"),
+        "CONNECTION_ID": widgets_dict.get("connection_id", ""),
+        "require_connection_id": require_connection_id,
+        "control_repo": lambda: repo_instance,
+        "require_source_system": require_source_system,
+        "assert_source_system_match": assert_source_system_match,
+        "get_source_adapter_for_connection": fake_get_source_adapter,
+        "probe_connection": fake_probe_connection,
+        "failcls": FakeFailCls,
+        "set_task_value": lambda k, v: dbutils.jobs.taskValues.set(k, v),
+        "json": json,
+        "print": lambda *args: None,
+    }
+
+    exec(clean_code, env)
+    return {
+        "dbutils": dbutils,
+        "status_updates": status_updates,
+        "probe_calls": probe_calls,
+        "exit_payload": json.loads(dbutils.exit_payload) if dbutils.exit_payload else None,
+        "task_values": dbutils.task_values,
+    }
+
+
+class TestConnectionValidationNotebookContract(unittest.TestCase):
+    def test_01_fixed_source_system(self):
+        for token in ("oracle", "sqlserver"):
+            code = source_nb(token, "NB00A_UpsertAndValidateConnection.py")
+            self.assertIn(f'SOURCE_SYSTEM = "{token}"', code)
+
+    def test_02_no_source_metadata_widgets(self):
+        for token in ("oracle", "sqlserver"):
+            code = source_nb(token, "NB00A_UpsertAndValidateConnection.py")
+            self.assertNotIn("dbutils.widgets", code)
+            self.assertNotIn("widgets.text", code)
+            self.assertNotIn("widgets.dropdown", code)
+
+    def test_03_no_call_to_upsert_connection(self):
+        for token in ("oracle", "sqlserver"):
+            code = source_nb(token, "NB00A_UpsertAndValidateConnection.py")
+            self.assertNotIn("repo.upsert_connection", code)
+            self.assertNotIn("upsert_connection", code)
+
+    def test_04_reads_row_with_get_connection(self):
+        for token in ("oracle", "sqlserver"):
+            code = source_nb(token, "NB00A_UpsertAndValidateConnection.py")
+            self.assertIn("repo.get_connection(connection_id)", code)
+
+    def test_05_missing_connection_id_fails(self):
+        for token in ("oracle", "sqlserver"):
+            with self.assertRaises(ValueError) as ctx:
+                _run_nb00a(token, {"connection_id": ""})
+            self.assertIn("requires connection_id", str(ctx.exception))
+
+    def test_06_unknown_connection_id_fails(self):
+        for token in ("oracle", "sqlserver"):
+            with self.assertRaises(ValueError) as ctx:
+                _run_nb00a(token, {"connection_id": "c_missing"}, connection_row=None)
+            self.assertEqual(
+                str(ctx.exception),
+                "connection_id 'c_missing' was not found in source_connection"
+            )
+
+    def test_07_oracle_rejects_sqlserver_connection(self):
+        row = {
+            "connection_id": "conn_sql",
+            "source_system": "sqlserver",
+            "source_server": "sql.example.com",
+            "source_database": "TestDB",
+            "secret_scope": "sql_scope",
+            "connection_status": "REGISTERED",
+            "is_active": False,
+        }
+        with self.assertRaises(ValueError) as ctx:
+            _run_nb00a("oracle", {"connection_id": "conn_sql"}, connection_row=row)
+        self.assertIn("source_system conflict", str(ctx.exception))
+
+    def test_08_sqlserver_rejects_oracle_connection(self):
+        row = {
+            "connection_id": "conn_ora",
+            "source_system": "oracle",
+            "source_server": "ora.example.com",
+            "source_database": "ORCL",
+            "secret_scope": "ora_scope",
+            "connection_status": "REGISTERED",
+            "is_active": False,
+        }
+        with self.assertRaises(ValueError) as ctx:
+            _run_nb00a("sqlserver", {"connection_id": "conn_ora"}, connection_row=row)
+        self.assertIn("source_system conflict", str(ctx.exception))
+
+    def test_09_missing_source_system_fails(self):
+        for token in ("oracle", "sqlserver"):
+            row = {
+                "connection_id": "c1",
+                "source_system": "",
+                "source_server": "srv1",
+                "secret_scope": "sc1",
+            }
+            with self.assertRaises(ValueError) as ctx:
+                _run_nb00a(token, {"connection_id": "c1"}, connection_row=row)
+            self.assertIn("source_system", str(ctx.exception).lower())
+
+    def test_10_unknown_source_system_fails(self):
+        for token in ("oracle", "sqlserver"):
+            row = {
+                "connection_id": "c1",
+                "source_system": "unsupported_engine",
+                "source_server": "srv1",
+                "secret_scope": "sc1",
+            }
+            with self.assertRaises(ValueError) as ctx:
+                _run_nb00a(token, {"connection_id": "c1"}, connection_row=row)
+            self.assertIn("unsupported source_system", str(ctx.exception).lower())
+
+    def test_11_sqlserver_missing_source_database_fails_before_probe(self):
+        row = {
+            "connection_id": "conn_sql_nodb",
+            "source_system": "sqlserver",
+            "source_server": "sql.example.com",
+            "source_database": "",
+            "secret_scope": "sql_scope",
+            "connection_status": "REGISTERED",
+            "is_active": False,
+        }
+        with self.assertRaises(ValueError) as ctx:
+            _run_nb00a("sqlserver", {"connection_id": "conn_sql_nodb"}, connection_row=row)
+        self.assertIn("source_database", str(ctx.exception).lower())
+
+    def test_12_blank_secret_scope_fails_before_probe(self):
+        for token in ("oracle", "sqlserver"):
+            row = {
+                "connection_id": "conn_noscope",
+                "source_system": token,
+                "source_server": "srv.example.com",
+                "source_database": "DB" if token == "sqlserver" else None,
+                "secret_scope": "",
+                "connection_status": "REGISTERED",
+                "is_active": False,
+            }
+            with self.assertRaises(ValueError) as ctx:
+                _run_nb00a(token, {"connection_id": "conn_noscope"}, connection_row=row)
+            self.assertIn("secret_scope", str(ctx.exception).lower())
+
+    def test_13_successful_probe_updates_status_to_valid(self):
+        for token in ("oracle", "sqlserver"):
+            row = {
+                "connection_id": f"conn_{token}_ok",
+                "source_system": token,
+                "source_server": f"{token}.example.com",
+                "source_database": "DB1" if token == "sqlserver" else "ORCL",
+                "secret_scope": f"{token}_scope",
+                "connection_status": "REGISTERED",
+                "is_active": False,
+            }
+            res = _run_nb00a(token, {"run_id": "run_test_01", "connection_id": row["connection_id"]}, connection_row=row)
+            self.assertEqual(len(res["status_updates"]), 1)
+            self.assertEqual(res["status_updates"][0]["status"], "VALID")
+            self.assertIsNone(res["status_updates"][0]["error_message"])
+            self.assertEqual(res["exit_payload"]["status"], "VALID")
+            self.assertEqual(res["exit_payload"]["connection_status"], "VALID")
+            self.assertEqual(res["task_values"]["status"], "VALID")
+            self.assertEqual(res["task_values"]["connection_status"], "VALID")
+            self.assertEqual(len(res["probe_calls"]), 1)
+
+    def test_14_failed_probe_updates_status_to_failed(self):
+        for token in ("oracle", "sqlserver"):
+            row = {
+                "connection_id": f"conn_{token}_fail",
+                "source_system": token,
+                "source_server": f"{token}.example.com",
+                "source_database": "DB1" if token == "sqlserver" else "ORCL",
+                "secret_scope": f"{token}_scope",
+                "connection_status": "REGISTERED",
+                "is_active": False,
+            }
+            with self.assertRaises(RuntimeError):
+                _run_nb00a(
+                    token,
+                    {"run_id": "run_test_01", "connection_id": row["connection_id"]},
+                    connection_row=row,
+                    probe_side_effect=RuntimeError("connection refused")
+                )
+
+    def test_15_failed_probe_keeps_is_active_false_through_update_connection_status(self):
+        spark = FakeSpark(results=[[]])
+        repo = ControlRepository(spark, "cat", "ctrl")
+        repo.update_connection_status("conn_fail", "FAILED", "some error")
+        sql = spark.last_sql()
+        self.assertIn("`connection_status` = 'FAILED'", sql)
+        self.assertIn("`is_active` = false", sql)
+        self.assertIn("`error_message` = 'some error'", sql)
+        self.assertNotIn("`last_validated_ts`", sql)
+
+    def test_16_failure_text_is_sanitized_and_bounded(self):
+        repo_spark = FakeSpark(results=[[]])
+        repo = ControlRepository(repo_spark, "cat", "ctrl")
+        long_secret_error = "Authentication failed: password=super_secret_token_12345! " + ("x" * 2000)
+        from failure_classifier import sanitize_message
+        safe = sanitize_message(long_secret_error)
+        self.assertNotIn("super_secret_token_12345", safe)
+        self.assertIn("password=***", safe)
+        repo.update_connection_status("conn_1", "FAILED", safe[:1000])
+        sql = repo_spark.last_sql()
+        self.assertNotIn("super_secret_token_12345", sql)
+        self.assertIn("password=***", sql)
+        self.assertLessEqual(len(safe[:1000]), 1000)
+
+    def test_17_credentials_and_secrets_not_returned(self):
+        for token in ("oracle", "sqlserver"):
+            row = {
+                "connection_id": f"conn_{token}_safe",
+                "source_system": token,
+                "source_server": f"{token}.example.com",
+                "source_database": "DB1" if token == "sqlserver" else "ORCL",
+                "secret_scope": "super_secret_scope",
+                "connection_status": "REGISTERED",
+                "is_active": False,
+            }
+            res = _run_nb00a(token, {"run_id": "run_1", "connection_id": row["connection_id"]}, connection_row=row)
+            exit_str = json.dumps(res["exit_payload"]).lower()
+            tv_str = json.dumps(res["task_values"]).lower()
+            for forbidden in ("secret_scope", "super_secret_scope", "password", "jdbc", "source_server"):
+                self.assertNotIn(forbidden, exit_str)
+                self.assertNotIn(forbidden, tv_str)
+
+    def test_18_source_connection_metadata_not_mutated_by_nb00a(self):
+        for token in ("oracle", "sqlserver"):
+            code = source_nb(token, "NB00A_UpsertAndValidateConnection.py")
+            self.assertNotIn("repo.upsert_connection", code)
+            self.assertNotIn("repo.save_connection", code)
+            self.assertNotIn("UPDATE", code)
+
+    def test_19_worklist_configured_mode_includes_all_statuses(self):
+        spark = FakeSpark(results=[[]])
+        repo = ControlRepository(spark, "cat", "ctrl")
+        repo.configured_connections_for_source("oracle")
+        sql = spark.last_sql()
+        self.assertIn("upper(connection_status) IN ('REGISTERED', 'VALID', 'FAILED')", sql)
+        self.assertIn("source_server IS NOT NULL", sql)
+        self.assertIn("secret_scope IS NOT NULL", sql)
+
+    def test_20_worklist_configured_mode_does_not_require_active(self):
+        spark = FakeSpark(results=[[]])
+        repo = ControlRepository(spark, "cat", "ctrl")
+        repo.configured_connections_for_source("oracle")
+        sql = spark.last_sql()
+        self.assertNotIn("is_active = true", sql)
+
+    def test_21_worklist_valid_mode_preserves_active_and_valid(self):
+        spark = FakeSpark(results=[[]])
+        repo = ControlRepository(spark, "cat", "ctrl")
+        repo.valid_active_connections_for_source("oracle")
+        sql = spark.last_sql()
+        self.assertIn("is_active = true", sql)
+        self.assertIn("connection_status = 'VALID'", sql)
+
+    def test_22_worklist_emits_only_connection_id(self):
+        for mode in ("valid_active_connections_for_source", "configured_connections_for_source"):
+            spark = FakeSpark(results=[[]])
+            repo = ControlRepository(spark, "cat", "ctrl")
+            getattr(repo, mode)("oracle")
+            sql = spark.last_sql()
+            self.assertTrue(sql.startswith("SELECT connection_id FROM"))
+
+    def test_23_worklist_only_and_exclude_filters(self):
+        for mode in ("valid_active_connections_for_source", "configured_connections_for_source"):
+            spark = FakeSpark(results=[[]])
+            repo = ControlRepository(spark, "cat", "ctrl")
+            getattr(repo, mode)("oracle", only_connection_ids=["c1", "c2"], exclude_connection_ids=["c2"])
+            sql = spark.last_sql()
+            self.assertIn("connection_id IN ('c1')", sql)
+            self.assertIn("connection_id NOT IN ('c2')", sql)
+
+    def test_24_worklist_exclusion_precedence_unchanged(self):
+        for mode in ("valid_active_connections_for_source", "configured_connections_for_source"):
+            spark = FakeSpark(results=[[]])
+            repo = ControlRepository(spark, "cat", "ctrl")
+            getattr(repo, mode)("oracle", only_connection_ids=["c1"], exclude_connection_ids=["c1"])
+            sql = spark.last_sql()
+            self.assertIn("1 = 0", sql)
+
+    def test_25_nb00a_output_contract_parity(self):
+        ora_row = {
+            "connection_id": "c_ora",
+            "source_system": "oracle",
+            "source_server": "ora.example.com",
+            "source_database": "ORCL",
+            "secret_scope": "ora_scope",
+            "connection_status": "REGISTERED",
+            "is_active": False,
+        }
+        sql_row = {
+            "connection_id": "c_sql",
+            "source_system": "sqlserver",
+            "source_server": "sql.example.com",
+            "source_database": "DB1",
+            "secret_scope": "sql_scope",
+            "connection_status": "REGISTERED",
+            "is_active": False,
+        }
+        res_ora = _run_nb00a("oracle", {"run_id": "r1", "connection_id": "c_ora"}, connection_row=ora_row)
+        res_sql = _run_nb00a("sqlserver", {"run_id": "r1", "connection_id": "c_sql"}, connection_row=sql_row)
+        self.assertEqual(set(res_ora["exit_payload"].keys()), set(res_sql["exit_payload"].keys()))
+        self.assertEqual(
+            set(res_ora["exit_payload"].keys()),
+            {"status", "connection_status", "run_id", "connection_id", "source_system", "source_database"}
+        )
+        self.assertEqual(set(res_ora["task_values"].keys()), set(res_sql["task_values"].keys()))
+        self.assertEqual(
+            set(res_ora["task_values"].keys()),
+            {"run_id", "connection_id", "source_system", "status", "connection_status"}
+        )
+
+    def test_26_notebook_cells_compile_and_run_targets_resolve(self):
+        import re
+        for token in ("oracle", "sqlserver"):
+            code = source_nb(token, "NB00A_UpsertAndValidateConnection.py")
+            ordinary = "\n".join(
+                line for line in code.splitlines()
+                if not line.lstrip().startswith(("%", "# MAGIC"))
+            )
+            ast.parse(ordinary)
+
+            # Check %run targets
+            run_matches = re.findall(r"%run\s+([^\s\n]+)", code)
+            self.assertTrue(len(run_matches) >= 1)
+            for target in run_matches:
+                nb_dir = os.path.join(ROOT, "notebooks", "sources", token)
+                resolved = os.path.normpath(os.path.join(nb_dir, target))
+                if not resolved.endswith(".py") and not resolved.endswith(".ipynb"):
+                    resolved_py = resolved + ".py"
+                    resolved_ipynb = resolved + ".ipynb"
+                    exists = os.path.isfile(resolved_py) or os.path.isfile(resolved_ipynb)
+                else:
+                    exists = os.path.isfile(resolved)
+                self.assertTrue(exists, f"Resolved %run target {resolved} does not exist for {token}")
 
 
 if __name__ == "__main__":

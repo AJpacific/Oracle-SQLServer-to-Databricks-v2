@@ -531,6 +531,61 @@ class ControlRepository:
         sql += " ORDER BY connection_id ASC"
         return self.spark.sql(sql)
 
+    def configured_connections_for_source(
+        self,
+        source_system: str,
+        only_connection_ids: list[str] | None = None,
+        exclude_connection_ids: list[str] | None = None,
+    ):
+        """Return lazy DataFrame of candidate configured connection IDs for validation.
+
+        Includes REGISTERED, VALID, and FAILED status rows without requiring is_active=true.
+        Requires nonblank connection_id, matching source_system, nonblank source_server,
+        nonblank secret_scope, and nonblank source_database for SQL Server.
+        Projects ONLY connection_id, ordered deterministically by connection_id.
+        Exclusion wins over inclusion. Never returns secret_scope or endpoints.
+        """
+        norm_system = require_source_system(source_system, "connection discovery")
+        db_clause = (
+            "AND source_database IS NOT NULL AND trim(source_database) <> '' "
+            if norm_system in SOURCES_REQUIRING_DATABASE else ""
+        )
+        sql = (
+            f"SELECT connection_id FROM {self.ctrl('source_connection')} "
+            f"WHERE upper(connection_status) IN ('REGISTERED', 'VALID', 'FAILED') "
+            f"AND source_server IS NOT NULL AND trim(source_server) <> '' "
+            f"AND secret_scope IS NOT NULL AND trim(secret_scope) <> '' "
+            f"AND connection_id IS NOT NULL AND trim(connection_id) <> '' "
+            f"{db_clause}"
+            f"AND lower(trim(source_system)) = {escape_string_literal(norm_system)}"
+        )
+        clean_exclude = set()
+        if exclude_connection_ids:
+            clean_exclude = {
+                str(c).strip() for c in exclude_connection_ids if str(c).strip()
+            }
+
+        clean_only = set()
+        if only_connection_ids is not None:
+            raw_only = [str(c).strip() for c in only_connection_ids if str(c).strip()]
+            clean_only = {c for c in raw_only if c not in clean_exclude}
+            if raw_only and not clean_only:
+                sql += " AND 1 = 0"
+            elif clean_only:
+                in_list = ", ".join(
+                    escape_string_literal(c) for c in sorted(clean_only)
+                )
+                sql += f" AND connection_id IN ({in_list})"
+
+        if clean_exclude:
+            not_in_list = ", ".join(
+                escape_string_literal(c) for c in sorted(clean_exclude)
+            )
+            sql += f" AND connection_id NOT IN ({not_in_list})"
+
+        sql += " ORDER BY connection_id ASC"
+        return self.spark.sql(sql)
+
     def upsert_connection(self, connection: dict):
         """Insert or update one source_connection row by connection_id.
 

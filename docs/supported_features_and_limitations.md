@@ -25,8 +25,10 @@
   before routing or identity generation.
 
 ### INGEST pipeline (source -> Bronze)
-- Pipeline-driven multi-connection onboarding (`source_connection` registry,
-  `NB00A`). Only non-secret metadata is stored.
+- Multi-connection validation (`source_connection` registry, `NB00A`).
+  Connection metadata is populated separately; NB00A validates an existing
+  registered connection by `connection_id` and updates its status to `VALID` or
+  `FAILED`. It does not upsert connection metadata.
 - Broad source assessment (`NB01A`, one notebook per source) using
   data-dictionary / catalog views: schemas, tables, views, procedures,
   functions, packages. Row counts are labelled `CATALOG` (SQL Server catalog
@@ -63,11 +65,8 @@
   inactive (`is_active = false`, `current_status = 'REGISTERED'`).
   Target collisions are checked across registrations by normalized target FQN.
   Supports `selection_mode = 'ASSESSMENT_FLAGS'` (control-table driven) and `WIDGETS` (legacy).
-- **Control-table-driven assessment (future Job 1A):**
-  Discovers all active `VALID` connections for an internally fixed `source_system`
-  (`oracle` or `sqlserver`) via `NB_GetConnectionWorklist`. Connection worklist items contain
-  strictly `{"connection_id": "..."}`. Assessments run connection-scoped inside For Each,
-  and `NB_AssessmentSummary` aggregates metrics across iterations without exposing secrets.
+- **Control-table-driven connection validation and assessment (Job 1A):**
+  Discovers configured candidate connections (`connection_mode = 'CONFIGURED'`), validates existing registered connections using source-specific `NB00A` (passing only `connection_id`), discovers active `VALID` connections (`connection_mode = 'VALID'`), and executes connection-scoped assessments (`NB01A`) in For Each tasks, followed by `NB_AssessmentSummary`. Connection worklist items contain strictly `{"connection_id": "..."}`. No notification task is included.
 - **Control-table-driven selected-table onboarding (future Job 1B):**
   Discovers eligible batches via `NB_GetSelectedAssessmentWorklist` emitting strictly
   `{"connection_id": "...", "assessment_id": "..."}`. Detects and blocks overlapping selected
