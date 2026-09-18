@@ -29,26 +29,30 @@ def ctrl(t):
 # global across all active registrations.
 auto = repo.active_tables_for_connection(
     connection_id, decision="AUTO_MIGRATE", include_onboarding=True).collect()
-all_active_auto = repo.active_tables(
-    decision="AUTO_MIGRATE", include_onboarding=True).collect()
 print("AUTO_MIGRATE tables:", len(auto))
 
 # COMMAND ----------
 
-# Collision guard: if two active source rows resolve to the same target FQN it is
-# a configuration error (they would silently overwrite each other), so mark both
-# rather than provisioning either.
-def _target_fqn(r):
-    t_catalog = r["target_catalog"] or CATALOG
-    t_schema = r["target_schema"] or r["source_schema"].lower()
-    t_table = r["target_table"] or r["source_table"].lower()
-    return f"{t_catalog}.{t_schema}.{t_table}"
+# Collision guard: if another registration reserves the same target FQN it is
+# a configuration error (they would overwrite each other), so mark rather than provisioning.
+# Intentionally retained batch collection: finding target owners in a single query
+# avoids executing N separate Spark queries for N tables.
+_all_target_rows = spark.sql(f"""
+    SELECT connection_id, source_table_id,
+           lower(concat_ws('.', coalesce(target_catalog, '{CATALOG}'),
+                 coalesce(target_schema, lower(source_schema)),
+                 coalesce(target_table, lower(source_table)))) AS target_fqn
+    FROM {ctrl('source_table_control')}
+    WHERE target_catalog IS NOT NULL AND trim(target_catalog) <> ''
+      AND target_schema IS NOT NULL AND trim(target_schema) <> ''
+      AND target_table IS NOT NULL AND trim(target_table) <> ''
+      AND coalesce(current_status, '') NOT IN ('RETIRED', 'DECOMMISSIONED')
+""").collect()
 
 _fqn_to_ids = {}
-for r in all_active_auto:
+for r in _all_target_rows:
     key = (r["connection_id"], r["source_table_id"])
-    _fqn_to_ids.setdefault(_target_fqn(r).lower(), set()).add(key)
-_collided_fqns = {fqn for fqn, ids in _fqn_to_ids.items() if len(ids) > 1}
+    _fqn_to_ids.setdefault(normalize_target_component(r["target_fqn"]), set()).add(key)
 
 # COMMAND ----------
 
@@ -65,11 +69,12 @@ for r in auto:
     t_table = r["target_table"] or s_table.lower()
     target_fqn = f"{t_catalog}.{t_schema}.{t_table}"
 
-    if target_fqn.lower() in _collided_fqns:
+    target_owners = _fqn_to_ids.get(normalize_target_component(target_fqn), set())
+    if target_owners - {(conn_id, src_id)}:
         failed += 1
         repo.update_control_for_connection(conn_id, src_id, {
             "current_status": "PROVISION_CONFIG_ERROR",
-            "error_message": ("target FQN collision: multiple active source rows "
+            "error_message": ("target FQN collision: multiple registrations "
                               f"resolve to {target_fqn}; disambiguate target_schema/"
                               "target_table before provisioning"),
         })

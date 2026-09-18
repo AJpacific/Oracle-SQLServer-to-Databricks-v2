@@ -86,7 +86,82 @@ WHERE source_table_id = '<reviewed legacy source_table_id>'
 Do not run a broad update and do not infer a source from a schema, database,
 table name, or secret key.
 
-## 5. Onboard a connection
+## 5. Configure target routing (accelerator_target_config)
+
+`NB00` creates `accelerator_target_config` for automatic target routing during selected-table onboarding.
+Automatic resolution uses a 3-tier precedence:
+1. **Connection-specific override** (`connection_id` matches)
+2. **Source-specific default** (`source_system` matches, `connection_id` is null)
+3. **Global default** (both `connection_id` and `source_system` are null)
+
+Target configuration applies **only to new table registrations**. Existing registrations retain their stored target identity permanently (`TARGET_CONFIG_CHANGED` guard). Inactive or non-default historical rows (`is_active = false` or `is_default = false`) do not participate in automatic target routing and do not block NB00 initialization.
+
+Do not seed environment-specific configuration automatically. Insert the required defaults according to deployment policy.
+
+### Selection and Onboarding Lifecycle:
+Assessment tables follow the lifecycle: `NOT_SELECTED -> SELECTED -> ONBOARDING -> REGISTERED -> ONBOARDED` (with safe failure state `FAILED`).
+1. `NB01B_RegisterSelectedTables` atomically claims eligible rows (`SELECTED -> ONBOARDING`) with run and attempt ownership, registers inactive rows in `source_table_control`, and transitions exact rows to `REGISTERED`. NB01B never sets `ONBOARDED`.
+2. Downstream tasks operate on `include_onboarding=True`. After `NB08_TargetProvisioning`, `NB_FinalizeSelectedTableOnboarding` verifies the active `PROVISIONED` registration and marks exact rows `ONBOARDED`.
+3. If downstream tasks fail, `NB_MarkSelectedOnboardingFailed` marks owned incomplete rows `FAILED`. Stale rows are never reset automatically; use `NB_RecoverSelectedOnboardingState` for reviewed recovery.
+4. All worklists enforce `TASK_VALUE_LIMIT_BYTES = 40_000` bytes (measured in UTF-8 bytes) via `validate_task_value_payload()`.
+
+### Global default:
+```sql
+INSERT INTO <catalog>.<control_schema>.accelerator_target_config (
+    config_id, source_system, connection_id, target_catalog,
+    target_schema_mode, target_schema, is_default, is_active,
+    created_ts, updated_ts
+)
+VALUES (
+    'GLOBAL_DEFAULT', NULL, NULL, 'migration_dev',
+    'SOURCE_SCHEMA', NULL, true, true,
+    current_timestamp(), current_timestamp()
+);
+```
+
+### Oracle default:
+```sql
+INSERT INTO <catalog>.<control_schema>.accelerator_target_config (
+    config_id, source_system, connection_id, target_catalog,
+    target_schema_mode, target_schema, is_default, is_active,
+    created_ts, updated_ts
+)
+VALUES (
+    'ORACLE_DEFAULT', 'oracle', NULL, 'migration_oracle',
+    'SOURCE_SCHEMA', NULL, true, true,
+    current_timestamp(), current_timestamp()
+);
+```
+
+### SQL Server default:
+```sql
+INSERT INTO <catalog>.<control_schema>.accelerator_target_config (
+    config_id, source_system, connection_id, target_catalog,
+    target_schema_mode, target_schema, is_default, is_active,
+    created_ts, updated_ts
+)
+VALUES (
+    'SQLSERVER_DEFAULT', 'sqlserver', NULL, 'migration_sqlserver',
+    'PREFIX_WITH_DATABASE', NULL, true, true,
+    current_timestamp(), current_timestamp()
+);
+```
+
+### Connection-specific override:
+```sql
+INSERT INTO <catalog>.<control_schema>.accelerator_target_config (
+    config_id, source_system, connection_id, target_catalog,
+    target_schema_mode, target_schema, is_default, is_active,
+    created_ts, updated_ts
+)
+VALUES (
+    'ORA_FINANCE_TARGET', 'oracle', 'ORA_FINANCE', 'finance_migration',
+    'EXPLICIT', 'bronze_finance', true, true,
+    current_timestamp(), current_timestamp()
+);
+```
+
+## 6. Onboard a connection
 
 Run the connection notebook for your source:
 `sources/oracle/NB00A_UpsertAndValidateConnection` or

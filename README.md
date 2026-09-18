@@ -12,6 +12,12 @@ config/
 notebooks/
   deployment/
     NB_CreateRunContext.ipynb
+    NB_GetConnectionWorklist.ipynb
+    NB_GetSelectedAssessmentWorklist.ipynb
+    NB_FinalizeSelectedTableOnboarding.py
+    NB_MarkSelectedOnboardingFailed.py
+    NB_RecoverSelectedOnboardingState.py
+    NB_AssessmentSummary.py
     NB_GetFullLoadWorklist.ipynb
     NB_GetDeltaWorklist.ipynb
     NB_MigrateSourceTableIdentityV2.py
@@ -74,6 +80,7 @@ src/
   sql_object_converter.py
   sqlserver_sql_builder.py
   strategy.py
+  worklist_utils.py
 docs/
   adding_a_new_source.md
   installation.md
@@ -95,6 +102,7 @@ tests/
   test_defect_fixes.py
   test_inventory_idempotency.py
   test_multi_connection.py
+  test_selection_lifecycle.py
   test_modularity.py
   test_notebook_wiring.py
   test_release_documentation.py
@@ -200,7 +208,58 @@ reads a source secret scope.
 - `NB01B_RegisterSelectedTables` registers only explicitly selected COMPATIBLE/
   REVIEW tables as **inactive** rows, computes the deterministic
   `source_table_id`, blocks target collisions, and preserves existing state.
+  Supports both `ASSESSMENT_FLAGS` (control-table driven) and legacy `WIDGETS` modes.
   Newly registered rows are never auto-activated.
+
+### Control-table-driven assessment and selected-table onboarding
+- **Connection worklist discovery (`NB_GetConnectionWorklist.ipynb`):** Future Job 1A
+  discovers all active `VALID` connections for an internally supplied `source_system`
+  (`oracle` or `sqlserver`) without user-entered parameters. Worklist items contain
+  strictly `{"connection_id": "..."}`. Secret scopes, JDBC URLs, and endpoints are never exposed.
+- **Connection-scoped assessment inside For Each:** Future Job 1A executes source
+  assessment per connection, followed by `NB_AssessmentSummary.py` to aggregate
+  run metrics without leaking credentials or table data.
+- **Target routing configuration (`accelerator_target_config`):** Target catalog and
+  schema routing are resolved automatically by 3-tier precedence:
+  1. Connection-specific override (`connection_id = '...'`)
+  2. Source-specific default (`source_system = 'oracle' / 'sqlserver'`)
+  3. Global default (`connection_id IS NULL AND source_system IS NULL`)
+  *Target configuration affects new registrations only.* Existing registrations
+  retain their stored target identity permanently (`TARGET_CONFIG_CHANGED` guard).
+- **Operator selection procedure:** Operators review persisted assessment results and
+  mark eligible `TABLE` objects with `is_selected = true` and `selection_status = 'SELECTED'`.
+- **Selected assessment discovery (`NB_GetSelectedAssessmentWorklist.ipynb`):** Future Job 1B
+  discovers batches eligible for onboarding. Worklist items contain strictly
+  `{"connection_id": "...", "assessment_id": "..."}`. Assessment identity is connection-scoped.
+  Overlapping selections across multiple assessment IDs are blocked (`AMBIGUOUS_SELECTED_ASSESSMENT`).
+- **Control-table-driven registration (`NB01B_RegisterSelectedTables.py`):**
+  Uses `selection_mode = 'ASSESSMENT_FLAGS'` by default. Resolves routing from
+  `accelerator_target_config` without manual schema or table parameters. Atomically claims
+  eligible rows with run and attempt ownership (`SELECTED -> ONBOARDING`), registers inactive
+  tables in `source_table_control`, and transitions exact assessment rows to `REGISTERED`.
+  NB01B never sets `ONBOARDED`. On caught registration failure, the owned row is marked `FAILED`
+  with stage `REGISTRATION`. Backward-compatible `WIDGETS` mode remains available.
+- **Onboarding completion and failure handling:**
+  Downstream onboarding tasks operate on `include_onboarding=True`. After successful target
+  provisioning (`NB08`), `NB_FinalizeSelectedTableOnboarding.py` verifies the active, `PROVISIONED`
+  registration and collision-free target, and marks exact rows `ONBOARDED`. If a downstream task fails,
+  `NB_MarkSelectedOnboardingFailed.py` marks owned incomplete rows `FAILED` with the respective stage.
+  Stale `ONBOARDING` recovery is manual and evidence-based (`NB_RecoverSelectedOnboardingState.py`);
+  rows are never reset automatically based on elapsed time.
+- **Unified task-value payload guard:**
+  Worklists across Full Load, Delta, Connection, and Selected Assessment use one shared constant
+  (`TASK_VALUE_LIMIT_BYTES = 40_000` bytes) and helper `validate_task_value_payload()` measuring UTF-8 bytes.
+- **Source-system canonicalization:**
+  SQL Server input aliases (`sql_server`, `mssql`, `sql server`) are accepted and normalized to canonical
+  `sqlserver` prior to persistence. Legacy persisted aliases are compatibility-normalized via
+  `canonical_source_system_sql()` on read until repaired.
+- **Target reservation and target-config scoping:**
+  Target reservation treats all non-retired registrations in `source_table_control` (including inactive
+  onboarding states) as reserving complete target FQNs. Inactive or non-default `accelerator_target_config`
+  history does not participate in routing or block initialization.
+- **Job YAML unchanged:** Databricks Job YAML files remain unchanged in this task and will
+  be updated in a dedicated subsequent task. Deployed jobs should not be claimed as zero-input
+  until Job YAML wiring is deployed.
 
 ### Source-to-Bronze full and delta, reconciliation, and checkpoint order
 - Full load is overwrite-only (`NB09`); delta sync uses frozen intervals

@@ -38,9 +38,9 @@ Create `src/source_adapters/postgresql.py` subclassing `SourceAdapter`. The base
 class declares everything shared code may call. You must implement:
 
 **Connection**
-- `get_jdbc_url_and_props()` — builds the URL from the connection's secret scope
-- `connection_probe_query()` — e.g. `"(SELECT 1 AS CONNECTION_OK) q"`
-- `extra_read_options()` — optional JDBC read options
+- `get_jdbc_url_and_props()` - builds the URL from the connection's secret scope
+- `connection_probe_query()` - e.g. `"(SELECT 1 AS CONNECTION_OK) q"`
+- `extra_read_options()` - optional JDBC read options
 
 **Metadata and extraction**
 - `columns_metadata_query()`, `primary_key_query()`
@@ -61,18 +61,18 @@ All metadata queries must return the **neutral aliases** shared code expects
 - `normalize_watermark_type()`, `is_supported_watermark_type()`,
   `watermark_type_rank()`, `initial_watermark_value()`
 - `resolve_partition_plan()`
-- `load_type_mapper()` and **`type_rules_file()`** — the filename only; shared
+- `load_type_mapper()` and **`type_rules_file()`** - the filename only; shared
   code locates it under `config/` and fails loudly if it is missing. The loader
   must instantiate this source's concrete mapper, not the compatibility facade
-- `apply_column_policy(column_metadata, proposed_mapping)` — return a
+- `apply_column_policy(column_metadata, proposed_mapping)` - return a
   `ColumnPolicyResult`. Override only if the source has non-writable, hidden,
   generated, or version columns; otherwise inherit the base behavior. Map your
   dialect concepts to the canonical codes `SOURCE_GENERATED_COLUMN`,
   `SOURCE_HIDDEN_COLUMN`, `SOURCE_NON_WRITABLE_COLUMN`,
   `SOURCE_BINARY_VERSION_COLUMN`
-- `validate_connection_metadata(connection)` — raise `ValueError` for unusable
+- `validate_connection_metadata(connection)` - raise `ValueError` for unusable
   non-secret metadata (never reference a credential in the message)
-- `legacy_secret_scope_widget()` — return `None` for a new source; the
+- `legacy_secret_scope_widget()` - return `None` for a new source; the
   registered `source_connection.secret_scope` is authoritative
 
 **SQL objects**
@@ -120,7 +120,7 @@ source branch to it.
 
 ### 3. Register the source
 
-Three explicit entries — no dynamic discovery, no directory scanning, no
+Three explicit entries - no dynamic discovery, no directory scanning, no
 `eval`/`exec`:
 
 ```python
@@ -169,7 +169,7 @@ recognize it) and, if the source requires an explicit database, to
 ### 4. Write the five source notebooks
 
 Copy the shape of `notebooks/sources/sqlserver/`. Each begins with
-`%run ../../shared/_common` and stays thin — dialect calls plus shared helpers:
+`%run ../../shared/_common` and stays thin - dialect calls plus shared helpers:
 
 | Notebook | Must do | Must NOT do |
 |---|---|---|

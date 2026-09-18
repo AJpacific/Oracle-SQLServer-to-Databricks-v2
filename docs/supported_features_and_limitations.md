@@ -62,9 +62,38 @@
 - Assessment-based, collision-safe registration (`NB01B`). New rows are created
   inactive (`is_active = false`, `current_status = 'REGISTERED'`).
   Target collisions are checked across registrations by normalized target FQN.
-- **Onboarding activation flow:** Downstream metadata tasks—Source Inventory
+  Supports `selection_mode = 'ASSESSMENT_FLAGS'` (control-table driven) and `WIDGETS` (legacy).
+- **Control-table-driven assessment (future Job 1A):**
+  Discovers all active `VALID` connections for an internally fixed `source_system`
+  (`oracle` or `sqlserver`) via `NB_GetConnectionWorklist`. Connection worklist items contain
+  strictly `{"connection_id": "..."}`. Assessments run connection-scoped inside For Each,
+  and `NB_AssessmentSummary` aggregates metrics across iterations without exposing secrets.
+- **Control-table-driven selected-table onboarding (future Job 1B):**
+  Discovers eligible batches via `NB_GetSelectedAssessmentWorklist` emitting strictly
+  `{"connection_id": "...", "assessment_id": "..."}`. Detects and blocks overlapping selected
+  tables across assessments (`AMBIGUOUS_SELECTED_ASSESSMENT`). `NB01B` in `ASSESSMENT_FLAGS` mode
+  resolves routing from `accelerator_target_config` without manual schema or table parameters.
+- **Target routing configuration (`accelerator_target_config`):**
+  Resolves targets by 3-tier precedence: connection-specific override -> source-specific default
+  -> global default. *Affects new registrations only.* Existing registrations retain stored
+  target identities permanently; differing proposed targets are reported as `TARGET_CONFIG_CHANGED`.
+- **Selection lifecycle:**
+  `source_assessment` tracks `selection_status`: `NOT_SELECTED`, `SELECTED`, `ONBOARDING`, `REGISTERED`, `ONBOARDED`, `FAILED` (plus terminal states `REVIEW_REQUIRED`, `BLOCKED`). Exact rows transition `NOT_SELECTED -> SELECTED -> ONBOARDING -> REGISTERED -> ONBOARDED`. Failure transitions move owned rows from `SELECTED / ONBOARDING / REGISTERED -> FAILED`.
+  - `NB01B_RegisterSelectedTables` performs atomic claims (`SELECTED -> ONBOARDING`) with run/attempt ownership, registers tables in `source_table_control`, and ends at `REGISTERED` (never marking `ONBOARDED`).
+  - Caught registration failures move owned rows to `FAILED` with stage `REGISTRATION`.
+  - Finalization (`NB_FinalizeSelectedTableOnboarding`) executes after successful `NB08_TargetProvisioning`, verifies active `PROVISIONED` state and collision-free target, and marks exact rows `ONBOARDED`.
+  - Downstream failure handler (`NB_MarkSelectedOnboardingFailed`) marks owned incomplete rows `FAILED` when a downstream task fails.
+  - REGISTERED rows need continuation/finalization, not registration rediscovery.
+  - Stale `ONBOARDING` recovery is manual and evidence-based (`NB_RecoverSelectedOnboardingState`); rows are never reset automatically based on elapsed time.
+  - Worklists use a unified task-value payload guard (`TASK_VALUE_LIMIT_BYTES = 40_000` bytes) measuring UTF-8 bytes.
+  - Inactive/non-default `accelerator_target_config` history does not participate in routing and does not block initialization.
+  - Reserved targets include all non-retired registrations in `source_table_control` across onboarding and operational states.
+- **Job YAML unchanged:**
+  Databricks Job YAML files remain unchanged in this task and will be updated separately.
+  Deployed jobs should not be represented as zero-input before YAML is updated.
+- **Onboarding activation flow:** Downstream metadata tasks-Source Inventory
   (`NB01`), Type Normalization (`NB02`), Mapping Generation (`NB03`), Mapping
-  Validation (`NB04`), and Table Decision Generation (`NB07`)—operate on registered
+  Validation (`NB04`), and Table Decision Generation (`NB07`)-operate on registered
   tables in the current onboarding scope (`include_onboarding=True`). Target
   Provisioning (`NB08`) re-verifies target collisions against all registrations,
   provisions target Delta tables, and activates approved `AUTO_MIGRATE` tables

@@ -200,7 +200,29 @@ CREATE TABLE IF NOT EXISTS {ctrl('source_assessment')} (
   source_schema STRING, object_name STRING, object_type STRING,
   row_count BIGINT, row_count_method STRING, size_mb DECIMAL(18,2),
   column_count INT, compatibility_status STRING, complexity STRING,
-  assessment_message STRING, is_selected BOOLEAN, captured_ts TIMESTAMP
+  assessment_message STRING, is_selected BOOLEAN,
+  selection_status STRING, selected_ts TIMESTAMP, selected_by STRING,
+  onboarding_run_id STRING, onboarding_attempt_id STRING,
+  onboarding_started_ts TIMESTAMP, registration_completed_ts TIMESTAMP,
+  onboarding_completed_ts TIMESTAMP, onboarding_failed_stage STRING,
+  onboarding_error_message STRING,
+  captured_ts TIMESTAMP
+) USING DELTA
+""")
+
+# --- ROUTING: target configuration -----------------------------------------
+spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {ctrl('accelerator_target_config')} (
+  config_id STRING,
+  source_system STRING,
+  connection_id STRING,
+  target_catalog STRING,
+  target_schema_mode STRING,
+  target_schema STRING,
+  is_default BOOLEAN,
+  is_active BOOLEAN,
+  created_ts TIMESTAMP,
+  updated_ts TIMESTAMP
 ) USING DELTA
 """)
 
@@ -353,6 +375,34 @@ _ensure_columns("delta_sync_queue", [
     ("duplicate_key_count", "BIGINT"), ("reconciliation_status", "STRING"),
     ("data_applied_ts", "TIMESTAMP"), ("reconciled_ts", "TIMESTAMP"),
     ("checkpoint_committed_ts", "TIMESTAMP"), ("finalized_ts", "TIMESTAMP"),
+])
+
+# Source assessment selection lifecycle columns (additive upgrade)
+_ensure_columns("source_assessment", [
+    ("selection_status", "STRING"),
+    ("selected_ts", "TIMESTAMP"),
+    ("selected_by", "STRING"),
+    ("onboarding_run_id", "STRING"),
+    ("onboarding_attempt_id", "STRING"),
+    ("onboarding_started_ts", "TIMESTAMP"),
+    ("registration_completed_ts", "TIMESTAMP"),
+    ("onboarding_completed_ts", "TIMESTAMP"),
+    ("onboarding_failed_stage", "STRING"),
+    ("onboarding_error_message", "STRING"),
+])
+
+# Accelerator target configuration columns (additive upgrade)
+_ensure_columns("accelerator_target_config", [
+    ("config_id", "STRING"),
+    ("source_system", "STRING"),
+    ("connection_id", "STRING"),
+    ("target_catalog", "STRING"),
+    ("target_schema_mode", "STRING"),
+    ("target_schema", "STRING"),
+    ("is_default", "BOOLEAN"),
+    ("is_active", "BOOLEAN"),
+    ("created_ts", "TIMESTAMP"),
+    ("updated_ts", "TIMESTAMP"),
 ])
 
 # Identity upgrades are never performed during ordinary initialization. Legacy
@@ -553,6 +603,125 @@ _validation_checks = (
           HAVING count(*) > 1
         )
     """),
+    ("BLANK_TARGET_CONFIG_ID", f"""
+        SELECT count(*) AS c FROM {ctrl('accelerator_target_config')}
+        WHERE config_id IS NULL OR trim(config_id) = ''
+    """),
+    ("DUPLICATE_TARGET_CONFIG_ID", f"""
+        SELECT count(*) AS c FROM (
+          SELECT config_id
+          FROM {ctrl('accelerator_target_config')}
+          GROUP BY config_id
+          HAVING count(*) > 1
+        )
+    """),
+    ("INVALID_TARGET_SCHEMA_MODE", f"""
+        SELECT count(*) AS c FROM {ctrl('accelerator_target_config')}
+        WHERE is_active = true AND is_default = true
+          AND (target_schema_mode IS NULL
+               OR upper(trim(target_schema_mode)) NOT IN (
+                  'SOURCE_SCHEMA', 'PREFIX_WITH_DATABASE', 'EXPLICIT'))
+    """),
+    ("BLANK_ACTIVE_DEFAULT_TARGET_CATALOG", f"""
+        SELECT count(*) AS c FROM {ctrl('accelerator_target_config')}
+        WHERE is_active = true AND is_default = true
+          AND (target_catalog IS NULL OR trim(target_catalog) = '')
+    """),
+    ("EXPLICIT_MODE_MISSING_TARGET_SCHEMA", f"""
+        SELECT count(*) AS c FROM {ctrl('accelerator_target_config')}
+        WHERE is_active = true AND is_default = true
+          AND upper(trim(target_schema_mode)) = 'EXPLICIT'
+          AND (target_schema IS NULL OR trim(target_schema) = '')
+    """),
+    ("DUPLICATE_CONNECTION_ACTIVE_DEFAULT_TARGET_CONFIG", f"""
+        SELECT count(*) AS c FROM (
+          SELECT connection_id
+          FROM {ctrl('accelerator_target_config')}
+          WHERE is_active = true AND is_default = true
+            AND connection_id IS NOT NULL AND trim(connection_id) <> ''
+          GROUP BY connection_id
+          HAVING count(*) > 1
+        )
+    """),
+    ("DUPLICATE_SOURCE_ACTIVE_DEFAULT_TARGET_CONFIG", f"""
+        SELECT count(*) AS c FROM (
+          SELECT lower(trim(source_system)) AS src_sys
+          FROM {ctrl('accelerator_target_config')}
+          WHERE is_active = true AND is_default = true
+            AND (connection_id IS NULL OR trim(connection_id) = '')
+            AND source_system IS NOT NULL AND trim(source_system) <> ''
+          GROUP BY lower(trim(source_system))
+          HAVING count(*) > 1
+        )
+    """),
+    ("DUPLICATE_GLOBAL_ACTIVE_DEFAULT_TARGET_CONFIG", f"""
+        SELECT count(*) AS c FROM (
+          SELECT 1 AS g
+          FROM {ctrl('accelerator_target_config')}
+          WHERE is_active = true AND is_default = true
+            AND (connection_id IS NULL OR trim(connection_id) = '')
+            AND (source_system IS NULL OR trim(source_system) = '')
+          HAVING count(*) > 1
+        )
+    """),
+    ("ORPHAN_TARGET_CONFIG_CONNECTION", f"""
+        SELECT count(*) AS c
+        FROM {ctrl('accelerator_target_config')} tc
+        LEFT ANTI JOIN {ctrl('source_connection')} sc
+          ON tc.connection_id = sc.connection_id
+        WHERE tc.is_active = true AND tc.is_default = true
+          AND tc.connection_id IS NOT NULL AND trim(tc.connection_id) <> ''
+    """),
+    ("TARGET_CONFIG_CONNECTION_SOURCE_MISMATCH", f"""
+        SELECT count(*) AS c
+        FROM {ctrl('accelerator_target_config')} tc
+        JOIN {ctrl('source_connection')} sc
+          ON tc.connection_id = sc.connection_id
+        WHERE tc.is_active = true AND tc.is_default = true
+          AND tc.source_system IS NOT NULL AND trim(tc.source_system) <> ''
+          AND {canonical_source_system_sql('tc.source_system')} <> {canonical_source_system_sql('sc.source_system')}
+    """),
+    ("INVALID_ASSESSMENT_SELECTION_STATUS", f"""
+        SELECT count(*) AS c
+        FROM {ctrl('source_assessment')}
+        WHERE selection_status IS NOT NULL AND trim(selection_status) <> ''
+          AND upper(trim(selection_status)) NOT IN (
+              'NOT_SELECTED', 'SELECTED', 'ONBOARDING', 'REGISTERED', 'ONBOARDED', 'FAILED',
+              'REVIEW_REQUIRED', 'BLOCKED')
+    """),
+    ("ONBOARDING_WITHOUT_RUN_ID", f"""
+        SELECT count(*) AS c
+        FROM {ctrl('source_assessment')}
+        WHERE upper(trim(coalesce(selection_status, ''))) = 'ONBOARDING'
+          AND (onboarding_run_id IS NULL OR trim(onboarding_run_id) = '')
+    """),
+    ("ONBOARDING_WITHOUT_ATTEMPT_ID", f"""
+        SELECT count(*) AS c
+        FROM {ctrl('source_assessment')}
+        WHERE upper(trim(coalesce(selection_status, ''))) = 'ONBOARDING'
+          AND (onboarding_attempt_id IS NULL OR trim(onboarding_attempt_id) = '')
+    """),
+    ("REGISTERED_WITHOUT_RUN_ID", f"""
+        SELECT count(*) AS c
+        FROM {ctrl('source_assessment')}
+        WHERE upper(trim(coalesce(selection_status, ''))) = 'REGISTERED'
+          AND (onboarding_run_id IS NULL OR trim(onboarding_run_id) = '')
+    """),
+    ("REGISTERED_WITHOUT_ATTEMPT_ID", f"""
+        SELECT count(*) AS c
+        FROM {ctrl('source_assessment')}
+        WHERE upper(trim(coalesce(selection_status, ''))) = 'REGISTERED'
+          AND (onboarding_attempt_id IS NULL OR trim(onboarding_attempt_id) = '')
+    """),
+    ("INVALID_ONBOARDING_FAILED_STAGE", f"""
+        SELECT count(*) AS c
+        FROM {ctrl('source_assessment')}
+        WHERE onboarding_failed_stage IS NOT NULL AND trim(onboarding_failed_stage) <> ''
+          AND upper(trim(onboarding_failed_stage)) NOT IN (
+              'REGISTRATION', 'INVENTORY', 'TYPE_NORMALIZATION',
+              'MAPPING_GENERATION', 'MAPPING_VALIDATION', 'TABLE_DECISION',
+              'TARGET_PROVISIONING', 'FINALIZATION')
+    """),
 )
 for _code, _query in _validation_checks:
   _count = spark.sql(_query).collect()[0]["c"]
@@ -748,10 +917,39 @@ else:
 
 # COMMAND ----------
 
+_noncanonical_source_systems_count = spark.sql(f"""
+    SELECT count(*) AS c
+    FROM (
+        SELECT source_system FROM {ctrl('source_connection')}
+        WHERE source_system IS NOT NULL AND trim(source_system) <> ''
+          AND lower(trim(source_system)) NOT IN ('oracle', 'sqlserver')
+        UNION ALL
+        SELECT source_system FROM {ctrl('source_assessment')}
+        WHERE source_system IS NOT NULL AND trim(source_system) <> ''
+          AND lower(trim(source_system)) NOT IN ('oracle', 'sqlserver')
+        UNION ALL
+        SELECT source_system FROM {ctrl('source_table_control')}
+        WHERE source_system IS NOT NULL AND trim(source_system) <> ''
+          AND lower(trim(source_system)) NOT IN ('oracle', 'sqlserver')
+    )
+""").collect()[0]["c"]
+
+if _noncanonical_source_systems_count:
+    print(f"Notice: {_noncanonical_source_systems_count} row(s) use non-canonical source_system aliases; "
+          "NB00 reports business_status='SOURCE_SYSTEM_CANONICALIZATION_REQUIRED'.")
+    print("Dry-run administrative repair queries:")
+    print(f"  UPDATE {ctrl('source_connection')} SET source_system = 'sqlserver' WHERE lower(trim(source_system)) IN ('sql_server', 'sql-server', 'mssql', 'sql server', 'microsoft sql server', 'microsoft_sql_server');")
+    print(f"  UPDATE {ctrl('source_assessment')} SET source_system = 'sqlserver' WHERE lower(trim(source_system)) IN ('sql_server', 'sql-server', 'mssql', 'sql server', 'microsoft sql server', 'microsoft_sql_server');")
+    print(f"  UPDATE {ctrl('source_table_control')} SET source_system = 'sqlserver' WHERE lower(trim(source_system)) IN ('sql_server', 'sql-server', 'mssql', 'sql server', 'microsoft sql server', 'microsoft_sql_server');")
+
 business_status = "MIGRATION_REQUIRED" if _legacy_identity_count else "READY"
+if business_status == "READY" and _noncanonical_source_systems_count:
+    business_status = "SOURCE_SYSTEM_CANONICALIZATION_REQUIRED"
+
 set_task_value("status", "SUCCEEDED")
 set_task_value("business_status", business_status)
 set_task_value("legacy_identity_count", int(_legacy_identity_count or 0))
+set_task_value("noncanonical_source_systems_count", int(_noncanonical_source_systems_count or 0))
 set_task_value("run_id", run_id)
 
 spark.sql(f"""
@@ -760,11 +958,13 @@ VALUES ({escape_string_literal(run_id)}, 'NB00_ControlTableInit', 'SUCCEEDED',
         current_timestamp(), current_timestamp(), 'control tables ready')
 """)
 print(f"NB00 complete: status=SUCCEEDED, business_status={business_status}, "
-      f"legacy_identity_count={int(_legacy_identity_count or 0)}")
+      f"legacy_identity_count={int(_legacy_identity_count or 0)}, "
+      f"noncanonical_source_systems_count={int(_noncanonical_source_systems_count or 0)}")
 dbutils.notebook.exit(json.dumps({
     "status": "SUCCEEDED",
     "business_status": business_status,
     "legacy_identity_count": int(_legacy_identity_count or 0),
+    "noncanonical_source_systems_count": int(_noncanonical_source_systems_count or 0),
     "fatal_validation_error_count": 0,
     "run_id": run_id,
 }))

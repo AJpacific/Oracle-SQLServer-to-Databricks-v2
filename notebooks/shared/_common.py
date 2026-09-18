@@ -145,10 +145,24 @@ try:
         ControlRepository, new_run_id,
         normalize_connection_input, assert_source_system_match,
         require_connection_id,
+        VALID_SELECTION_STATUSES,
+        VALID_ONBOARDING_STAGES,
+        VALID_DOWNSTREAM_ONBOARDING_STAGES,
+        TERMINAL_SELECTION_STATUSES,
+        CLAIMABLE_SELECTION_STATUSES,
+        RETRYABLE_SELECTION_STATUSES,
+        ClaimResult,
+        is_assessment_selection_candidate,
+        is_delta_concurrency_exception,
+        normalize_target_component,
     )
     from src.source_identity import (
         SOURCE_IDENTITY_VERSION, compute_legacy_source_table_id,
         compute_source_table_id, normalize_source_system, require_source_system,
+        canonical_source_system_sql,
+    )
+    from src.worklist_utils import (
+        TASK_VALUE_LIMIT_BYTES, validate_task_value_payload,
     )
     from src.source_adapters.factory import get_source_adapter
 except ModuleNotFoundError:
@@ -178,10 +192,24 @@ except ModuleNotFoundError:
         ControlRepository, new_run_id,
         normalize_connection_input, assert_source_system_match,
         require_connection_id,
+        VALID_SELECTION_STATUSES,
+        VALID_ONBOARDING_STAGES,
+        VALID_DOWNSTREAM_ONBOARDING_STAGES,
+        TERMINAL_SELECTION_STATUSES,
+        CLAIMABLE_SELECTION_STATUSES,
+        RETRYABLE_SELECTION_STATUSES,
+        ClaimResult,
+        is_assessment_selection_candidate,
+        is_delta_concurrency_exception,
+        normalize_target_component,
     )
     from source_identity import (
         SOURCE_IDENTITY_VERSION, compute_legacy_source_table_id,
         compute_source_table_id, normalize_source_system, require_source_system,
+        canonical_source_system_sql,
+    )
+    from worklist_utils import (
+        TASK_VALUE_LIMIT_BYTES, validate_task_value_payload,
     )
     from source_adapters.factory import get_source_adapter
 

@@ -109,19 +109,18 @@ for item in manual_review_items:
 
 # COMMAND ----------
 
-TASK_VALUE_LIMIT_BYTES = 48 * 1024
 NOTEBOOK_EXIT_LIMIT_BYTES = 5 * 1024 * 1024
 
 def _compact_json(value):
-    return json.dumps(value, separators=(",", ":"))
+    return canonical_task_value_serialization(value)
 
 def _set_json_task_value_if_fits(key, value):
     payload = _compact_json(value)
     # Preserve the existing string-valued task contract. Databricks serializes
     # that string as JSON, so include its quoting/escaping in the size check.
-    serialized_size = len(json.dumps(payload).encode("utf-8"))
+    serialized_size = len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
     if serialized_size > TASK_VALUE_LIMIT_BYTES:
-        print(f"  [warn] {key} exceeds the Databricks task-value limit; "
+        print(f"  [warn] {key} exceeds the Databricks task-value limit ({TASK_VALUE_LIMIT_BYTES} bytes); "
               "use the complete notebook result or scope the selector by "
               "operation/source_table_id. No entries were truncated.")
         return False

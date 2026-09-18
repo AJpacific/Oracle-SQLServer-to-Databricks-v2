@@ -127,6 +127,51 @@ class TestReleaseDocumentation(unittest.TestCase):
         self.assertIn("Job YAML", combined)
         self.assertIn("NOT_EXECUTED", self.identity_migration)
 
+    def test_documented_notebook_paths_exist(self):
+        bt = chr(96)
+        parts = self.jobs.split(bt)
+        refs = [parts[i].strip() for i in range(1, len(parts), 2)
+                if any(parts[i].strip().startswith(p) for p in ("deployment/", "shared/", "sources/"))]
+        self.assertTrue(len(refs) > 0, "No notebook references found in job mapping document")
+        notebooks_dir = os.path.join(ROOT, "notebooks")
+        for r in set(refs):
+            clean = r.split()[0].rstrip("*,")
+            if "<source>" in clean:
+                for s in ("oracle", "sqlserver"):
+                    cand = clean.replace("<source>", s)
+                    found = any(os.path.exists(os.path.join(notebooks_dir, cand + ext))
+                                for ext in ("", ".py", ".ipynb"))
+                    self.assertTrue(found, f"Documented source notebook does not exist: {cand} (from {r})")
+            else:
+                found = any(os.path.exists(os.path.join(notebooks_dir, clean + ext))
+                            for ext in ("", ".py", ".ipynb"))
+                self.assertTrue(found, f"Documented notebook does not exist: {clean} (from {r})")
+
+    def test_checklist_contains_no_volatile_durations(self):
+        import re
+        py_match = None
+        un_match = None
+        for line in self.checklist.splitlines():
+            if line.startswith("| Run pytest suite"):
+                self.assertNotRegex(line, r"\bin [0-9].*s\b")
+                py_match = re.search(r"pytest:\s+Exit\s+(\d+),\s+(\d+)\s+passed,\s+(\d+)\s+subtests passed", line)
+                self.assertIsNotNone(py_match, "Pytest checklist row must include exit code, passed count, and subtests count")
+                self.assertEqual(int(py_match.group(1)), 0)
+                self.assertGreater(int(py_match.group(2)), 0)
+                self.assertGreater(int(py_match.group(3)), 0)
+                self.assertIn("PASSED", line)
+            elif line.startswith("| Run unittest discovery"):
+                self.assertNotRegex(line, r"\bin [0-9].*s\b")
+                un_match = re.search(r"unittest:\s+Exit\s+(\d+),\s+(\d+)\s+tests passed,\s+OK", line)
+                self.assertIsNotNone(un_match, "Unittest checklist row must include exit code, test count, and OK status")
+                self.assertEqual(int(un_match.group(1)), 0)
+                self.assertGreater(int(un_match.group(2)), 0)
+                self.assertIn("PASSED", line)
+
+        self.assertIsNotNone(py_match)
+        self.assertIsNotNone(un_match)
+        self.assertEqual(int(py_match.group(2)), int(un_match.group(2)))
+
 
 class TestSharedNotebookDescriptions(unittest.TestCase):
     def _top(self, name):

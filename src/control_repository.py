@@ -12,7 +12,9 @@ new_run_id() is pure and unit-testable.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 try:
     from src.identifiers import (
@@ -62,6 +64,161 @@ PROTECTED_CONTROL_IDENTITY_FIELDS = frozenset({
     "source_identity_version",
     "legacy_source_table_id",
 })
+
+VALID_SELECTION_STATUSES = frozenset({
+    "NOT_SELECTED",
+    "SELECTED",
+    "ONBOARDING",
+    "REGISTERED",
+    "ONBOARDED",
+    "FAILED",
+    "REVIEW_REQUIRED",
+    "BLOCKED",
+})
+
+VALID_ONBOARDING_STAGES = frozenset({
+    "REGISTRATION",
+    "INVENTORY",
+    "TYPE_NORMALIZATION",
+    "MAPPING_GENERATION",
+    "MAPPING_VALIDATION",
+    "TABLE_DECISION",
+    "TARGET_PROVISIONING",
+    "FINALIZATION",
+})
+
+VALID_DOWNSTREAM_ONBOARDING_STAGES = frozenset({
+    "INVENTORY",
+    "TYPE_NORMALIZATION",
+    "MAPPING_GENERATION",
+    "MAPPING_VALIDATION",
+    "TABLE_DECISION",
+    "TARGET_PROVISIONING",
+    "FINALIZATION",
+})
+
+TERMINAL_SELECTION_STATUSES = frozenset({
+    "ONBOARDED",
+    "REVIEW_REQUIRED",
+    "BLOCKED",
+})
+
+CLAIMABLE_SELECTION_STATUSES = frozenset({
+    "",
+    "SELECTED",
+})
+
+RETRYABLE_SELECTION_STATUSES = frozenset({
+    "",
+    "SELECTED",
+    "FAILED",
+})
+
+
+def is_assessment_selection_candidate(
+    is_selected,
+    selection_status,
+    include_failed_retries=False,
+) -> bool:
+    """Pure production helper to determine if an assessed table is eligible for onboarding."""
+    if is_selected is not True:
+        return False
+
+    status = str(selection_status or "").strip().upper()
+
+    if status in ("", "SELECTED"):
+        return True
+
+    return (
+        status == "FAILED"
+        and include_failed_retries
+    )
+
+
+def normalize_target_component(value: Any) -> str:
+    """Return a trimmed, lowercased target identifier component for comparison."""
+    return str(value or "").strip().lower()
+
+
+def _row_to_dict(row) -> dict:
+    if row is None:
+        return {}
+    if hasattr(row, "asDict"):
+        try:
+            return row.asDict(recursive=True)
+        except TypeError:
+            return row.asDict()
+    return dict(row)
+
+
+def _normalize_state(value) -> str:
+    return str(value or "").strip().upper()
+
+
+def _exception_error_class(exc: Exception) -> str:
+    for name in ("getErrorClass", "get_error_class"):
+        method = getattr(exc, name, None)
+        if callable(method):
+            try:
+                value = method()
+                if value:
+                    return str(value).strip().upper()
+            except Exception:
+                pass
+
+    for name in (
+        "error_class",
+        "errorClass",
+        "sql_state",
+        "sqlState",
+    ):
+        value = getattr(exc, name, None)
+        if value:
+            return str(value).strip().upper()
+
+    return type(exc).__name__.strip().upper()
+
+
+def is_delta_concurrency_exception(exc: Exception) -> bool:
+    error_class = _exception_error_class(exc)
+
+    normalized = (
+        error_class
+        .replace("_", "")
+        .replace(".", "")
+    )
+
+    return normalized in {
+        "CONCURRENTAPPENDEXCEPTION",
+        "CONCURRENTDELETEDELETEEXCEPTION",
+        "CONCURRENTDELETEREADEXCEPTION",
+        "CONCURRENTTRANSACTIONEXCEPTION",
+        "CONCURRENTWRITEEXCEPTION",
+        "METADATACHANGEDEXCEPTION",
+        "PROTOCOLCHANGEDEXCEPTION",
+    }
+
+
+@dataclass(frozen=True)
+class ClaimResult:
+    """Result of an assessment row atomic claim attempt."""
+    acquired: bool
+    reason: str | None = None
+    row: dict[str, Any] | None = None
+
+    def __bool__(self) -> bool:
+        return self.acquired
+
+
+def _validate_bounded_identifier(value: str, name: str, max_len: int = 256) -> str:
+    s = str(value or "").strip()
+    if not s:
+        raise ValueError(f"{name} is required")
+    if len(s) > max_len:
+        raise ValueError(f"{name} exceeds maximum length of {max_len}")
+    if any(c in s for c in ("'", '"', ';', '\n', '\r', '\0')):
+        raise ValueError(f"{name} contains invalid characters")
+    return s
 
 
 def require_connection_id(value, context="operation") -> str:
@@ -324,6 +481,54 @@ class ControlRepository:
             in_list = ", ".join(
                 escape_string_literal(value) for value in normalized)
             sql += f" AND connection_id IN ({in_list})"
+        return self.spark.sql(sql)
+
+    def valid_active_connections_for_source(
+        self,
+        source_system: str,
+        only_connection_ids: list[str] | None = None,
+        exclude_connection_ids: list[str] | None = None,
+    ):
+        """Return lazy DataFrame of eligible connection IDs for a normalized source system.
+
+        Projects ONLY connection_id, ordered deterministically by connection_id.
+        Exclusion wins over inclusion. Never returns secret_scope or endpoints.
+        """
+        norm_system = require_source_system(source_system, "connection discovery")
+        sql = (
+            f"SELECT connection_id FROM {self.ctrl('source_connection')} "
+            f"WHERE is_active = true "
+            f"AND connection_status = 'VALID' "
+            f"AND secret_scope IS NOT NULL AND trim(secret_scope) <> '' "
+            f"AND connection_id IS NOT NULL AND trim(connection_id) <> '' "
+            f"AND lower(trim(source_system)) = {escape_string_literal(norm_system)}"
+        )
+        clean_exclude = set()
+        if exclude_connection_ids:
+            clean_exclude = {
+                str(c).strip() for c in exclude_connection_ids if str(c).strip()
+            }
+
+        clean_only = set()
+        if only_connection_ids is not None:
+            raw_only = [str(c).strip() for c in only_connection_ids if str(c).strip()]
+            clean_only = {c for c in raw_only if c not in clean_exclude}
+            if raw_only and not clean_only:
+                # Every requested inclusion ID was explicitly excluded
+                sql += " AND 1 = 0"
+            elif clean_only:
+                in_list = ", ".join(
+                    escape_string_literal(c) for c in sorted(clean_only)
+                )
+                sql += f" AND connection_id IN ({in_list})"
+
+        if clean_exclude:
+            not_in_list = ", ".join(
+                escape_string_literal(c) for c in sorted(clean_exclude)
+            )
+            sql += f" AND connection_id NOT IN ({not_in_list})"
+
+        sql += " ORDER BY connection_id ASC"
         return self.spark.sql(sql)
 
     def upsert_connection(self, connection: dict):
@@ -762,3 +967,884 @@ class ControlRepository:
         saveAsTable wants an unquoted dotted name.
         """
         return fqn_with_backticks.replace("`", "")
+
+    # ---------------------------------------------- target routing & assessment selection
+
+    def resolve_target_config(self, connection_id: str) -> dict:
+        """Resolve active default target routing for a registered connection.
+
+        Precedence:
+          1. Connection-specific (connection_id matches)
+          2. Source-specific (connection_id is null/blank, source_system matches)
+          3. Global default (both connection_id and source_system are null/blank)
+
+        Returns only safe routing metadata:
+          config_id, target_catalog, target_schema_mode, target_schema, effective_scope
+        """
+        connection_id = require_connection_id(connection_id, "resolve_target_config")
+        conn = self.get_connection(connection_id)
+        if conn is None:
+            raise ValueError(
+                f"Connection {connection_id!r} not found in source_connection"
+            )
+
+        conn_dict = conn.asDict() if hasattr(conn, "asDict") else dict(conn)
+        source_system = require_source_system(
+            conn_dict.get("source_system"), "registered connection"
+        )
+        table = self.ctrl("accelerator_target_config")
+
+        # 1. Connection-specific scope
+        sql_conn = (
+            f"SELECT * FROM {table} "
+            f"WHERE is_active = true AND is_default = true "
+            f"AND connection_id = {escape_string_literal(connection_id)}"
+        )
+        conn_rows = self.spark.sql(sql_conn).collect()
+        if len(conn_rows) > 1:
+            raise ValueError(
+                f"Duplicate active default target configuration found at CONNECTION scope for connection {connection_id!r}"
+            )
+
+        if conn_rows:
+            matched_row = conn_rows[0]
+            effective_scope = "CONNECTION"
+        else:
+            # 2. Source-specific scope
+            sql_source = (
+                f"SELECT * FROM {table} "
+                f"WHERE is_active = true AND is_default = true "
+                f"AND (connection_id IS NULL OR trim(connection_id) = '') "
+                f"AND lower(trim(source_system)) = {escape_string_literal(source_system)}"
+            )
+            source_rows = self.spark.sql(sql_source).collect()
+            if len(source_rows) > 1:
+                raise ValueError(
+                    f"Duplicate active default target configuration found at SOURCE scope for source_system {source_system!r}"
+                )
+            if source_rows:
+                matched_row = source_rows[0]
+                effective_scope = "SOURCE"
+            else:
+                # 3. Global scope
+                sql_global = (
+                    f"SELECT * FROM {table} "
+                    f"WHERE is_active = true AND is_default = true "
+                    f"AND (connection_id IS NULL OR trim(connection_id) = '') "
+                    f"AND (source_system IS NULL OR trim(source_system) = '')"
+                )
+                global_rows = self.spark.sql(sql_global).collect()
+                if len(global_rows) > 1:
+                    raise ValueError(
+                        "Duplicate active default target configuration found at GLOBAL scope"
+                    )
+                if global_rows:
+                    matched_row = global_rows[0]
+                    effective_scope = "GLOBAL"
+                else:
+                    raise ValueError(
+                        f"No active default target configuration found for connection {connection_id!r} "
+                        f"(source_system={source_system!r})"
+                    )
+
+        row_dict = (
+            matched_row.asDict() if hasattr(matched_row, "asDict") else dict(matched_row)
+        )
+        config_id = str(row_dict.get("config_id") or "").strip()
+        target_catalog = str(row_dict.get("target_catalog") or "").strip()
+        target_schema_mode = str(row_dict.get("target_schema_mode") or "").strip().upper()
+        target_schema = str(row_dict.get("target_schema") or "").strip() or None
+
+        if effective_scope == "CONNECTION" and row_dict.get("source_system"):
+            cfg_sys = require_source_system(row_dict["source_system"], "target_config")
+            if cfg_sys != source_system:
+                raise ValueError(
+                    f"Target configuration {config_id!r} specifies source_system {cfg_sys!r} "
+                    f"which does not match connection {connection_id!r} source_system {source_system!r}"
+                )
+
+        if not target_catalog:
+            raise ValueError(
+                f"Target configuration {config_id!r} has blank target_catalog"
+            )
+        if target_schema_mode not in ("SOURCE_SCHEMA", "PREFIX_WITH_DATABASE", "EXPLICIT"):
+            raise ValueError(
+                f"Target configuration {config_id!r} has invalid target_schema_mode: {target_schema_mode!r}"
+            )
+        if target_schema_mode == "EXPLICIT" and not target_schema:
+            raise ValueError(
+                f"Target configuration {config_id!r} with EXPLICIT mode requires nonblank target_schema"
+            )
+
+        return {
+            "config_id": config_id,
+            "target_catalog": target_catalog,
+            "target_schema_mode": target_schema_mode,
+            "target_schema": target_schema,
+            "effective_scope": effective_scope,
+        }
+
+    def selected_assessment_batches(
+        self,
+        source_system: str,
+        only_connection_ids: list[str] | None = None,
+        only_assessment_ids: list[str] | None = None,
+        include_failed_retries: bool = False,
+    ):
+        """Return lazy DataFrame of distinct connection_id + assessment_id batches.
+
+        Filters:
+          - object_type = 'TABLE'
+          - compatibility_status IN ('COMPATIBLE', 'REVIEW')
+          - is_selected = true
+          - connection is active VALID with nonblank secret_scope
+          - matching normalized source_system on both connection and assessment
+          - selection_status:
+              Default: null, blank, or 'SELECTED'
+              If include_failed_retries=True: also includes 'FAILED'
+              Never includes 'ONBOARDING' or 'ONBOARDED'
+        """
+        norm_system = require_source_system(source_system, "selected assessment discovery")
+        sa = self.ctrl("source_assessment")
+        sc = self.ctrl("source_connection")
+
+        if include_failed_retries:
+            status_clause = (
+                "(sa.selection_status IS NULL OR trim(sa.selection_status) = '' "
+                "OR upper(trim(sa.selection_status)) IN ('SELECTED', 'FAILED'))"
+            )
+        else:
+            status_clause = (
+                "(sa.selection_status IS NULL OR trim(sa.selection_status) = '' "
+                "OR upper(trim(sa.selection_status)) = 'SELECTED')"
+            )
+
+        sql = (
+            f"SELECT DISTINCT sa.connection_id, sa.assessment_id "
+            f"FROM {sa} sa "
+            f"JOIN {sc} sc ON sa.connection_id = sc.connection_id "
+            f"WHERE sa.object_type = 'TABLE' "
+            f"AND upper(trim(sa.compatibility_status)) IN ('COMPATIBLE', 'REVIEW') "
+            f"AND sa.is_selected = true "
+            f"AND {status_clause} "
+            f"AND sc.is_active = true "
+            f"AND upper(trim(sc.connection_status)) = 'VALID' "
+            f"AND sc.secret_scope IS NOT NULL AND trim(sc.secret_scope) <> '' "
+            f"AND lower(trim(sc.source_system)) = {escape_string_literal(norm_system)} "
+            f"AND lower(trim(sa.source_system)) = lower(trim(sc.source_system))"
+        )
+
+        clean_conns = {str(c).strip() for c in (only_connection_ids or []) if str(c).strip()}
+        if clean_conns:
+            in_list = ", ".join(escape_string_literal(c) for c in sorted(clean_conns))
+            sql += f" AND sa.connection_id IN ({in_list})"
+
+        clean_assessments = {str(a).strip() for a in (only_assessment_ids or []) if str(a).strip()}
+        if clean_assessments:
+            in_list = ", ".join(escape_string_literal(a) for a in sorted(clean_assessments))
+            sql += f" AND sa.assessment_id IN ({in_list})"
+
+        sql += " ORDER BY sa.connection_id, sa.assessment_id"
+        return self.spark.sql(sql)
+
+    def check_overlapping_selected_assessments(
+        self,
+        source_system: str,
+        only_connection_ids: list[str] | None = None,
+        only_assessment_ids: list[str] | None = None,
+        include_failed_retries: bool = False,
+    ) -> list[dict]:
+        """Detect if any connection-owned table is selected across multiple assessment IDs.
+
+        Conflict condition:
+          - same connection_id
+          - same source_schema
+          - same TABLE object_name
+          - is_selected = true
+          - eligible compatibility ('COMPATIBLE', 'REVIEW')
+          - occurring under >1 assessment_id
+
+        Returns a list of conflict dicts with safe metadata:
+          [{"connection_id": "...", "source_schema": "...", "object_name": "...", "conflicting_assessment_count": N}]
+        """
+        norm_system = require_source_system(source_system, "overlap check")
+        sa = self.ctrl("source_assessment")
+        sc = self.ctrl("source_connection")
+
+        if include_failed_retries:
+            status_clause = (
+                "(sa.selection_status IS NULL OR trim(sa.selection_status) = '' "
+                "OR upper(trim(sa.selection_status)) IN ('SELECTED', 'FAILED'))"
+            )
+        else:
+            status_clause = (
+                "(sa.selection_status IS NULL OR trim(sa.selection_status) = '' "
+                "OR upper(trim(sa.selection_status)) = 'SELECTED')"
+            )
+
+        sql = (
+            f"SELECT sa.connection_id, sa.source_schema, sa.object_name, "
+            f"count(DISTINCT sa.assessment_id) AS conflicting_assessment_count "
+            f"FROM {sa} sa "
+            f"JOIN {sc} sc ON sa.connection_id = sc.connection_id "
+            f"WHERE sa.object_type = 'TABLE' "
+            f"AND upper(trim(sa.compatibility_status)) IN ('COMPATIBLE', 'REVIEW') "
+            f"AND sa.is_selected = true "
+            f"AND {status_clause} "
+            f"AND sc.is_active = true "
+            f"AND upper(trim(sc.connection_status)) = 'VALID' "
+            f"AND sc.secret_scope IS NOT NULL AND trim(sc.secret_scope) <> '' "
+            f"AND lower(trim(sc.source_system)) = {escape_string_literal(norm_system)} "
+            f"AND lower(trim(sa.source_system)) = lower(trim(sc.source_system))"
+        )
+
+        clean_conns = {str(c).strip() for c in (only_connection_ids or []) if str(c).strip()}
+        if clean_conns:
+            in_list = ", ".join(escape_string_literal(c) for c in sorted(clean_conns))
+            sql += f" AND sa.connection_id IN ({in_list})"
+
+        clean_assessments = {str(a).strip() for a in (only_assessment_ids or []) if str(a).strip()}
+        if clean_assessments:
+            in_list = ", ".join(escape_string_literal(a) for a in sorted(clean_assessments))
+            sql += f" AND sa.assessment_id IN ({in_list})"
+
+        sql += (
+            f" GROUP BY sa.connection_id, sa.source_schema, sa.object_name "
+            f"HAVING count(DISTINCT sa.assessment_id) > 1 "
+            f"ORDER BY sa.connection_id, sa.source_schema, sa.object_name"
+        )
+        rows = self.spark.sql(sql).collect()
+        conflicts = []
+        for r in rows:
+            rd = r.asDict() if hasattr(r, "asDict") else dict(r)
+            conflicts.append({
+                "connection_id": rd["connection_id"],
+                "source_schema": rd["source_schema"],
+                "object_name": rd["object_name"],
+                "conflicting_assessment_count": int(rd["conflicting_assessment_count"]),
+            })
+        return conflicts
+
+    def _get_assessment_selection_row(
+        self,
+        connection_id: str,
+        assessment_id: str,
+        source_schema: str,
+        object_name: str,
+    ) -> dict[str, Any] | None:
+        """Query one exact TABLE assessment row.
+
+        Returns:
+            None if zero rows match.
+            Dictionary if exactly one row matches.
+            Raises ValueError if more than one row matches.
+        """
+        connection_id = require_connection_id(connection_id, "_get_assessment_selection_row")
+        assessment_id = _validate_bounded_identifier(assessment_id, "assessment_id")
+        source_schema = str(source_schema or "").strip()
+        object_name = str(object_name or "").strip()
+
+        sql = (
+            f"SELECT connection_id, assessment_id, source_schema, object_type, "
+            f"object_name, is_selected, compatibility_status, selection_status, "
+            f"onboarding_run_id, onboarding_attempt_id, onboarding_started_ts, "
+            f"registration_completed_ts, onboarding_completed_ts, "
+            f"onboarding_failed_stage, onboarding_error_message "
+            f"FROM {self.ctrl('source_assessment')} "
+            f"WHERE connection_id = {escape_string_literal(connection_id)} "
+            f"AND assessment_id = {escape_string_literal(assessment_id)} "
+            f"AND source_schema = {escape_string_literal(source_schema)} "
+            f"AND object_type = 'TABLE' "
+            f"AND object_name = {escape_string_literal(object_name)}"
+        )
+        rows = self.spark.sql(sql).collect()
+        if not rows:
+            return None
+        if len(rows) > 1:
+            raise ValueError(
+                f"Duplicate exact assessment TABLE rows found for connection={connection_id!r}, "
+                f"assessment={assessment_id!r}, schema={source_schema!r}, table={object_name!r}"
+            )
+        return _row_to_dict(rows[0])
+
+    def update_assessment_selection_state(
+        self,
+        connection_id: str,
+        assessment_id: str,
+        source_schema: str,
+        object_name: str,
+        selection_status: str,
+        error_message: str | None = None,
+        selected_by: str | None = None,
+    ):
+        """Update the row-level selection state on source_assessment for operator actions.
+
+        Restricted strictly to operator actions: 'SELECTED' and 'NOT_SELECTED'.
+        Runtime lifecycle transitions (ONBOARDING, REGISTERED, ONBOARDED, FAILED,
+        REVIEW_REQUIRED, BLOCKED) must use dedicated ownership-aware lifecycle methods.
+        """
+        connection_id = require_connection_id(connection_id, "update_assessment_selection_state")
+        assessment_id = _validate_bounded_identifier(assessment_id, "assessment_id")
+        source_schema = str(source_schema or "").strip()
+        object_name = str(object_name or "").strip()
+        status = _normalize_state(selection_status)
+
+        if status not in ("SELECTED", "NOT_SELECTED"):
+            raise ValueError(
+                f"update_assessment_selection_state() only supports operator actions 'SELECTED' "
+                f"and 'NOT_SELECTED', got {selection_status!r}. Callers must use ownership-aware "
+                f"lifecycle methods for onboarding runtime transitions."
+            )
+
+        assignments = [
+            f"`selection_status` = {escape_string_literal(status)}",
+            "`onboarding_run_id` = NULL",
+            "`onboarding_attempt_id` = NULL",
+            "`onboarding_started_ts` = NULL",
+            "`registration_completed_ts` = NULL",
+            "`onboarding_completed_ts` = NULL",
+            "`onboarding_failed_stage` = NULL",
+            "`onboarding_error_message` = NULL",
+        ]
+
+        if status == "SELECTED":
+            assignments.append("`is_selected` = true")
+            assignments.append("`selected_ts` = current_timestamp()")
+            if selected_by and str(selected_by).strip():
+                safe_by = sanitize_error_message(selected_by)[:256]
+                assignments.append(f"`selected_by` = {escape_string_literal(safe_by)}")
+            else:
+                assignments.append("`selected_by` = NULL")
+        elif status == "NOT_SELECTED":
+            assignments.append("`is_selected` = false")
+            assignments.append("`selected_ts` = NULL")
+            assignments.append("`selected_by` = NULL")
+
+        where_predicates = [
+            f"connection_id = {escape_string_literal(connection_id)}",
+            f"assessment_id = {escape_string_literal(assessment_id)}",
+            f"source_schema = {escape_string_literal(source_schema)}",
+            "object_type = 'TABLE'",
+            f"object_name = {escape_string_literal(object_name)}",
+            "(selection_status IS NULL OR trim(selection_status) = '' "
+            "OR upper(trim(selection_status)) IN ('NOT_SELECTED', 'SELECTED', 'FAILED'))",
+            "(onboarding_run_id IS NULL OR trim(onboarding_run_id) = '')",
+            "(onboarding_attempt_id IS NULL OR trim(onboarding_attempt_id) = '')",
+        ]
+
+        sql = f"UPDATE {self.ctrl('source_assessment')} SET {', '.join(assignments)} WHERE {' AND '.join(where_predicates)}"
+        self.spark.sql(sql)
+
+    def claim_assessment_selection_row(
+        self,
+        connection_id: str,
+        assessment_id: str,
+        source_schema: str,
+        object_name: str,
+        run_id: str,
+        attempt_id: str,
+        allow_failed_retry: bool = False,
+    ) -> ClaimResult:
+        """Atomically claim an eligible assessment table row for onboarding.
+
+        Under Delta optimistic concurrency, this performs a conditional update
+        conditioned on eligible prior state and verified compatibility, followed by
+        an immediate post-write ownership verification via _get_assessment_selection_row.
+        Only the winning run owns the claim.
+        """
+        connection_id = require_connection_id(connection_id, "claim_assessment_selection_row")
+        assessment_id = _validate_bounded_identifier(assessment_id, "assessment_id")
+        source_schema = str(source_schema or "").strip()
+        if not source_schema:
+            raise ValueError("source_schema is required")
+        object_name = str(object_name or "").strip()
+        if not object_name:
+            raise ValueError("object_name is required")
+        run_id = _validate_bounded_identifier(run_id, "run_id")
+        attempt_id = _validate_bounded_identifier(attempt_id, "attempt_id")
+
+        if allow_failed_retry:
+            prior_condition = (
+                "(selection_status IS NULL OR trim(selection_status) = '' "
+                "OR upper(trim(selection_status)) IN ('SELECTED', 'FAILED'))"
+            )
+        else:
+            prior_condition = (
+                "(selection_status IS NULL OR trim(selection_status) = '' "
+                "OR upper(trim(selection_status)) = 'SELECTED')"
+            )
+
+        where_predicates = [
+            f"connection_id = {escape_string_literal(connection_id)}",
+            f"assessment_id = {escape_string_literal(assessment_id)}",
+            f"source_schema = {escape_string_literal(source_schema)}",
+            "object_type = 'TABLE'",
+            f"object_name = {escape_string_literal(object_name)}",
+            "coalesce(is_selected, false) = true",
+            "upper(trim(coalesce(compatibility_status, ''))) IN ('COMPATIBLE', 'REVIEW')",
+            prior_condition,
+        ]
+
+        set_clause = (
+            f"`selection_status` = 'ONBOARDING', "
+            f"`onboarding_run_id` = {escape_string_literal(run_id)}, "
+            f"`onboarding_attempt_id` = {escape_string_literal(attempt_id)}, "
+            f"`onboarding_started_ts` = current_timestamp(), "
+            f"`registration_completed_ts` = NULL, "
+            f"`onboarding_completed_ts` = NULL, "
+            f"`onboarding_failed_stage` = NULL, "
+            f"`onboarding_error_message` = NULL"
+        )
+
+        update_sql = (
+            f"UPDATE {self.ctrl('source_assessment')} "
+            f"SET {set_clause} "
+            f"WHERE {' AND '.join(where_predicates)}"
+        )
+        try:
+            self.spark.sql(update_sql)
+        except Exception as exc:
+            if not is_delta_concurrency_exception(exc):
+                raise
+
+        row = self._get_assessment_selection_row(
+            connection_id=connection_id,
+            assessment_id=assessment_id,
+            source_schema=source_schema,
+            object_name=object_name,
+        )
+        if not row:
+            return ClaimResult(acquired=False, reason="CLAIM_NOT_ACQUIRED: row not found", row=None)
+
+        st = _normalize_state(row.get("selection_status"))
+        r_id = str(row.get("onboarding_run_id") or "").strip()
+        a_id = str(row.get("onboarding_attempt_id") or "").strip()
+
+        if st == "ONBOARDING" and r_id == run_id and a_id == attempt_id:
+            return ClaimResult(acquired=True, row=row)
+
+        return ClaimResult(
+            acquired=False,
+            reason=f"CLAIM_NOT_ACQUIRED: row in state {st!r} owned by run={r_id!r}, attempt={a_id!r}",
+            row=row,
+        )
+
+    def mark_assessment_preclaim_failed(
+        self,
+        connection_id: str,
+        assessment_id: str,
+        source_schema: str,
+        object_name: str,
+        error: Exception | str | None,
+        allow_existing_failed: bool = False,
+    ) -> bool:
+        """Record pre-claim validation failure before any claim is acquired.
+
+        Only updates unowned claimable rows (run_id and attempt_id are null or blank).
+        """
+        connection_id = require_connection_id(connection_id, "mark_assessment_preclaim_failed")
+        assessment_id = _validate_bounded_identifier(assessment_id, "assessment_id")
+        source_schema = str(source_schema or "").strip()
+        if not source_schema:
+            raise ValueError("source_schema is required")
+        object_name = str(object_name or "").strip()
+        if not object_name:
+            raise ValueError("object_name is required")
+
+        safe_error = sanitize_error_message(error) if error else None
+        if safe_error and len(safe_error) > 2000:
+            safe_error = safe_error[:1997] + "..."
+
+        if allow_existing_failed:
+            prior_condition = (
+                "(selection_status IS NULL OR trim(selection_status) = '' "
+                "OR upper(trim(selection_status)) IN ('SELECTED', 'FAILED'))"
+            )
+        else:
+            prior_condition = (
+                "(selection_status IS NULL OR trim(selection_status) = '' "
+                "OR upper(trim(selection_status)) = 'SELECTED')"
+            )
+
+        where_predicates = [
+            f"connection_id = {escape_string_literal(connection_id)}",
+            f"assessment_id = {escape_string_literal(assessment_id)}",
+            f"source_schema = {escape_string_literal(source_schema)}",
+            "object_type = 'TABLE'",
+            f"object_name = {escape_string_literal(object_name)}",
+            "coalesce(is_selected, false) = true",
+            prior_condition,
+            "(onboarding_run_id IS NULL OR trim(onboarding_run_id) = '')",
+            "(onboarding_attempt_id IS NULL OR trim(onboarding_attempt_id) = '')",
+        ]
+
+        assignments = [
+            "`selection_status` = 'FAILED'",
+            "`onboarding_failed_stage` = 'REGISTRATION'",
+        ]
+        if safe_error:
+            assignments.append(f"`onboarding_error_message` = {escape_string_literal(safe_error)}")
+        else:
+            assignments.append("`onboarding_error_message` = NULL")
+
+        update_sql = (
+            f"UPDATE {self.ctrl('source_assessment')} "
+            f"SET {', '.join(assignments)} "
+            f"WHERE {' AND '.join(where_predicates)}"
+        )
+
+        try:
+            self.spark.sql(update_sql)
+        except Exception as exc:
+            if not is_delta_concurrency_exception(exc):
+                raise
+
+        row = self._get_assessment_selection_row(
+            connection_id=connection_id,
+            assessment_id=assessment_id,
+            source_schema=source_schema,
+            object_name=object_name,
+        )
+        if not row:
+            return False
+
+        st = _normalize_state(row.get("selection_status"))
+        r_id = str(row.get("onboarding_run_id") or "").strip()
+        a_id = str(row.get("onboarding_attempt_id") or "").strip()
+
+        return st == "FAILED" and not r_id and not a_id
+
+    def mark_assessment_registration_succeeded(
+        self,
+        connection_id: str,
+        assessment_id: str,
+        source_schema: str,
+        object_name: str,
+        run_id: str,
+        attempt_id: str,
+    ) -> bool:
+        """Perform or confirm an idempotently confirmed owned transition of an owned ONBOARDING assessment row to REGISTERED.
+
+        Only updates when the row is currently in ONBOARDING and owned by run_id + attempt_id.
+        Does NOT set ONBOARDED (downstream onboarding still required).
+        """
+        connection_id = require_connection_id(connection_id, "mark_assessment_registration_succeeded")
+        assessment_id = _validate_bounded_identifier(assessment_id, "assessment_id")
+        run_id = _validate_bounded_identifier(run_id, "run_id")
+        attempt_id = _validate_bounded_identifier(attempt_id, "attempt_id")
+        source_schema = str(source_schema or "").strip()
+        object_name = str(object_name or "").strip()
+
+        where_predicates = [
+            f"connection_id = {escape_string_literal(connection_id)}",
+            f"assessment_id = {escape_string_literal(assessment_id)}",
+            f"source_schema = {escape_string_literal(source_schema)}",
+            "object_type = 'TABLE'",
+            f"object_name = {escape_string_literal(object_name)}",
+            "upper(trim(coalesce(selection_status, ''))) = 'ONBOARDING'",
+            f"onboarding_run_id = {escape_string_literal(run_id)}",
+            f"onboarding_attempt_id = {escape_string_literal(attempt_id)}",
+        ]
+
+        set_clause = (
+            "`selection_status` = 'REGISTERED', "
+            "`registration_completed_ts` = current_timestamp(), "
+            "`onboarding_failed_stage` = NULL, "
+            "`onboarding_error_message` = NULL"
+        )
+
+        sql = f"UPDATE {self.ctrl('source_assessment')} SET {set_clause} WHERE {' AND '.join(where_predicates)}"
+        try:
+            self.spark.sql(sql)
+        except Exception as exc:
+            if not is_delta_concurrency_exception(exc):
+                raise
+
+        row = self._get_assessment_selection_row(
+            connection_id=connection_id,
+            assessment_id=assessment_id,
+            source_schema=source_schema,
+            object_name=object_name,
+        )
+        if not row:
+            return False
+
+        st = _normalize_state(row.get("selection_status"))
+        r_id = str(row.get("onboarding_run_id") or "").strip()
+        a_id = str(row.get("onboarding_attempt_id") or "").strip()
+
+        return st == "REGISTERED" and r_id == run_id and a_id == attempt_id
+
+    def mark_assessment_onboarding_terminal(
+        self,
+        connection_id: str,
+        assessment_id: str,
+        source_schema: str,
+        object_name: str,
+        run_id: str,
+        attempt_id: str | None,
+        terminal_status: str,
+        message: Exception | str | None = None,
+    ) -> bool:
+        """Perform or confirm an idempotently confirmed owned transition of an owned REGISTERED row to terminal (REVIEW_REQUIRED or BLOCKED)."""
+        connection_id = require_connection_id(connection_id, "mark_assessment_onboarding_terminal")
+        assessment_id = _validate_bounded_identifier(assessment_id, "assessment_id")
+        run_id = _validate_bounded_identifier(run_id, "run_id")
+        source_schema = str(source_schema or "").strip()
+        object_name = str(object_name or "").strip()
+
+        term_status = str(terminal_status or "").strip().upper()
+        if term_status not in ("REVIEW_REQUIRED", "BLOCKED"):
+            raise ValueError(
+                f"Invalid terminal_status {terminal_status!r}; expected 'REVIEW_REQUIRED' or 'BLOCKED'"
+            )
+
+        safe_message = sanitize_error_message(message) if message else None
+        if safe_message and len(safe_message) > 2000:
+            safe_message = safe_message[:1997] + "..."
+
+        where_predicates = [
+            f"connection_id = {escape_string_literal(connection_id)}",
+            f"assessment_id = {escape_string_literal(assessment_id)}",
+            f"source_schema = {escape_string_literal(source_schema)}",
+            "object_type = 'TABLE'",
+            f"object_name = {escape_string_literal(object_name)}",
+            "upper(trim(coalesce(selection_status, ''))) = 'REGISTERED'",
+            f"onboarding_run_id = {escape_string_literal(run_id)}",
+        ]
+        if attempt_id:
+            valid_attempt = _validate_bounded_identifier(attempt_id, "attempt_id")
+            where_predicates.append(f"onboarding_attempt_id = {escape_string_literal(valid_attempt)}")
+
+        assignments = [
+            f"`selection_status` = {escape_string_literal(term_status)}",
+            "`onboarding_completed_ts` = current_timestamp()",
+            "`onboarding_failed_stage` = NULL",
+        ]
+        if safe_message:
+            assignments.append(f"`onboarding_error_message` = {escape_string_literal(safe_message)}")
+        else:
+            assignments.append("`onboarding_error_message` = NULL")
+
+        sql = f"UPDATE {self.ctrl('source_assessment')} SET {', '.join(assignments)} WHERE {' AND '.join(where_predicates)}"
+        try:
+            self.spark.sql(sql)
+        except Exception as exc:
+            if not is_delta_concurrency_exception(exc):
+                raise
+
+        row = self._get_assessment_selection_row(
+            connection_id=connection_id,
+            assessment_id=assessment_id,
+            source_schema=source_schema,
+            object_name=object_name,
+        )
+        if not row:
+            return False
+
+        st = _normalize_state(row.get("selection_status"))
+        r_id = str(row.get("onboarding_run_id") or "").strip()
+        a_id = str(row.get("onboarding_attempt_id") or "").strip()
+        f_stage = row.get("onboarding_failed_stage")
+
+        matches = (
+            st == term_status
+            and r_id == run_id
+            and (f_stage is None or str(f_stage).strip() == "")
+        )
+        if attempt_id:
+            matches = matches and (a_id == attempt_id)
+        return matches
+
+    def mark_assessment_onboarding_completed(
+        self,
+        connection_id: str,
+        assessment_id: str,
+        source_schema: str,
+        object_name: str,
+        run_id: str,
+        attempt_id: str | None = None,
+    ) -> bool:
+        """Perform or confirm an idempotently confirmed owned transition of an owned REGISTERED assessment row to ONBOARDED after target provisioning verification.
+
+        Only updates when the row is currently in REGISTERED and owned by run_id (and attempt_id when supplied).
+        """
+        connection_id = require_connection_id(connection_id, "mark_assessment_onboarding_completed")
+        assessment_id = _validate_bounded_identifier(assessment_id, "assessment_id")
+        run_id = _validate_bounded_identifier(run_id, "run_id")
+        source_schema = str(source_schema or "").strip()
+        object_name = str(object_name or "").strip()
+
+        where_predicates = [
+            f"connection_id = {escape_string_literal(connection_id)}",
+            f"assessment_id = {escape_string_literal(assessment_id)}",
+            f"source_schema = {escape_string_literal(source_schema)}",
+            "object_type = 'TABLE'",
+            f"object_name = {escape_string_literal(object_name)}",
+            "upper(trim(coalesce(selection_status, ''))) = 'REGISTERED'",
+            f"onboarding_run_id = {escape_string_literal(run_id)}",
+        ]
+        if attempt_id:
+            valid_attempt = _validate_bounded_identifier(attempt_id, "attempt_id")
+            where_predicates.append(f"onboarding_attempt_id = {escape_string_literal(valid_attempt)}")
+
+        set_clause = (
+            "`selection_status` = 'ONBOARDED', "
+            "`onboarding_completed_ts` = current_timestamp(), "
+            "`onboarding_failed_stage` = NULL, "
+            "`onboarding_error_message` = NULL"
+        )
+
+        sql = f"UPDATE {self.ctrl('source_assessment')} SET {set_clause} WHERE {' AND '.join(where_predicates)}"
+        try:
+            self.spark.sql(sql)
+        except Exception as exc:
+            if not is_delta_concurrency_exception(exc):
+                raise
+
+        row = self._get_assessment_selection_row(
+            connection_id=connection_id,
+            assessment_id=assessment_id,
+            source_schema=source_schema,
+            object_name=object_name,
+        )
+        if not row:
+            return False
+
+        st = _normalize_state(row.get("selection_status"))
+        r_id = str(row.get("onboarding_run_id") or "").strip()
+        a_id = str(row.get("onboarding_attempt_id") or "").strip()
+
+        matches = st == "ONBOARDED" and r_id == run_id
+        if attempt_id:
+            matches = matches and (a_id == attempt_id)
+        return matches
+
+    def mark_assessment_onboarding_failed(
+        self,
+        connection_id: str,
+        assessment_id: str,
+        source_schema: str,
+        object_name: str,
+        run_id: str,
+        attempt_id: str | None = None,
+        failed_stage: str = "REGISTRATION",
+        error: Exception | str | None = None,
+    ) -> bool:
+        """Perform or confirm an idempotently confirmed owned transition of an owned ONBOARDING or REGISTERED assessment row to FAILED.
+
+        Never overwrites another run's claim. Never modifies already ONBOARDED rows.
+        """
+        connection_id = require_connection_id(connection_id, "mark_assessment_onboarding_failed")
+        assessment_id = _validate_bounded_identifier(assessment_id, "assessment_id")
+        run_id = _validate_bounded_identifier(run_id, "run_id")
+        source_schema = str(source_schema or "").strip()
+        object_name = str(object_name or "").strip()
+
+        stage = str(failed_stage or "").strip().upper()
+        if stage not in VALID_ONBOARDING_STAGES:
+            raise ValueError(
+                f"Invalid onboarding failed_stage {failed_stage!r}; expected one of: "
+                f"{', '.join(sorted(VALID_ONBOARDING_STAGES))}"
+            )
+
+        safe_error = sanitize_error_message(error) if error else None
+        if safe_error and len(safe_error) > 2000:
+            safe_error = safe_error[:1997] + "..."
+
+        where_predicates = [
+            f"connection_id = {escape_string_literal(connection_id)}",
+            f"assessment_id = {escape_string_literal(assessment_id)}",
+            f"source_schema = {escape_string_literal(source_schema)}",
+            "object_type = 'TABLE'",
+            f"object_name = {escape_string_literal(object_name)}",
+            f"onboarding_run_id = {escape_string_literal(run_id)}",
+            "upper(trim(coalesce(selection_status, ''))) IN ('ONBOARDING', 'REGISTERED')",
+        ]
+        if attempt_id:
+            valid_attempt = _validate_bounded_identifier(attempt_id, "attempt_id")
+            where_predicates.append(f"onboarding_attempt_id = {escape_string_literal(valid_attempt)}")
+
+        assignments = [
+            "`selection_status` = 'FAILED'",
+            f"`onboarding_failed_stage` = {escape_string_literal(stage)}",
+        ]
+        if safe_error:
+            assignments.append(f"`onboarding_error_message` = {escape_string_literal(safe_error)}")
+        else:
+            assignments.append("`onboarding_error_message` = NULL")
+
+        sql = f"UPDATE {self.ctrl('source_assessment')} SET {', '.join(assignments)} WHERE {' AND '.join(where_predicates)}"
+        try:
+            self.spark.sql(sql)
+        except Exception as exc:
+            if not is_delta_concurrency_exception(exc):
+                raise
+
+        row = self._get_assessment_selection_row(
+            connection_id=connection_id,
+            assessment_id=assessment_id,
+            source_schema=source_schema,
+            object_name=object_name,
+        )
+        if not row:
+            return False
+
+        st = _normalize_state(row.get("selection_status"))
+        r_id = str(row.get("onboarding_run_id") or "").strip()
+        a_id = str(row.get("onboarding_attempt_id") or "").strip()
+        f_stage = _normalize_state(row.get("onboarding_failed_stage"))
+
+        matches = st == "FAILED" and r_id == run_id and f_stage == stage
+        if attempt_id:
+            matches = matches and (a_id == attempt_id)
+        return matches
+
+    def find_target_owners(
+        self,
+        target_catalog: str,
+        target_schema: str,
+        target_table: str,
+        exclude_owner: tuple[str, str] | None = None,
+        include_reserved: bool = True,
+    ) -> list[dict]:
+        """Find registrations that own or reserve the specified target FQN.
+
+        A target FQN is reserved by any non-retired registration with a complete target.
+        When include_reserved=True, reserved states include inactive onboarding rows
+        (REGISTERED, INVENTORIED, PROVISIONED, etc.).
+        exclude_owner=(connection_id, source_table_id) permits rerun by the exact same owner.
+        """
+        cat = normalize_target_component(target_catalog)
+        sch = normalize_target_component(target_schema)
+        tbl = normalize_target_component(target_table)
+        if not cat or not sch or not tbl:
+            return []
+
+        where_parts = [
+            f"lower(trim(coalesce(target_catalog, ''))) = {escape_string_literal(cat)}",
+            f"lower(trim(coalesce(target_schema, ''))) = {escape_string_literal(sch)}",
+            f"lower(trim(coalesce(target_table, ''))) = {escape_string_literal(tbl)}",
+        ]
+        if include_reserved:
+            where_parts.append(
+                "coalesce(current_status, '') NOT IN ('RETIRED', 'DECOMMISSIONED')"
+            )
+        else:
+            where_parts.append("is_active = true")
+
+        sql = (
+            f"SELECT connection_id, source_table_id, target_catalog, target_schema, "
+            f"target_table, is_active, current_status "
+            f"FROM {self.ctrl('source_table_control')} "
+            f"WHERE {' AND '.join(where_parts)}"
+        )
+        rows = self.spark.sql(sql).collect()
+        owners = []
+        for r in rows:
+            rd = r.asDict() if hasattr(r, "asDict") else dict(r)
+            owner_key = (rd.get("connection_id"), rd.get("source_table_id"))
+            if exclude_owner and owner_key == exclude_owner:
+                continue
+            owners.append(rd)
+        return owners

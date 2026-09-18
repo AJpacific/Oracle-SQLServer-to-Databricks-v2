@@ -1,5 +1,19 @@
-............
+test_checklist_contains_no_volatile_durations (tests.test_release_documentation.TestReleaseDocumentation.test_checklist_contains_no_volatile_durations) ... ok
+test_connection_owned_identity_and_migration_are_documented (tests.test_release_documentation.TestReleaseDocumentation.test_connection_owned_identity_and_migration_are_documented) ... ok
+test_current_diagnostic_paths_are_documented (tests.test_release_documentation.TestReleaseDocumentation.test_current_diagnostic_paths_are_documented) ... ok
+test_documented_notebook_paths_exist (tests.test_release_documentation.TestReleaseDocumentation.test_documented_notebook_paths_exist) ... ok
+test_inventory_exact_replacement_is_documented (tests.test_release_documentation.TestReleaseDocumentation.test_inventory_exact_replacement_is_documented) ... ok
+test_mapper_structure_and_facade_are_documented (tests.test_release_documentation.TestReleaseDocumentation.test_mapper_structure_and_facade_are_documented) ... ok
+test_missing_source_system_and_manual_repair_are_documented (tests.test_release_documentation.TestReleaseDocumentation.test_missing_source_system_and_manual_repair_are_documented) ... ok
+test_production_checklist_exists_and_has_status_vocabulary (tests.test_release_documentation.TestReleaseDocumentation.test_production_checklist_exists_and_has_status_vocabulary) ... ok
+test_pure_tests_are_not_claimed_as_live_validation (tests.test_release_documentation.TestReleaseDocumentation.test_pure_tests_are_not_claimed_as_live_validation) ... ok
+test_runtime_checklist_rows_default_to_not_executed (tests.test_release_documentation.TestReleaseDocumentation.test_runtime_checklist_rows_default_to_not_executed) ... ok
+test_sqlserver_and_oracle_policy_remain_source_documented (tests.test_release_documentation.TestReleaseDocumentation.test_sqlserver_and_oracle_policy_remain_source_documented) ... ok
+test_targeted_safety_behavior_is_documented (tests.test_release_documentation.TestReleaseDocumentation.test_targeted_safety_behavior_is_documented) ... ok
+test_test_evidence_paths_are_documented (tests.test_release_documentation.TestReleaseDocumentation.test_test_evidence_paths_are_documented) ... ok
+test_required_shared_descriptions_are_source_neutral (tests.test_release_documentation.TestSharedNotebookDescriptions.test_required_shared_descriptions_are_source_neutral) ... ok
+
 ----------------------------------------------------------------------
-Ran 12 tests in 0.015s
+Ran 14 tests in 0.006s
 
 OK

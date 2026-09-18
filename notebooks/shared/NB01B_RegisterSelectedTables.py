@@ -5,6 +5,7 @@
 # MAGIC into `source_table_control`. Only COMPATIBLE and REVIEW tables are
 # MAGIC registered; every new row is inactive (`is_active=false`,
 # MAGIC `current_status=REGISTERED`) and must be reviewed/activated separately.
+# MAGIC Supports both ASSESSMENT_FLAGS (control-table driven) and legacy WIDGETS modes.
 # MAGIC It preserves existing watermark, initial-load, successful-run, and manually
 # MAGIC assigned target names, computes the deterministic connection-owned
 # MAGIC `source_table_id`, and blocks target-name collisions before the MERGE.
@@ -15,8 +16,12 @@
 
 # COMMAND ----------
 
+dbutils.widgets.dropdown("selection_mode", "ASSESSMENT_FLAGS",
+                         ["ASSESSMENT_FLAGS", "WIDGETS"])
 dbutils.widgets.text("assessment_id", "")
 dbutils.widgets.text("connection_id", "")
+dbutils.widgets.text("run_id", "")
+dbutils.widgets.dropdown("include_failed_retries", "false", ["true", "false"])
 dbutils.widgets.text("selected_schemas", "")
 dbutils.widgets.text("selected_tables", "")
 dbutils.widgets.text("target_catalog", "")
@@ -24,22 +29,33 @@ dbutils.widgets.dropdown("target_schema_mode", "SOURCE_SCHEMA",
                          ["SOURCE_SCHEMA", "PREFIX_WITH_DATABASE", "EXPLICIT"])
 dbutils.widgets.text("target_schema", "")
 
+selection_mode = dbutils.widgets.get("selection_mode").strip().upper() or "ASSESSMENT_FLAGS"
 assessment_id = dbutils.widgets.get("assessment_id").strip()
 connection_id = dbutils.widgets.get("connection_id").strip()
-selected_schemas = {s.strip() for s in dbutils.widgets.get("selected_schemas").split(",") if s.strip()}
-selected_tables = {s.strip() for s in dbutils.widgets.get("selected_tables").split(",") if s.strip()}
-target_catalog = dbutils.widgets.get("target_catalog").strip() or CATALOG
-target_schema_mode = dbutils.widgets.get("target_schema_mode").strip()
-explicit_target_schema = dbutils.widgets.get("target_schema").strip()
+run_id = dbutils.widgets.get("run_id").strip() or get_run_id()
+batch_attempt_id = new_run_id("batch_attempt")
+include_failed_retries = dbutils.widgets.get("include_failed_retries").strip().lower() in ("true", "1", "yes")
 
 if not assessment_id or not connection_id:
     raise ValueError("assessment_id and connection_id are required")
-if target_schema_mode == "EXPLICIT" and not explicit_target_schema:
-    raise ValueError("EXPLICIT target_schema_mode requires target_schema")
 
 repo = control_repo()
 connection = require_valid_connection(connection_id)
 connection_data = connection.asDict()
+
+if selection_mode == "ASSESSMENT_FLAGS":
+    target_config = repo.resolve_target_config(connection_id)
+    target_config_id = target_config["config_id"]
+    target_catalog = target_config["target_catalog"]
+    target_schema_mode = target_config["target_schema_mode"]
+    explicit_target_schema = target_config["target_schema"]
+else:
+    target_config_id = None
+    target_catalog = dbutils.widgets.get("target_catalog").strip() or CATALOG
+    target_schema_mode = dbutils.widgets.get("target_schema_mode").strip()
+    explicit_target_schema = dbutils.widgets.get("target_schema").strip()
+    if target_schema_mode == "EXPLICIT" and not explicit_target_schema:
+        raise ValueError("EXPLICIT target_schema_mode requires target_schema")
 
 def ctrl(t):
     return f"{quote_databricks(CATALOG)}.{quote_databricks(CONTROL_SCHEMA)}.{quote_databricks(t)}"
@@ -67,8 +83,8 @@ assert_source_identity_match(assessment_owner, connection)
 # Read TABLE objects for the exact assessment + connection; register only those
 # explicitly selected and only when COMPATIBLE or REVIEW.
 assessed = spark.sql(f"""
-    SELECT connection_id, source_schema, object_name, source_system, source_server,
-           source_database, compatibility_status
+    SELECT connection_id, assessment_id, source_schema, object_name, source_system, source_server,
+           source_database, compatibility_status, is_selected, selection_status
     FROM {ctrl('source_assessment')}
     WHERE assessment_id = {escape_string_literal(assessment_id)}
       AND connection_id = {escape_string_literal(connection_id)}
@@ -78,12 +94,22 @@ print(f"Assessed tables in scope: {len(assessed)}")
 
 # COMMAND ----------
 
-def _selected(schema, obj):
-    if selected_tables:
-        return f"{schema}.{obj}" in selected_tables or obj in selected_tables
-    if selected_schemas:
-        return schema in selected_schemas
-    return False
+selected_schemas = {s.strip() for s in dbutils.widgets.get("selected_schemas").split(",") if s.strip()}
+selected_tables = {s.strip() for s in dbutils.widgets.get("selected_tables").split(",") if s.strip()}
+
+def _selected(schema, obj, is_sel, sel_status):
+    if selection_mode == "ASSESSMENT_FLAGS":
+        return is_assessment_selection_candidate(
+            is_selected=is_sel,
+            selection_status=sel_status,
+            include_failed_retries=include_failed_retries,
+        )
+    else:
+        if selected_tables:
+            return f"{schema}.{obj}" in selected_tables or obj in selected_tables
+        if selected_schemas:
+            return schema in selected_schemas
+        return False
 
 def _target_schema(schema, database):
     if target_schema_mode == "EXPLICIT":
@@ -92,12 +118,30 @@ def _target_schema(schema, database):
         return f"{(database or '')}_{schema}".lower().strip("_")
     return schema.lower()
 
+# Check overlapping assessment selections across assessment IDs in ASSESSMENT_FLAGS mode
+if selection_mode == "ASSESSMENT_FLAGS":
+    overlaps = repo.check_overlapping_selected_assessments(
+        source_system=connection_data.get("source_system"),
+        only_connection_ids=[connection_id],
+        include_failed_retries=include_failed_retries,
+    )
+    if overlaps:
+        sample = overlaps[0]
+        conflict_msg = (
+            f"AMBIGUOUS_SELECTED_ASSESSMENT: Table {sample['source_schema']}.{sample['object_name']} "
+            f"in connection {connection_id!r} is selected in {sample['conflicting_assessment_count']} "
+            f"assessment IDs. Operator must deselect obsolete rows before onboarding."
+        )
+        raise ValueError(conflict_msg)
+
 candidates = []
 skipped = []
 for r in assessed:
     assert_source_identity_match(r, connection)
     schema, obj = r["source_schema"], r["object_name"]
-    if not _selected(schema, obj):
+    is_sel = r.get("is_selected")
+    sel_st = r.get("selection_status")
+    if not _selected(schema, obj, is_sel, sel_st):
         continue
     comp = r["compatibility_status"]
     if comp not in ("COMPATIBLE", "REVIEW"):
@@ -118,7 +162,7 @@ for r in assessed:
         "source_database": src_db, "source_schema": schema, "source_table": obj,
         "target_catalog": target_catalog, "target_schema": t_schema,
         "target_table": t_table, "mapping_status": comp,
-        "target_fqn": f"{target_catalog}.{t_schema}.{t_table}".lower(),
+        "target_fqn": f"{normalize_target_component(target_catalog)}.{normalize_target_component(t_schema)}.{normalize_target_component(t_table)}",
     })
 
 print(f"Selected {len(candidates)} table(s); skipped {len(skipped)}.")
@@ -126,41 +170,132 @@ print(f"Selected {len(candidates)} table(s); skipped {len(skipped)}.")
 # COMMAND ----------
 
 # ---- collision detection BEFORE any MERGE ----------------------------------
+# Intentionally retained batch collection: finding target owners in a single query
+# avoids executing N separate Spark queries for N candidate tables.
 # 1) Two selected tables resolving to the same target FQN.
 from collections import Counter
 fqn_counts = Counter(c["target_fqn"] for c in candidates)
 internal_collisions = {f for f, n in fqn_counts.items() if n > 1}
 
-# 2) An existing active control row (different identity) using the same target FQN,
+# 2) An existing non-retired registration using the same target FQN,
 #    plus the existing connection_id so a conflicting one can be blocked.
 existing = spark.sql(f"""
     SELECT source_table_id, connection_id,
            lower(concat_ws('.', coalesce(target_catalog, '{CATALOG}'),
                  coalesce(target_schema, lower(source_schema)),
-                 coalesce(target_table, lower(source_table)))) AS target_fqn
+                 coalesce(target_table, lower(source_table)))) AS target_fqn,
+           is_active, current_status
     FROM {ctrl('source_table_control')}
-    WHERE is_active = true
+    WHERE target_catalog IS NOT NULL AND trim(target_catalog) <> ''
+      AND target_schema IS NOT NULL AND trim(target_schema) <> ''
+      AND target_table IS NOT NULL AND trim(target_table) <> ''
+      AND coalesce(current_status, '') NOT IN ('RETIRED', 'DECOMMISSIONED')
 """).collect()
 existing_fqn = {}
 for e in existing:
     existing_fqn.setdefault(e["target_fqn"], set()).add(
         (e["connection_id"], e["source_table_id"]))
 
+# 3) Existing registrations for this exact connection to protect stored targets (immutability)
+existing_for_conn = spark.sql(f"""
+    SELECT source_table_id, connection_id, target_catalog, target_schema, target_table,
+           is_active, current_status
+    FROM {ctrl('source_table_control')}
+    WHERE connection_id = {escape_string_literal(connection_id)}
+""").collect()
+existing_conn_map = {
+    r["source_table_id"]: r for r in existing_for_conn
+}
+
 valid = []
+already_registered = []
 conflicts = []
+errors = []
+target_conflict_count = 0
+target_config_changed_count = 0
+
 for c in candidates:
+    schema = c["source_schema"]
+    table = c["source_table"]
+    sid = c["source_table_id"]
+
     if c["target_fqn"] in internal_collisions:
-        skipped.append((c["source_schema"], c["source_table"],
-                        f"target collision within selection: {c['target_fqn']}"))
+        msg = f"target collision within selection: {c['target_fqn']}"
+        skipped.append((schema, table, msg))
+        conflicts.append(c["target_fqn"])
+        errors.append(f"{schema}.{table}: {msg}")
+        target_conflict_count += 1
+        if selection_mode == "ASSESSMENT_FLAGS":
+            succ = repo.mark_assessment_preclaim_failed(
+                connection_id=connection_id,
+                assessment_id=assessment_id,
+                source_schema=schema,
+                object_name=table,
+                error=msg,
+                allow_existing_failed=include_failed_retries,
+            )
+            if not succ:
+                print(f"[info] Pre-claim failure state not recorded for {schema}.{table} (already claimed, completed, terminal, or missing)")
         continue
+
     owners = existing_fqn.get(c["target_fqn"], set())
     if owners - {(connection_id, c["source_table_id"])}:
-        skipped.append((c["source_schema"], c["source_table"],
-                        f"target collision with existing row: {c['target_fqn']}"))
+        msg = f"target collision with existing row: {c['target_fqn']}"
+        skipped.append((schema, table, msg))
+        conflicts.append(c["target_fqn"])
+        errors.append(f"{schema}.{table}: {msg}")
+        target_conflict_count += 1
+        if selection_mode == "ASSESSMENT_FLAGS":
+            succ = repo.mark_assessment_preclaim_failed(
+                connection_id=connection_id,
+                assessment_id=assessment_id,
+                source_schema=schema,
+                object_name=table,
+                error=msg,
+                allow_existing_failed=include_failed_retries,
+            )
+            if not succ:
+                print(f"[info] Pre-claim failure state not recorded for {schema}.{table} (already claimed, completed, terminal, or missing)")
         continue
-    valid.append(c)
 
-print(f"Registerable after collision check: {len(valid)}; "
+    # Protect stored target for existing registrations
+    existing_reg = existing_conn_map.get(sid)
+    if existing_reg is not None:
+        reg_cat = normalize_target_component(existing_reg.get("target_catalog"))
+        reg_sch = normalize_target_component(existing_reg.get("target_schema"))
+        reg_tbl = normalize_target_component(existing_reg.get("target_table"))
+        prop_cat = normalize_target_component(c["target_catalog"])
+        prop_sch = normalize_target_component(c["target_schema"])
+        prop_tbl = normalize_target_component(c["target_table"])
+
+        if (reg_cat, reg_sch, reg_tbl) == (prop_cat, prop_sch, prop_tbl):
+            already_registered.append(c)
+        else:
+            msg = (
+                f"TARGET_CONFIG_CHANGED: Existing registration uses "
+                f"{reg_cat}.{reg_sch}.{reg_tbl}, but current config proposes "
+                f"{prop_cat}.{prop_sch}.{prop_tbl}. Target remains immutable."
+            )
+            skipped.append((schema, table, msg))
+            conflicts.append(f"{reg_cat}.{reg_sch}.{reg_tbl} != {prop_cat}.{prop_sch}.{prop_tbl}")
+            errors.append(f"{schema}.{table}: {msg}")
+            target_config_changed_count += 1
+            if selection_mode == "ASSESSMENT_FLAGS":
+                succ = repo.mark_assessment_preclaim_failed(
+                    connection_id=connection_id,
+                    assessment_id=assessment_id,
+                    source_schema=schema,
+                    object_name=table,
+                    error=msg,
+                    allow_existing_failed=include_failed_retries,
+                )
+                if not succ:
+                    print(f"[info] Pre-claim failure state not recorded for {schema}.{table} (already claimed, completed, terminal, or missing)")
+            continue
+    else:
+        valid.append(c)
+
+print(f"Registerable after collision check: {len(valid)}; already registered: {len(already_registered)}; "
       f"connection conflicts: {len(conflicts)}")
 
 # COMMAND ----------
@@ -168,80 +303,337 @@ print(f"Registerable after collision check: {len(valid)}; "
 from pyspark.sql import Row
 from pyspark.sql import functions as F
 
+validated_count = len(valid) + len(already_registered)
+claim_acquired_count = 0
+claim_conflict_count = 0
+registered_count = 0
+already_registered_count = 0
+registration_failed_count = 0
 worklist = []
-if valid:
-    reg_rows = [Row(
-        source_table_id=c["source_table_id"], connection_id=c["connection_id"],
-        source_system=c["source_system"], source_server=c["source_server"],
-        source_database=c["source_database"], source_schema=c["source_schema"],
-        source_table=c["source_table"], target_catalog=c["target_catalog"],
-        target_schema=c["target_schema"], target_table=c["target_table"],
-        mapping_status=c["mapping_status"],
-        source_identity_version=SOURCE_IDENTITY_VERSION,
-        legacy_source_table_id=None) for c in valid]
-    src_df = (spark.createDataFrame(reg_rows)
-              .withColumn("is_active", F.lit(False))
-              .withColumn("current_status", F.lit("REGISTERED"))
-              .withColumn("initial_load_completed", F.lit(False))
-              .withColumn("delete_policy", F.lit("IGNORE_DELETES"))
-              .withColumn("created_ts", F.current_timestamp())
-              .withColumn("updated_ts", F.current_timestamp()))
-    src_df.createOrReplaceTempView("_register_rows")
-    # An existing row keeps ALL operational state (watermark, initial-load
-    # completion, successful-run info, decision, manual target names). The only
-    # New rows start inactive and are never auto-activated.
-    spark.sql(f"""
-        MERGE INTO {ctrl('source_table_control')} t
-        USING _register_rows s
-                    ON t.connection_id = s.connection_id
-                 AND t.source_table_id = s.source_table_id
-        WHEN NOT MATCHED THEN INSERT (
-            source_table_id, connection_id, source_system, source_server,
-            source_database, source_schema, source_table, target_catalog,
-            target_schema, target_table, mapping_status, is_active,
-            current_status, initial_load_completed, delete_policy,
-                        source_identity_version, legacy_source_table_id,
-                        created_ts, updated_ts
-        ) VALUES (
-            s.source_table_id, s.connection_id, s.source_system, s.source_server,
-            s.source_database, s.source_schema, s.source_table, s.target_catalog,
-            s.target_schema, s.target_table, s.mapping_status, s.is_active,
-            s.current_status, s.initial_load_completed, s.delete_policy,
-            s.source_identity_version, s.legacy_source_table_id,
-            s.created_ts, s.updated_ts
+
+def _verify_exact_registration(candidate):
+    cid = candidate["connection_id"]
+    sid = candidate["source_table_id"]
+    v_rows = spark.sql(f"""
+        SELECT connection_id, source_table_id, source_identity_version,
+               target_catalog, target_schema, target_table
+        FROM {ctrl('source_table_control')}
+        WHERE connection_id = {escape_string_literal(cid)}
+          AND source_table_id = {escape_string_literal(sid)}
+    """).collect()
+    if not v_rows:
+        raise RuntimeError(f"Registration verification failed: no registration found for {cid}.{sid}")
+    if len(v_rows) > 1:
+        raise RuntimeError(f"Registration verification failed: duplicate registrations found for {cid}.{sid}")
+
+    reg = v_rows[0].asDict() if hasattr(v_rows[0], "asDict") else dict(v_rows[0])
+
+    if reg.get("connection_id") != cid or reg.get("source_table_id") != sid:
+        raise RuntimeError(f"Registration identity mismatch for {cid}.{sid}")
+
+    if int(reg.get("source_identity_version") or 0) != SOURCE_IDENTITY_VERSION:
+        raise RuntimeError(
+            f"Registration identity version mismatch for {cid}.{sid}: "
+            f"expected {SOURCE_IDENTITY_VERSION}, got {reg.get('source_identity_version')}"
         )
-    """)
+
+    exp_cat = normalize_target_component(candidate.get("target_catalog"))
+    exp_sch = normalize_target_component(candidate.get("target_schema"))
+    exp_tbl = normalize_target_component(candidate.get("target_table"))
+
+    act_cat = normalize_target_component(reg.get("target_catalog"))
+    act_sch = normalize_target_component(reg.get("target_schema"))
+    act_tbl = normalize_target_component(reg.get("target_table"))
+
+    if (act_cat, act_sch, act_tbl) != (exp_cat, exp_sch, exp_tbl):
+        raise RuntimeError(
+            f"TARGET_CONFIG_CHANGED_AFTER_CLAIM: expected target ({exp_cat}.{exp_sch}.{exp_tbl}) "
+            f"does not match registered target ({act_cat}.{act_sch}.{act_tbl})"
+        )
+
+if selection_mode == "ASSESSMENT_FLAGS":
+    # 1. Process new valid registrations with atomic claim and post-claim verification
     for c in valid:
+        schema = c["source_schema"]
+        table = c["source_table"]
+        sid = c["source_table_id"]
+        attempt_id = new_run_id("attempt")
+        claimed = False
+        try:
+            claim_res = repo.claim_assessment_selection_row(
+                connection_id, assessment_id, schema, table, run_id, attempt_id,
+                allow_failed_retry=include_failed_retries
+            )
+            if not claim_res.acquired:
+                claim_conflict_count += 1
+                msg = f"claim conflict: {claim_res.reason or 'could not acquire claim'}"
+                skipped.append((schema, table, msg))
+                errors.append(f"{schema}.{table}: {msg}")
+                continue
+
+            claimed = True
+            claim_acquired_count += 1
+
+            # Insert new registration into source_table_control
+            reg_row = Row(
+                source_table_id=sid, connection_id=connection_id,
+                source_system=c["source_system"], source_server=c["source_server"],
+                source_database=c["source_database"], source_schema=schema,
+                source_table=table, target_catalog=c["target_catalog"],
+                target_schema=c["target_schema"], target_table=c["target_table"],
+                mapping_status=c["mapping_status"],
+                source_identity_version=SOURCE_IDENTITY_VERSION,
+                legacy_source_table_id=None
+            )
+            src_df = (spark.createDataFrame([reg_row])
+                      .withColumn("is_active", F.lit(False))
+                      .withColumn("current_status", F.lit("REGISTERED"))
+                      .withColumn("initial_load_completed", F.lit(False))
+                      .withColumn("delete_policy", F.lit("IGNORE_DELETES"))
+                      .withColumn("created_ts", F.current_timestamp())
+                      .withColumn("updated_ts", F.current_timestamp()))
+            src_df.createOrReplaceTempView("_single_register_row")
+            spark.sql(f"""
+                MERGE INTO {ctrl('source_table_control')} t
+                USING _single_register_row s
+                ON t.connection_id = s.connection_id
+               AND t.source_table_id = s.source_table_id
+                WHEN NOT MATCHED THEN INSERT (
+                    source_table_id, connection_id, source_system, source_server,
+                    source_database, source_schema, source_table, target_catalog,
+                    target_schema, target_table, mapping_status, is_active,
+                    current_status, initial_load_completed, delete_policy,
+                    source_identity_version, legacy_source_table_id,
+                    created_ts, updated_ts
+                ) VALUES (
+                    s.source_table_id, s.connection_id, s.source_system, s.source_server,
+                    s.source_database, s.source_schema, s.source_table, s.target_catalog,
+                    s.target_schema, s.target_table, s.mapping_status, s.is_active,
+                    s.current_status, s.initial_load_completed, s.delete_policy,
+                    s.source_identity_version, s.legacy_source_table_id,
+                    s.created_ts, s.updated_ts
+                )
+            """)
+
+            # Verify exact registration exists in source_table_control
+            _verify_exact_registration(c)
+
+            # Transition exact assessment row to REGISTERED (never ONBOARDED in NB01B)
+            succ = repo.mark_assessment_registration_succeeded(
+                connection_id, assessment_id, schema, table, run_id, attempt_id
+            )
+            if not succ:
+                raise RuntimeError(f"Failed to mark assessment row REGISTERED for {schema}.{table}")
+
+            registered_count += 1
+            worklist.append({"connection_id": connection_id, "source_table_id": sid})
+
+        except Exception as exc:
+            registration_failed_count += 1
+            safe_err = failcls.sanitize_message(exc)
+            errors.append(f"{schema}.{table}: {safe_err}")
+            if claimed:
+                try:
+                    repo.mark_assessment_onboarding_failed(
+                        connection_id, assessment_id, schema, table,
+                        run_id, attempt_id, failed_stage="REGISTRATION", error=safe_err
+                    )
+                except Exception as state_exc:
+                    print(f"[warn] Failed to set FAILED state on {schema}.{table}: {failcls.sanitize_message(state_exc)}")
+
+    # 2. Confirm already-registered candidates
+    for c in already_registered:
+        schema = c["source_schema"]
+        table = c["source_table"]
+        sid = c["source_table_id"]
+        attempt_id = new_run_id("attempt")
+        claimed = False
+        try:
+            claim_res = repo.claim_assessment_selection_row(
+                connection_id, assessment_id, schema, table, run_id, attempt_id,
+                allow_failed_retry=include_failed_retries
+            )
+            if not claim_res.acquired:
+                claim_conflict_count += 1
+                msg = f"claim conflict: {claim_res.reason or 'could not acquire claim'}"
+                skipped.append((schema, table, msg))
+                errors.append(f"{schema}.{table}: {msg}")
+                continue
+
+            claimed = True
+            claim_acquired_count += 1
+
+            # Idempotent confirmation: verify registration exists with matching immutable target
+            _verify_exact_registration(c)
+
+            succ = repo.mark_assessment_registration_succeeded(
+                connection_id, assessment_id, schema, table, run_id, attempt_id
+            )
+            if not succ:
+                raise RuntimeError(f"Failed to mark assessment row REGISTERED for {schema}.{table}")
+
+            already_registered_count += 1
+            worklist.append({"connection_id": connection_id, "source_table_id": sid})
+
+        except Exception as exc:
+            registration_failed_count += 1
+            safe_err = failcls.sanitize_message(exc)
+            errors.append(f"{schema}.{table}: {safe_err}")
+            if claimed:
+                try:
+                    repo.mark_assessment_onboarding_failed(
+                        connection_id, assessment_id, schema, table,
+                        run_id, attempt_id, failed_stage="REGISTRATION", error=safe_err
+                    )
+                except Exception as state_exc:
+                    print(f"[warn] Failed to set FAILED state on {schema}.{table}: {failcls.sanitize_message(state_exc)}")
+
+else:
+    # Legacy WIDGETS mode: preserves existing batch registration and selection marking
+    if valid:
+        reg_rows = [Row(
+            source_table_id=c["source_table_id"], connection_id=c["connection_id"],
+            source_system=c["source_system"], source_server=c["source_server"],
+            source_database=c["source_database"], source_schema=c["source_schema"],
+            source_table=c["source_table"], target_catalog=c["target_catalog"],
+            target_schema=c["target_schema"], target_table=c["target_table"],
+            mapping_status=c["mapping_status"],
+            source_identity_version=SOURCE_IDENTITY_VERSION,
+            legacy_source_table_id=None) for c in valid]
+        src_df = (spark.createDataFrame(reg_rows)
+                  .withColumn("is_active", F.lit(False))
+                  .withColumn("current_status", F.lit("REGISTERED"))
+                  .withColumn("initial_load_completed", F.lit(False))
+                  .withColumn("delete_policy", F.lit("IGNORE_DELETES"))
+                  .withColumn("created_ts", F.current_timestamp())
+                  .withColumn("updated_ts", F.current_timestamp()))
+        src_df.createOrReplaceTempView("_register_rows")
+        spark.sql(f"""
+            MERGE INTO {ctrl('source_table_control')} t
+            USING _register_rows s
+            ON t.connection_id = s.connection_id
+           AND t.source_table_id = s.source_table_id
+            WHEN NOT MATCHED THEN INSERT (
+                source_table_id, connection_id, source_system, source_server,
+                source_database, source_schema, source_table, target_catalog,
+                target_schema, target_table, mapping_status, is_active,
+                current_status, initial_load_completed, delete_policy,
+                source_identity_version, legacy_source_table_id,
+                created_ts, updated_ts
+            ) VALUES (
+                s.source_table_id, s.connection_id, s.source_system, s.source_server,
+                s.source_database, s.source_schema, s.source_table, s.target_catalog,
+                s.target_schema, s.target_table, s.mapping_status, s.is_active,
+                s.current_status, s.initial_load_completed, s.delete_policy,
+                s.source_identity_version, s.legacy_source_table_id,
+                s.created_ts, s.updated_ts
+            )
+        """)
+        registered_count = len(valid)
+
+    already_registered_count = len(already_registered)
+    all_registered = valid + already_registered
+    if all_registered:
+        sel_rows = [Row(assessment_id=assessment_id, connection_id=connection_id,
+                        source_schema=c["source_schema"], object_name=c["source_table"])
+                    for c in all_registered]
+        spark.createDataFrame(sel_rows).createOrReplaceTempView("_selected_objects")
+        spark.sql(f"""
+            MERGE INTO {ctrl('source_assessment')} t
+            USING _selected_objects s
+              ON t.assessment_id = s.assessment_id
+             AND t.connection_id = s.connection_id
+             AND t.source_schema = s.source_schema
+             AND t.object_name  = s.object_name
+             AND t.object_type  = 'TABLE'
+            WHEN MATCHED THEN UPDATE SET t.is_selected = true
+        """)
+    for c in all_registered:
         worklist.append({"connection_id": connection_id,
                          "source_table_id": c["source_table_id"]})
 
 # COMMAND ----------
 
-# Mark ONLY the assessment rows that were actually registered. Unrequested,
-# skipped, collided, conflicting, MANUAL, and UNABLE_TO_ASSESS rows stay false.
-if valid:
-    sel_rows = [Row(assessment_id=assessment_id, connection_id=connection_id,
-                    source_schema=c["source_schema"], object_name=c["source_table"])
-                for c in valid]
-    spark.createDataFrame(sel_rows).createOrReplaceTempView("_selected_objects")
-    spark.sql(f"""
-        MERGE INTO {ctrl('source_assessment')} t
-        USING _selected_objects s
-          ON t.assessment_id = s.assessment_id
-         AND t.connection_id = s.connection_id
-         AND t.source_schema = s.source_schema
-         AND t.object_name  = s.object_name
-         AND t.object_type  = 'TABLE'
-        WHEN MATCHED THEN UPDATE SET t.is_selected = true
-    """)
+selected_count = len(candidates)
+skipped_count = len(skipped)
+conflict_count = len(conflicts)
+failed_count = len(errors)
+processed_count = registered_count + already_registered_count
+remaining_selected_count = max(0, selected_count - processed_count)
+incomplete_count = remaining_selected_count
+
+if selected_count == 0:
+    business_status = "NO_SELECTION"
+elif incomplete_count == 0:
+    business_status = "COMPLETE"
+elif processed_count == 0:
+    business_status = "BLOCKED"
+else:
+    business_status = "PARTIAL"
+
+execution_status = "SUCCEEDED" if incomplete_count == 0 else "FAILED"
 
 for s in skipped:
     print("  SKIP", s)
 
-# COMMAND ----------
+validate_task_value_payload(worklist, key="worklist")
 
-dbutils.notebook.exit(json.dumps({
-    "status": "SUCCEEDED", "assessment_id": assessment_id,
-    "connection_id": connection_id, "registered": len(valid),
-    "skipped": len(skipped), "conflicts": conflicts, "worklist": worklist,
-}))
+try:
+    dbutils.jobs.taskValues.set(key="run_id", value=run_id)
+    dbutils.jobs.taskValues.set(key="connection_id", value=connection_id)
+    dbutils.jobs.taskValues.set(key="assessment_id", value=assessment_id)
+    dbutils.jobs.taskValues.set(key="status", value=execution_status)
+    dbutils.jobs.taskValues.set(key="business_status", value=business_status)
+    dbutils.jobs.taskValues.set(key="registered_count", value=registered_count)
+    dbutils.jobs.taskValues.set(key="already_registered_count", value=already_registered_count)
+except Exception:
+    pass
+
+bounded_errors = [
+    str(error)[:500]
+    for error in errors[:20]
+]
+
+exit_payload = {
+    "status": execution_status,
+    "business_status": business_status,
+    "run_id": run_id,
+    "batch_attempt_id": batch_attempt_id,
+    "assessment_id": assessment_id,
+    "connection_id": connection_id,
+    "selection_mode": selection_mode,
+    "target_config_id": target_config_id,
+    "selected_count": selected_count,
+    "processed_count": processed_count,
+    "incomplete_count": incomplete_count,
+    "validated_count": validated_count,
+    "claim_acquired_count": claim_acquired_count,
+    "claim_conflict_count": claim_conflict_count,
+    "registered_count": registered_count,
+    "already_registered_count": already_registered_count,
+    "registration_failed_count": registration_failed_count,
+    "target_conflict_count": target_conflict_count,
+    "target_config_changed_count": target_config_changed_count,
+    "remaining_selected_count": remaining_selected_count,
+    "skipped_count": skipped_count,
+    "conflict_count": conflict_count,
+    "failed_count": failed_count,
+    "errors": bounded_errors,
+    "registered": registered_count,
+    "skipped": skipped_count,
+    "conflicts": conflicts,
+    "worklist": worklist,
+}
+
+payload_str = json.dumps(exit_payload)
+print(f"Registration outcome: {payload_str}")
+
+if incomplete_count > 0:
+    raise RuntimeError(
+        f"Registration incomplete: {incomplete_count} table(s) could not be registered "
+        f"(business_status={business_status}, failed={registration_failed_count}, "
+        f"claim_conflicts={claim_conflict_count}, target_conflicts={target_conflict_count}, "
+        f"config_changed={target_config_changed_count})"
+    )
+
+dbutils.notebook.exit(payload_str)

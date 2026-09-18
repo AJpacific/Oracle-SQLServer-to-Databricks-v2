@@ -38,7 +38,9 @@ class TestDeploymentNotebookStructure(unittest.TestCase):
     def test_deployment_code_cells_compile_and_have_metadata(self):
         for name in ("NB_CreateRunContext.ipynb",
                      "NB_GetFullLoadWorklist.ipynb",
-                     "NB_GetDeltaWorklist.ipynb"):
+                     "NB_GetDeltaWorklist.ipynb",
+                     "NB_GetConnectionWorklist.ipynb",
+                     "NB_GetSelectedAssessmentWorklist.ipynb"):
             with self.subTest(name=name):
                 with open(os.path.join(DEPLOYMENT, name), encoding="utf-8") as stream:
                     notebook = json.load(stream)
@@ -508,7 +510,8 @@ class TestMixedSourceOwnership(unittest.TestCase):
         provisioning = shared_nb("NB08_TargetProvisioning.py")
         self.assertIn("owners - {(connection_id, c[\"source_table_id\"])}",
                       registration)
-        self.assertIn("all_active_auto", provisioning)
+        self.assertIn("target_owners - {(conn_id, src_id)}", provisioning)
+        self.assertNotIn("all_active_auto", provisioning)
         self.assertIn('(r["connection_id"], r["source_table_id"])',
                       provisioning)
         self.assertIn("target FQN collision", provisioning)
@@ -686,6 +689,321 @@ class TestControlRepositoryOwnershipSafety(unittest.TestCase):
         })
         sql = repo.spark.last_sql()
         self.assertNotIn("`connection_status` = 'REGISTERED'", sql)
+
+
+class TestConnectionWorklistNotebook(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.code = deployment_code("NB_GetConnectionWorklist.ipynb")
+
+    def test_connection_worklist_inputs_and_guards(self):
+        self.assertIn('widgets.text("run_id"', self.code)
+        self.assertIn('widgets.text("source_system"', self.code)
+        self.assertIn('widgets.text("max_connections"', self.code)
+        self.assertIn('widgets.text("only_connection_ids"', self.code)
+        self.assertIn('widgets.text("exclude_connection_ids"', self.code)
+        self.assertIn("require_source_system(source_system_raw", self.code)
+        self.assertIn("max_connections must be a non-negative integer", self.code)
+
+    def test_connection_worklist_emits_only_connection_id(self):
+        item = self.code.split("worklist = [", 1)[1].split("for cid in conn_ids", 1)[0]
+        self.assertIn('"connection_id"', item)
+        for forbidden in ("source_server", "source_database", "source_schema",
+                          "source_table", "source_system", "secret_scope",
+                          "password", "jdbc", "credentials"):
+            self.assertNotIn(f'"{forbidden}"', item.lower())
+
+    def test_connection_worklist_task_values_and_exit(self):
+        self.assertIn('taskValues.set(key="run_id"', self.code)
+        self.assertIn('taskValues.set(key="source_system"', self.code)
+        self.assertIn('taskValues.set(key="worklist", value=worklist)', self.code)
+        self.assertIn('taskValues.set(key="worklist_count"', self.code)
+        self.assertIn('"business_status": "NO_ELIGIBLE_CONNECTIONS"', self.code)
+        self.assertIn('"business_status": "READY"', self.code)
+
+    def test_connection_worklist_is_metadata_only(self):
+        for forbidden in ("get_source_adapter", "read_source_jdbc",
+                          "dbutils.secrets", "probe_connection"):
+            self.assertNotIn(forbidden, self.code)
+
+
+class TestSelectedAssessmentWorklistNotebook(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.code = deployment_code("NB_GetSelectedAssessmentWorklist.ipynb")
+
+    def test_selected_assessment_inputs_and_guards(self):
+        self.assertIn('widgets.text("run_id"', self.code)
+        self.assertIn('widgets.text("source_system"', self.code)
+        self.assertIn('widgets.text("max_batches"', self.code)
+        self.assertIn('widgets.text("only_connection_ids"', self.code)
+        self.assertIn('widgets.text("only_assessment_ids"', self.code)
+        self.assertIn('widgets.dropdown("include_failed_retries"', self.code)
+        self.assertIn("require_source_system(source_system_raw", self.code)
+
+    def test_selected_assessment_worklist_emits_only_safe_batch_keys(self):
+        item = self.code.split("worklist = [", 1)[1].split("for row in batch_rows", 1)[0]
+        self.assertIn('"connection_id"', item)
+        self.assertIn('"assessment_id"', item)
+        for forbidden in ("source_server", "source_database", "source_schema",
+                          "source_table", "source_system", "secret_scope",
+                          "target_catalog", "target_schema", "password", "jdbc"):
+            self.assertNotIn(f'"{forbidden}"', item.lower())
+
+    def test_selected_assessment_checks_overlaps(self):
+        self.assertIn("AMBIGUOUS_SELECTED_ASSESSMENT", self.code)
+        self.assertIn("conflicting_assessment_count", self.code)
+
+    def test_selected_assessment_task_values_and_exit(self):
+        self.assertIn('taskValues.set(key="run_id"', self.code)
+        self.assertIn('taskValues.set(key="source_system"', self.code)
+        self.assertIn('taskValues.set(key="worklist", value=worklist)', self.code)
+        self.assertIn('taskValues.set(key="worklist_count"', self.code)
+        self.assertIn('taskValues.set(key="selected_table_count"', self.code)
+        self.assertIn('taskValues.set(key="connection_count"', self.code)
+        self.assertIn('"business_status": "NO_SELECTED_ASSESSMENTS"', self.code)
+        self.assertIn('"business_status": "READY"', self.code)
+
+
+class TestAssessmentSummaryNotebook(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        path = os.path.join(DEPLOYMENT, "NB_AssessmentSummary.py")
+        with open(path, encoding="utf-8") as stream:
+            cls.code = stream.read()
+
+    def test_assessment_summary_cells_compile(self):
+        ordinary = "\n".join(
+            line for line in self.code.splitlines()
+            if not line.lstrip().startswith(("%", "# MAGIC"))
+        )
+        ast.parse(ordinary)
+
+    def test_assessment_summary_contract(self):
+        self.assertIn('widgets.text("run_id"', self.code)
+        self.assertIn('widgets.text("source_system"', self.code)
+        self.assertIn("require_source_system(source_system_raw", self.code)
+        self.assertIn('taskValues.set(key="connections_assessed"', self.code)
+        self.assertIn('taskValues.set(key="assessments"', self.code)
+        self.assertIn('taskValues.set(key="objects_assessed"', self.code)
+        self.assertIn('taskValues.set(key="selected_table_count"', self.code)
+        self.assertIn('taskValues.set(key="business_status"', self.code)
+        self.assertIn('"business_status": "NO_RESULTS"', self.code)
+        tail = self.code.split("dbutils.notebook.exit(")[-1]
+        for forbidden in ("password", "secret_scope", "jdbc"):
+            self.assertNotIn(forbidden, tail.lower())
+
+
+class TestConnectionDiscovery(unittest.TestCase):
+    def test_oracle_filtering(self):
+        repo = ControlRepository(FakeSpark(results=[[]]), "cat", "ctrl")
+        repo.valid_active_connections_for_source("oracle")
+        sql = repo.spark.last_sql()
+        self.assertIn("lower(trim(source_system)) = 'oracle'", sql)
+        self.assertIn("is_active = true", sql)
+        self.assertIn("connection_status = 'VALID'", sql)
+        self.assertIn("secret_scope IS NOT NULL", sql)
+        self.assertIn("ORDER BY connection_id ASC", sql)
+
+    def test_sqlserver_canonical_and_alias_normalization(self):
+        for alias in ("sqlserver", "mssql", "sql_server"):
+            repo = ControlRepository(FakeSpark(results=[[]]), "cat", "ctrl")
+            repo.valid_active_connections_for_source(alias)
+            sql = repo.spark.last_sql()
+            self.assertIn("lower(trim(source_system)) = 'sqlserver'", sql, alias)
+
+    def test_unknown_source_fails(self):
+        repo = ControlRepository(FakeSpark(), "cat", "ctrl")
+        with self.assertRaises(ValueError):
+            repo.valid_active_connections_for_source("unknown_system")
+
+    def test_only_and_exclude_filters_and_precedence(self):
+        repo = ControlRepository(FakeSpark(results=[[]]), "cat", "ctrl")
+        repo.valid_active_connections_for_source(
+            "oracle",
+            only_connection_ids=["c1", "c2"],
+            exclude_connection_ids=["c2", "c3"]
+        )
+        sql = repo.spark.last_sql()
+        self.assertIn("connection_id IN ('c1')", sql)
+        self.assertIn("connection_id NOT IN ('c2', 'c3')", sql)
+
+    def test_exclusion_wins_entirely(self):
+        repo = ControlRepository(FakeSpark(results=[[]]), "cat", "ctrl")
+        repo.valid_active_connections_for_source(
+            "oracle",
+            only_connection_ids=["c1"],
+            exclude_connection_ids=["c1"]
+        )
+        sql = repo.spark.last_sql()
+        self.assertIn("1 = 0", sql)
+
+    def test_projection_excludes_endpoints_and_secrets(self):
+        repo = ControlRepository(FakeSpark(results=[[]]), "cat", "ctrl")
+        repo.valid_active_connections_for_source("oracle")
+        sql = repo.spark.last_sql()
+        self.assertTrue(sql.startswith("SELECT connection_id FROM"))
+        prefix = sql.lower().split("from")[0]
+        for forbidden in ("source_server", "source_database", "secret_scope", "password", "jdbc"):
+            self.assertNotIn(forbidden, prefix)
+
+
+class TestTargetConfigurationResolution(unittest.TestCase):
+    def test_connection_specific_wins(self):
+        conn = FakeRow(connection_id="c1", source_system="oracle", is_active=True, connection_status="VALID", secret_scope="sc")
+        cfg_conn = FakeRow(config_id="cfg_conn", target_catalog="cat_conn", target_schema_mode="SOURCE_SCHEMA", target_schema=None, is_default=True, is_active=True)
+        repo = ControlRepository(FakeSpark(results=[[conn], [cfg_conn]]), "cat", "ctrl")
+        resolved = repo.resolve_target_config("c1")
+        self.assertEqual(resolved["config_id"], "cfg_conn")
+        self.assertEqual(resolved["target_catalog"], "cat_conn")
+        self.assertEqual(resolved["effective_scope"], "CONNECTION")
+
+    def test_source_specific_fallback(self):
+        conn = FakeRow(connection_id="c1", source_system="oracle", is_active=True, connection_status="VALID", secret_scope="sc")
+        cfg_src = FakeRow(config_id="cfg_src", target_catalog="cat_src", target_schema_mode="SOURCE_SCHEMA", target_schema=None, is_default=True, is_active=True)
+        repo = ControlRepository(FakeSpark(results=[[conn], [], [cfg_src]]), "cat", "ctrl")
+        resolved = repo.resolve_target_config("c1")
+        self.assertEqual(resolved["config_id"], "cfg_src")
+        self.assertEqual(resolved["effective_scope"], "SOURCE")
+
+    def test_global_fallback(self):
+        conn = FakeRow(connection_id="c1", source_system="oracle", is_active=True, connection_status="VALID", secret_scope="sc")
+        cfg_global = FakeRow(config_id="cfg_global", target_catalog="cat_global", target_schema_mode="SOURCE_SCHEMA", target_schema=None, is_default=True, is_active=True)
+        repo = ControlRepository(FakeSpark(results=[[conn], [], [], [cfg_global]]), "cat", "ctrl")
+        resolved = repo.resolve_target_config("c1")
+        self.assertEqual(resolved["config_id"], "cfg_global")
+        self.assertEqual(resolved["effective_scope"], "GLOBAL")
+
+    def test_missing_config_fails(self):
+        conn = FakeRow(connection_id="c1", source_system="oracle", is_active=True, connection_status="VALID", secret_scope="sc")
+        repo = ControlRepository(FakeSpark(results=[[conn], [], [], []]), "cat", "ctrl")
+        with self.assertRaisesRegex(ValueError, "No active default target configuration found"):
+            repo.resolve_target_config("c1")
+
+    def test_duplicate_defaults_at_chosen_scope_fails(self):
+        conn = FakeRow(connection_id="c1", source_system="oracle", is_active=True, connection_status="VALID", secret_scope="sc")
+        repo = ControlRepository(FakeSpark(results=[[conn], [FakeRow(config_id="1"), FakeRow(config_id="2")]]), "cat", "ctrl")
+        with self.assertRaisesRegex(ValueError, "Duplicate active default"):
+            repo.resolve_target_config("c1")
+
+    def test_explicit_mode_requires_target_schema(self):
+        conn = FakeRow(connection_id="c1", source_system="oracle", is_active=True, connection_status="VALID", secret_scope="sc")
+        cfg = FakeRow(config_id="cfg_1", target_catalog="cat", target_schema_mode="EXPLICIT", target_schema=None, is_default=True, is_active=True)
+        repo = ControlRepository(FakeSpark(results=[[conn], [cfg]]), "cat", "ctrl")
+        with self.assertRaisesRegex(ValueError, "EXPLICIT mode requires nonblank target_schema"):
+            repo.resolve_target_config("c1")
+
+    def test_blank_target_catalog_fails(self):
+        conn = FakeRow(connection_id="c1", source_system="oracle", is_active=True, connection_status="VALID", secret_scope="sc")
+        cfg = FakeRow(config_id="cfg_1", target_catalog="", target_schema_mode="SOURCE_SCHEMA", target_schema=None, is_default=True, is_active=True)
+        repo = ControlRepository(FakeSpark(results=[[conn], [cfg]]), "cat", "ctrl")
+        with self.assertRaisesRegex(ValueError, "blank target_catalog"):
+            repo.resolve_target_config("c1")
+
+    def test_connection_source_system_mismatch_fails(self):
+        conn = FakeRow(connection_id="c1", source_system="oracle", is_active=True, connection_status="VALID", secret_scope="sc")
+        cfg = FakeRow(config_id="cfg_1", source_system="sqlserver", target_catalog="cat", target_schema_mode="SOURCE_SCHEMA", target_schema=None, is_default=True, is_active=True)
+        repo = ControlRepository(FakeSpark(results=[[conn], [cfg]]), "cat", "ctrl")
+        with self.assertRaisesRegex(ValueError, "does not match connection"):
+            repo.resolve_target_config("c1")
+
+    def test_safe_projection_no_secrets(self):
+        conn = FakeRow(connection_id="c1", source_system="oracle", is_active=True, connection_status="VALID", secret_scope="sc")
+        cfg = FakeRow(config_id="cfg_1", target_catalog="cat", target_schema_mode="SOURCE_SCHEMA", target_schema=None, is_default=True, is_active=True)
+        repo = ControlRepository(FakeSpark(results=[[conn], [cfg]]), "cat", "ctrl")
+        res = repo.resolve_target_config("c1")
+        self.assertEqual(
+            set(res.keys()),
+            {"config_id", "target_catalog", "target_schema_mode", "target_schema", "effective_scope"}
+        )
+
+
+class TestSelectedAssessmentDiscovery(unittest.TestCase):
+    def test_selected_assessment_batches_sql(self):
+        repo = ControlRepository(FakeSpark(results=[[]]), "cat", "ctrl")
+        repo.selected_assessment_batches("oracle")
+        sql = repo.spark.last_sql()
+        self.assertIn("sa.object_type = 'TABLE'", sql)
+        self.assertIn("upper(trim(sa.compatibility_status)) IN ('COMPATIBLE', 'REVIEW')", sql)
+        self.assertIn("sa.is_selected = true", sql)
+        self.assertIn("sc.is_active = true", sql)
+        self.assertIn("upper(trim(sc.connection_status)) = 'VALID'", sql)
+        self.assertIn("ORDER BY sa.connection_id, sa.assessment_id", sql)
+
+    def test_include_failed_retries_flag(self):
+        repo = ControlRepository(FakeSpark(results=[[]]), "cat", "ctrl")
+        repo.selected_assessment_batches("oracle", include_failed_retries=False)
+        self.assertNotIn("'FAILED'", repo.spark.last_sql())
+        repo.selected_assessment_batches("oracle", include_failed_retries=True)
+        self.assertIn("'FAILED'", repo.spark.last_sql())
+
+    def test_check_overlapping_selected_assessments(self):
+        conflict_row = FakeRow(connection_id="c1", source_schema="HR", object_name="EMP", conflicting_assessment_count=2)
+        repo = ControlRepository(FakeSpark(results=[[conflict_row]]), "cat", "ctrl")
+        conflicts = repo.check_overlapping_selected_assessments("oracle")
+        self.assertEqual(len(conflicts), 1)
+        self.assertEqual(conflicts[0]["object_name"], "EMP")
+        self.assertEqual(conflicts[0]["conflicting_assessment_count"], 2)
+
+    def test_update_assessment_selection_state(self):
+        repo = ControlRepository(FakeSpark(results=[]), "cat", "ctrl")
+        repo.update_assessment_selection_state("c1", "a1", "HR", "EMP", "SELECTED", selected_by="operator1")
+        sql = repo.spark.last_sql()
+        self.assertIn("`selection_status` = 'SELECTED'", sql)
+        self.assertIn("`is_selected` = true", sql)
+        self.assertIn("`selected_ts` = current_timestamp()", sql)
+        self.assertIn("`selected_by` = 'operator1'", sql)
+
+        repo.update_assessment_selection_state("c1", "a1", "HR", "EMP", "NOT_SELECTED")
+        sql = repo.spark.last_sql()
+        self.assertIn("`selection_status` = 'NOT_SELECTED'", sql)
+        self.assertIn("`is_selected` = false", sql)
+        self.assertIn("`selected_ts` = NULL", sql)
+        self.assertIn("`selected_by` = NULL", sql)
+
+        for invalid_status in ("ONBOARDING", "REGISTERED", "ONBOARDED", "FAILED", "REVIEW_REQUIRED", "BLOCKED"):
+            with self.assertRaises(ValueError):
+                repo.update_assessment_selection_state("c1", "a1", "HR", "EMP", invalid_status)
+
+
+class TestRegistrationSelectionModes(unittest.TestCase):
+    def test_registration_supports_assessment_flags(self):
+        code = shared_nb("NB01B_RegisterSelectedTables.py")
+        self.assertIn('widgets.dropdown("selection_mode", "ASSESSMENT_FLAGS"', code)
+        self.assertIn('selection_mode == "ASSESSMENT_FLAGS"', code)
+        self.assertIn("repo.resolve_target_config(connection_id)", code)
+        self.assertIn("repo.claim_assessment_selection_row(", code)
+        self.assertIn("repo.mark_assessment_registration_succeeded(", code)
+        self.assertIn("repo.mark_assessment_onboarding_failed(", code)
+        self.assertNotIn("repo.mark_assessment_onboarding_completed(", code)
+        self.assertNotIn("selection_status = 'ONBOARDED'", code)
+
+    def test_registration_exit_payload_contract(self):
+        code = shared_nb("NB01B_RegisterSelectedTables.py")
+        for required in ("status", "business_status", "run_id", "connection_id", "assessment_id",
+                         "selection_mode", "target_config_id", "selected_count", "registered_count",
+                         "already_registered_count", "skipped_count", "conflict_count", "failed_count",
+                         "errors", "worklist"):
+            self.assertIn(f'"{required}"', code)
+
+
+class TestControlTableInitValidations(unittest.TestCase):
+    def test_target_config_and_selection_validations_present(self):
+        code = shared_nb("NB00_ControlTableInit.py")
+        for validation_code in (
+            "BLANK_TARGET_CONFIG_ID",
+            "DUPLICATE_TARGET_CONFIG_ID",
+            "INVALID_TARGET_SCHEMA_MODE",
+            "BLANK_ACTIVE_DEFAULT_TARGET_CATALOG",
+            "EXPLICIT_MODE_MISSING_TARGET_SCHEMA",
+            "DUPLICATE_CONNECTION_ACTIVE_DEFAULT_TARGET_CONFIG",
+            "DUPLICATE_SOURCE_ACTIVE_DEFAULT_TARGET_CONFIG",
+            "DUPLICATE_GLOBAL_ACTIVE_DEFAULT_TARGET_CONFIG",
+            "ORPHAN_TARGET_CONFIG_CONNECTION",
+            "TARGET_CONFIG_CONNECTION_SOURCE_MISMATCH",
+            "INVALID_ASSESSMENT_SELECTION_STATUS",
+        ):
+            self.assertIn(f'"{validation_code}"', code)
 
 
 if __name__ == "__main__":

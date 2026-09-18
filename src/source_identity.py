@@ -129,3 +129,20 @@ def compute_source_table_id(connection_id, source_system, source_server,
         schema, table,
     ])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def canonical_source_system_sql(column_expression: str) -> str:
+    """Return a SQL CASE expression that normalizes legacy and variant source_system values.
+
+    Normalizes 'oracle' to 'oracle', and SQL Server variants ('sqlserver', 'sql_server',
+    'sql-server', 'mssql', 'sql server', 'microsoft sql server', 'microsoft_sql_server')
+    to 'sqlserver'. Preserves other values lower-cased and trimmed.
+    """
+    expr = str(column_expression).strip()
+    return (
+        f"CASE "
+        f"WHEN lower(trim({expr})) = 'oracle' THEN 'oracle' "
+        f"WHEN lower(trim({expr})) IN ('sqlserver', 'sql_server', 'sql-server', 'mssql', "
+        f"'sql server', 'microsoft sql server', 'microsoft_sql_server') THEN 'sqlserver' "
+        f"ELSE lower(trim({expr})) END"
+    )
