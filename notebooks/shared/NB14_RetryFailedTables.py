@@ -13,15 +13,47 @@
 # COMMAND ----------
 
 dbutils.widgets.dropdown("pipeline_name", "INGEST", ["INGEST", "ETL"])
-dbutils.widgets.text("original_run_id", "")
+dbutils.widgets.text("original_run_ids", "")
 dbutils.widgets.text("operation", "")          # optional filter, e.g. FULL_LOAD
 dbutils.widgets.text("source_table_id", "")    # optional single-table scope
 dbutils.widgets.text("max_retries", "3")
 dbutils.widgets.dropdown("include_non_retryable", "false", ["true", "false"])
 
+MAX_ORIGINAL_RUN_IDS = 20
+
+
+def _parse_original_run_ids(raw_value):
+    values = []
+    seen = set()
+
+    for item in str(raw_value or "").split(","):
+        run_id = item.strip()
+
+        if not run_id:
+            continue
+
+        if run_id not in seen:
+            values.append(run_id)
+            seen.add(run_id)
+
+    if not values:
+        raise ValueError(
+            "original_run_ids must contain at least one nonblank run_id"
+        )
+
+    if len(values) > MAX_ORIGINAL_RUN_IDS:
+        raise ValueError(
+            "original_run_ids supports at most "
+            f"{MAX_ORIGINAL_RUN_IDS} unique values"
+        )
+
+    return values
+
+
 pipeline_name = failcls.normalize_pipeline_name(
     dbutils.widgets.get("pipeline_name"))
-original_run_id = dbutils.widgets.get("original_run_id").strip()
+original_run_ids = _parse_original_run_ids(
+    dbutils.widgets.get("original_run_ids"))
 operation_filter = dbutils.widgets.get("operation").strip().upper()
 operation_filter = failcls.validate_pipeline_operation(
     pipeline_name, operation_filter)
@@ -35,21 +67,37 @@ except ValueError:
     max_retries = 3
 include_non_retryable = dbutils.widgets.get("include_non_retryable") == "true"
 
-if not original_run_id:
-    raise ValueError("original_run_id is required")
 
 def ctrl(t):
     return f"{quote_databricks(CATALOG)}.{quote_databricks(CONTROL_SCHEMA)}.{quote_databricks(t)}"
 
+
+def _row_run_id(row):
+    if hasattr(row, "asDict"):
+        return row.asDict().get("run_id")
+    if isinstance(row, dict):
+        return row.get("run_id")
+    if hasattr(row, "__getitem__"):
+        try:
+            return row["run_id"]
+        except Exception:
+            pass
+    return getattr(row, "run_id", None)
+
+
 child_run_id = new_run_id("retry")
-print(f"Selecting retries for {pipeline_name} run {original_run_id}; "
+print(f"Selecting retries for {pipeline_name} runs {original_run_ids}; "
       f"child run_id={child_run_id}")
 
 # COMMAND ----------
 
 # Latest FAILED attempt per source table + operation. Pipeline ownership is an
 # explicit exact filter; no source or operation can fall through by default.
-where = [f"run_id = {escape_string_literal(original_run_id)}", "status = 'FAILED'"]
+escaped_run_ids = ", ".join(
+    escape_string_literal(run_id)
+    for run_id in original_run_ids
+)
+where = [f"run_id IN ({escaped_run_ids})", "status = 'FAILED'"]
 owned_operations = sorted(failcls.operations_for_pipeline(pipeline_name))
 owned_sql = ", ".join(escape_string_literal(op) for op in owned_operations)
 where.append(f"operation IN ({owned_sql})")
@@ -63,11 +111,11 @@ where_sql = " AND ".join(where)
 
 latest = spark.sql(f"""
     SELECT * FROM (
-      SELECT source_table_id, connection_id, operation, failure_stage,
+      SELECT run_id, source_table_id, connection_id, operation, failure_stage,
              error_category, retry_eligible, attempt_number,
              lower_watermark, upper_watermark,
              ROW_NUMBER() OVER (
-                 PARTITION BY connection_id, source_table_id, operation
+                 PARTITION BY connection_id, source_table_id, operation, run_id
                  ORDER BY COALESCE(attempt_number, 1) DESC,
                           ended_ts DESC NULLS LAST,
                           started_ts DESC NULLS LAST,
@@ -84,8 +132,22 @@ print(f"Distinct failed operations: {len(latest)}")
 
 # include_non_retryable remains an accepted widget for compatibility. Unsafe
 # rows are always returned in manual_review_items and never become executable.
-worklist, manual_review_items, duplicate_keys = failcls.build_retry_collections(
-    latest, child_run_id, original_run_id, pipeline_name, max_retries)
+worklist = []
+manual_review_items = []
+duplicate_keys = []
+
+for p_run_id in original_run_ids:
+    p_rows = [
+        r for r in latest
+        if _row_run_id(r) == p_run_id
+    ]
+    p_worklist, p_manual, p_dups = failcls.build_retry_collections(
+        p_rows, child_run_id, p_run_id, pipeline_name, max_retries)
+    for item in p_manual:
+        item["parent_run_id"] = p_run_id
+    worklist.extend(p_worklist)
+    manual_review_items.extend(p_manual)
+    duplicate_keys.extend(p_dups)
 
 for connection_id, source_table_id, operation, recovery_action in duplicate_keys:
     print(
@@ -101,6 +163,7 @@ print(f"Retry worklist: {len(worklist)}; "
 for item in manual_review_items:
     print(
         "  MANUAL_REVIEW",
+        f"parent_run_id={item.get('parent_run_id')}",
         f"connection_id={item['connection_id']}",
         f"source_table_id={item['source_table_id']}",
         f"operation={item['operation']}",
@@ -129,7 +192,9 @@ def _set_json_task_value_if_fits(key, value):
 
 result = {
     "status": "SUCCEEDED", "pipeline_name": pipeline_name,
-    "run_id": child_run_id, "parent_run_id": original_run_id,
+    "run_id": child_run_id,
+    "original_run_ids": original_run_ids,
+    "original_run_count": len(original_run_ids),
     "selected": len(worklist),
     "manual_review": len(manual_review_items),
     "worklist": worklist,
@@ -143,6 +208,8 @@ if len(result_payload.encode("utf-8")) > NOTEBOOK_EXIT_LIMIT_BYTES:
         "the documented retry-selection identity")
 
 set_task_value("run_id", child_run_id)
+_set_json_task_value_if_fits("original_run_ids", original_run_ids)
+set_task_value("original_run_count", len(original_run_ids))
 _set_json_task_value_if_fits("worklist", worklist)
 _set_json_task_value_if_fits("manual_review_items", manual_review_items)
 dbutils.notebook.exit(result_payload)
