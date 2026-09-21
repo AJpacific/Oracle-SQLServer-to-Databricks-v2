@@ -41,6 +41,7 @@ SHARED_NOTEBOOKS = (
     "NB15_BronzeToSilverETL.py",
     "NB16_NotifyFailures.py",
     "NB17_DashboardViews.py",
+    "NB18_MaterializeSourceArtifacts.py",
 )
 
 

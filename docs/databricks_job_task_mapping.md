@@ -75,14 +75,18 @@ T06 Assessment Summary
 | `T03_ForEach_Validate_Connection` | `sources/<source>/NB00A_UpsertAndValidateConnection` (For Each `{{tasks.T02_Get_Configured_Connection_Worklist.values.worklist}}`) | `run_id: {{tasks.T00_Create_Run_Context.values.run_id}}`, `connection_id: {{input.connection_id}}`, `catalog: da_accelerators`, `control_schema: control` | `status`, `connection_status`, `run_id`, `connection_id`, `source_system`, `source_database` |
 | `T04_Get_Valid_Connection_Worklist` | `deployment/NB_GetConnectionWorklist` (depends_on: `T03_ForEach_Validate_Connection`) | `run_id`, `source_system` (fixed: `oracle` or `sqlserver`), `connection_mode: VALID`, optional `max_connections`, optional `only_connection_ids`, optional `exclude_connection_ids` | `worklist`, `worklist_count` |
 | `T05_ForEach_Connection_Assessment` | `sources/<source>/NB01A_SourceAssessment` (For Each `{{tasks.T04_Get_Valid_Connection_Worklist.values.worklist}}`) | `run_id`, `connection_id: {{input.connection_id}}` | `assessment_id`, `objects`, `summary` |
-| `T06_Assessment_Summary` | `deployment/NB_AssessmentSummary` (run_if: ALL_DONE, depends_on: `T05_ForEach_Connection_Assessment`) | `run_id`, `source_system` | `connections_assessed`, `assessments`, `objects_assessed`, `selected_table_count`, `business_status` |
+| `T06_ForEach_SQL_Object_Extraction` | `sources/<source>/NB13_SQLObjectAssessmentAndConversion` (For Each `{{tasks.T04_Get_Valid_Connection_Worklist.values.worklist}}`) | `run_id`, `connection_id: {{input.connection_id}}`, `mode: ASSESS`, `include_object_types: VIEW,PROCEDURE,FUNCTION,PACKAGE` (Oracle) or `VIEW,PROCEDURE,FUNCTION` (SQL Server) | `assessment_id`, `objects`, `summary` |
+| `T07_Assessment_Summary` | `deployment/NB_AssessmentSummary` (run_if: ALL_DONE, depends_on: `T05_ForEach_Connection_Assessment`, `T06_ForEach_SQL_Object_Extraction`) | `run_id`, `source_system` | `connections_assessed`, `assessments`, `objects_assessed`, `selected_table_count`, `business_status` |
 
 *Note on orchestration:*
 - `source_connection` is pre-populated by an operator or trusted configuration process; NB00A validates an existing row and never inserts or updates connection configuration metadata.
 - Job 1A passes only `connection_id` to NB00A; no metadata or secrets are passed through Job parameters.
 - `source_system` is an internal fixed task parameter in Job YAML (`oracle` or `sqlserver`), not a user-entered runtime parameter.
 - Both worklist tasks emit strictly `[{"connection_id": "..."}]`.
-- Assessment (`T05`) runs only for successfully validated, active connections discovered by `T04`.
+- Assessment (`T05`) and SQL Object extraction (`T06`) run only for successfully validated, active connections discovered by `T04`.
+- Original non-table SQL object definitions (Views, Procedures, Functions, Packages, Package Bodies) extracted by `NB13` are stored in `da_accelerators.control.sql_object_assessment`.
+- `NB18_MaterializeSourceArtifacts` materializes these exact raw source definitions into governed Unity Catalog Volumes (`_source_artifacts`) under `/Volumes/<target_catalog>/<target_schema>/_source_artifacts/<safe_connection_id>/<safe_source_schema>/<type_directory>/<safe_object_name>.sql`.
+- Raw source definitions are stored unchanged. They are never converted, rewritten, executed, or deployed.
 - No notification task is included.
 
 ---
@@ -242,6 +246,13 @@ inventory snapshot after duplicate-key validation;
 it does not append duplicate columns or delete another run/table. A new
 `run_id` creates new history.
 
+### Full Load Artifact Materialization Task
+After Full Load initial state commit succeeds (`T13_Commit_Initial_State` / `NB10_PostFullLoadState`), run one run-level artifact materialization task:
+- Task Key: `J2_T05_Materialize_Source_Artifacts`
+- Notebook: `notebooks/shared/NB18_MaterializeSourceArtifacts`
+- Parameters: `run_id: {{tasks.J2_T00_Create_Run_Context.values.run_id}}`, `connection_id: ""`, `only_source_system: ""`, `only_assessment_id: ""`, `volume_name: "_source_artifacts"`, `catalog: "da_accelerators"`, `control_schema: "control"`.
+- Runs only after `J2_T04_Commit_Initial_State` succeeds. Does not run if reconciliation or state commit failed.
+
 ---
 
 ## INGEST - recurring synchronization workflow
@@ -253,13 +264,19 @@ it does not append duplicate columns or delete another run/table. A new
 | `T20B_Get_Delta_Worklist` | `deployment/NB_GetDeltaWorklist` | `run_id`, `catalog`, `control_schema`, `max_tables`, optional `only_connection_ids`, optional `only_source_table_ids` | `worklist`, `worklist_count`, `connection_count` |
 | `T21_Delta_Apply` | `shared/NB11b_DeltaSyncApply` | `run_id`, `connection_id`, `source_table_id`, `attempt_number`, `parent_run_id`, `recovery_action` |
 | `T22_Delta_Summary` | `shared/NB12_ValidationAndReconciliation` | `run_id`, `mode=delta` |
-| `T23_Notify_Delta_Failures` | `shared/NB16_NotifyFailures` (run_if: ALL_DONE) | `run_id`, `pipeline_name=INGEST_DELTA` |
+| `T23_Get_Valid_Oracle_Connections` | `deployment/NB_GetConnectionWorklist` (depends_on: `T22_Delta_Summary`) | `run_id`, `source_system: oracle`, `connection_mode: VALID` |
+| `T24_ForEach_Refresh_Oracle_NB13` | `sources/oracle/NB13_SQLObjectAssessmentAndConversion` (For Each `{{tasks.T23_Get_Valid_Oracle_Connections.values.worklist}}`) | `run_id`, `connection_id: {{input.connection_id}}`, `mode: ASSESS`, `include_object_types: VIEW,PROCEDURE,FUNCTION,PACKAGE`, `use_ai: false` |
+| `T25_Get_Valid_SQLServer_Connections` | `deployment/NB_GetConnectionWorklist` (depends_on: `T22_Delta_Summary`) | `run_id`, `source_system: sqlserver`, `connection_mode: VALID` |
+| `T26_ForEach_Refresh_SQLServer_NB13` | `sources/sqlserver/NB13_SQLObjectAssessmentAndConversion` (For Each `{{tasks.T25_Get_Valid_SQLServer_Connections.values.worklist}}`) | `run_id`, `connection_id: {{input.connection_id}}`, `mode: ASSESS`, `include_object_types: VIEW,PROCEDURE,FUNCTION`, `use_ai: false` |
+| `T27_Materialize_Source_Artifacts` | `shared/NB18_MaterializeSourceArtifacts` (depends_on: `T24_ForEach_Refresh_Oracle_NB13`, `T26_ForEach_Refresh_SQLServer_NB13`) | `run_id: {{tasks.T19_Create_Run_Context.values.run_id}}`, `connection_id: ""`, `only_source_system: ""`, `only_assessment_id: ""`, `volume_name: "_source_artifacts"`, `catalog: "da_accelerators"`, `control_schema: "control"` |
+| `T28_Notify_Delta_Failures` | `shared/NB16_NotifyFailures` (run_if: ALL_DONE) | `run_id`, `pipeline_name=INGEST_DELTA` |
 
 `NB11a` discovers work across active, valid connections and creates adapters
 lazily only for registrations it processes. `NB11b` performs extract -> apply ->
 reconcile -> checkpoint -> finalize per queue item, so reconciliation always
 precedes the checkpoint. Each task resolves exactly one
 `run_id + connection_id + source_table_id` queue row.
+At the end of Delta Sync, active valid connections are refreshed via NB13 and NB18 materializes updated artifacts idempotently. Changed definitions overwrite the same deterministic file path; unchanged definitions are skipped without rewriting.
 
 ---
 

@@ -144,6 +144,12 @@
   every generated draft is `PENDING_REVIEW` and is never executed. Discovery
   query failures are counted separately from inaccessible definitions, which
   persist as `UNABLE_TO_ASSESS`; coverage is `COMPLETE`, `PARTIAL`, or `FAILED`.
+- **SQL object artifact materialization (`NB18`):** Preserves original Oracle (VIEW, PROCEDURE, FUNCTION, PACKAGE, PACKAGE_BODY) and SQL Server (VIEW, PROCEDURE, FUNCTION) non-table database object definitions as raw `.sql` files in Unity Catalog Volumes (`_source_artifacts`).
+  - Stored under deterministic path `/Volumes/<target_catalog>/<target_schema>/_source_artifacts/<safe_connection_id>/<safe_source_schema>/<type_directory>/<safe_object_name>.sql`.
+  - Content comes strictly from `sql_object_assessment.source_definition` unchanged.
+  - The feature preserves source SQL as an artifact for retention, review, analysis, and controlled future conversion.
+  - It does NOT make Oracle PL/SQL or SQL Server T-SQL executable in Databricks and does NOT automatically deploy Databricks views.
+  - Live Unity Catalog Volume privileges (`CREATE VOLUME`, `READ VOLUME`, `WRITE VOLUME`) must be validated.
 
 ### Datatype mapper ownership
 - Shared mapping calls `adapter.load_type_mapper().map_column(...)` and consumes

@@ -238,6 +238,29 @@ CREATE TABLE IF NOT EXISTS {ctrl('sql_object_assessment')} (
 ) USING DELTA
 """)
 
+spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {ctrl('sql_object_artifact_manifest')} (
+  connection_id             STRING,
+  source_system             STRING,
+  source_database           STRING,
+  source_schema             STRING,
+  object_type               STRING,
+  object_name               STRING,
+  target_catalog            STRING,
+  target_schema             STRING,
+  target_volume             STRING,
+  artifact_path             STRING,
+  source_definition_hash    STRING,
+  source_assessment_id      STRING,
+  source_captured_ts        TIMESTAMP,
+  last_materialized_run_id  STRING,
+  materialization_status    STRING,
+  error_message             STRING,
+  created_ts                TIMESTAMP,
+  updated_ts                TIMESTAMP
+) USING DELTA
+""")
+
 # --- ETL: data-quality rules, results, and quarantine ----------------------
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {ctrl('dq_rule')} (
@@ -721,6 +744,14 @@ _validation_checks = (
               'REGISTRATION', 'INVENTORY', 'TYPE_NORMALIZATION',
               'MAPPING_GENERATION', 'MAPPING_VALIDATION', 'TABLE_DECISION',
               'TARGET_PROVISIONING', 'FINALIZATION')
+    """),
+    ("DUPLICATE_SQL_OBJECT_ARTIFACT_OWNER", f"""
+        SELECT count(*) AS c FROM (
+          SELECT connection_id, source_schema, object_type, object_name
+          FROM {ctrl('sql_object_artifact_manifest')}
+          GROUP BY connection_id, source_schema, object_type, object_name
+          HAVING count(*) > 1
+        )
     """),
 )
 for _code, _query in _validation_checks:
