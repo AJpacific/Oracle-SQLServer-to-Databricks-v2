@@ -27,9 +27,18 @@ def ctrl(t):
 
 # Onboarding is scoped to exactly one connection. Collision detection remains
 # global across all active registrations.
-auto = repo.active_tables_for_connection(
-    connection_id, decision="AUTO_MIGRATE", include_onboarding=True).collect()
-print("AUTO_MIGRATE tables:", len(auto))
+auto = spark.sql(f"""
+    SELECT *
+    FROM {ctrl('source_table_control')}
+    WHERE connection_id = {escape_string_literal(connection_id)}
+      AND upper(trim(coalesce(table_decision, ''))) = 'AUTO_MIGRATE'
+      AND upper(trim(coalesce(current_status, ''))) IN (
+          'READY_FOR_PROVISIONING',
+          'PROVISION_FAILED'
+      )
+""").collect()
+
+print("AUTO_MIGRATE tables to provision:", len(auto))
 
 # COMMAND ----------
 
@@ -82,18 +91,38 @@ for r in auto:
         continue
 
     try:
-        # Pull the approved mapping (latest run for this source table), ordered.
+        # Use the latest available approved mapping run for this source table.
+        mapping_run_rows = spark.sql(f"""
+            SELECT run_id
+            FROM {ctrl('resolved_column_mappings')}
+            WHERE connection_id = {escape_string_literal(conn_id)}
+              AND source_table_id = {escape_string_literal(src_id)}
+            GROUP BY run_id
+            ORDER BY run_id DESC
+            LIMIT 1
+        """).collect()
+
+        if not mapping_run_rows:
+            raise Exception(
+                "no resolved mappings found for this source table"
+            )
+
+        mapping_run_id = mapping_run_rows[0]["run_id"]
+
         cols = spark.sql(f"""
             SELECT column_name, databricks_delta_type, mapping_status,
                    is_nullable, ordinal_position, include_column, is_writable
             FROM {ctrl('resolved_column_mappings')}
-            WHERE run_id = {escape_string_literal(run_id)}
-                            AND connection_id = {escape_string_literal(conn_id)}
+            WHERE run_id = {escape_string_literal(mapping_run_id)}
+              AND connection_id = {escape_string_literal(conn_id)}
               AND source_table_id = {escape_string_literal(src_id)}
             ORDER BY ordinal_position
         """).collect()
+
         if not cols:
-            raise Exception("no resolved mappings found for this run")
+            raise Exception(
+                f"no resolved mappings found for mapping run {mapping_run_id}"
+            )
         # A column the source policy excluded is simply not provisioned; any
         # other non-AUTO or untyped column is a hard configuration error.
         cols = [c for c in cols if c["include_column"] is not False]
@@ -146,9 +175,23 @@ for r in auto:
 # COMMAND ----------
 
 print(f"Provisioned={provisioned} Failed={failed}")
-if failed > 0:
-    raise Exception(f"{failed} table(s) failed provisioning; see control table.")
 
-dbutils.notebook.exit(json.dumps({"status": "SUCCEEDED", "run_id": run_id,
-                                  "connection_id": connection_id,
-                                  "provisioned": provisioned}))
+if failed > 0:
+    raise Exception(
+        f"{failed} table(s) failed provisioning; see control table."
+    )
+
+if len(auto) == 0:
+    raise RuntimeError(
+        "No AUTO_MIGRATE tables found in READY_FOR_PROVISIONING or "
+        "PROVISION_FAILED state. Provisioning cannot report success."
+    )
+
+dbutils.notebook.exit(json.dumps({
+    "status": "SUCCEEDED",
+    "run_id": run_id,
+    "connection_id": connection_id,
+    "provisioning_candidates": len(auto),
+    "provisioned": provisioned,
+    "failed": failed,
+}))

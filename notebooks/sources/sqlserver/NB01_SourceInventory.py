@@ -102,9 +102,20 @@ for r in active:
             inv_common.strategy_columns(col_dicts), pk_cols,
             d.get("watermark_column"))
         table_written = persist_inventory_rows(table_inventory_rows)
+
+        strategy_payload = inv_common.build_strategy_payload(
+            src_id, decision, pk_cols
+        )
+
+        # source_table_id is immutable and is already passed separately.
+        strategy_payload.pop("source_table_id", None)
+        strategy_payload.pop("connection_id", None)
+
         repo.update_control_for_connection(
-            conn_id, src_id,
-            inv_common.build_strategy_payload(src_id, decision, pk_cols))
+            conn_id,
+            src_id,
+            strategy_payload
+        )
         written += table_written
         succeeded += 1
         print(f"  [sqlserver] {src_schema}.{src_table}: {len(cols)} cols, "

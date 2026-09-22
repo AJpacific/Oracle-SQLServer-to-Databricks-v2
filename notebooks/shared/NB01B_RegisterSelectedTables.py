@@ -138,9 +138,13 @@ candidates = []
 skipped = []
 for r in assessed:
     assert_source_identity_match(r, connection)
-    schema, obj = r["source_schema"], r["object_name"]
-    is_sel = r.get("is_selected")
-    sel_st = r.get("selection_status")
+
+    row_dict = r.asDict(recursive=True)
+    schema = row_dict["source_schema"]
+    obj = row_dict["object_name"]
+
+    is_sel = row_dict.get("is_selected")
+    sel_st = row_dict.get("selection_status")
     if not _selected(schema, obj, is_sel, sel_st):
         continue
     comp = r["compatibility_status"]
@@ -204,7 +208,8 @@ existing_for_conn = spark.sql(f"""
     WHERE connection_id = {escape_string_literal(connection_id)}
 """).collect()
 existing_conn_map = {
-    r["source_table_id"]: r for r in existing_for_conn
+    r["source_table_id"]: r.asDict(recursive=True)
+    for r in existing_for_conn
 }
 
 valid = []
@@ -375,23 +380,27 @@ if selection_mode == "ASSESSMENT_FLAGS":
             claim_acquired_count += 1
 
             # Insert new registration into source_table_control
-            reg_row = Row(
-                source_table_id=sid, connection_id=connection_id,
-                source_system=c["source_system"], source_server=c["source_server"],
-                source_database=c["source_database"], source_schema=schema,
-                source_table=table, target_catalog=c["target_catalog"],
-                target_schema=c["target_schema"], target_table=c["target_table"],
-                mapping_status=c["mapping_status"],
-                source_identity_version=SOURCE_IDENTITY_VERSION,
-                legacy_source_table_id=None
+            src_df = spark.range(1).select(
+                F.lit(sid).cast("string").alias("source_table_id"),
+                F.lit(connection_id).cast("string").alias("connection_id"),
+                F.lit(c["source_system"]).cast("string").alias("source_system"),
+                F.lit(c["source_server"]).cast("string").alias("source_server"),
+                F.lit(c["source_database"]).cast("string").alias("source_database"),
+                F.lit(schema).cast("string").alias("source_schema"),
+                F.lit(table).cast("string").alias("source_table"),
+                F.lit(c["target_catalog"]).cast("string").alias("target_catalog"),
+                F.lit(c["target_schema"]).cast("string").alias("target_schema"),
+                F.lit(c["target_table"]).cast("string").alias("target_table"),
+                F.lit(c["mapping_status"]).cast("string").alias("mapping_status"),
+                F.lit(False).cast("boolean").alias("is_active"),
+                F.lit("REGISTERED").cast("string").alias("current_status"),
+                F.lit(False).cast("boolean").alias("initial_load_completed"),
+                F.lit("IGNORE_DELETES").cast("string").alias("delete_policy"),
+                F.lit(SOURCE_IDENTITY_VERSION).cast("int").alias("source_identity_version"),
+                F.lit(None).cast("string").alias("legacy_source_table_id"),
+                F.current_timestamp().alias("created_ts"),
+                F.current_timestamp().alias("updated_ts")
             )
-            src_df = (spark.createDataFrame([reg_row])
-                      .withColumn("is_active", F.lit(False))
-                      .withColumn("current_status", F.lit("REGISTERED"))
-                      .withColumn("initial_load_completed", F.lit(False))
-                      .withColumn("delete_policy", F.lit("IGNORE_DELETES"))
-                      .withColumn("created_ts", F.current_timestamp())
-                      .withColumn("updated_ts", F.current_timestamp()))
             src_df.createOrReplaceTempView("_single_register_row")
             spark.sql(f"""
                 MERGE INTO {ctrl('source_table_control')} t

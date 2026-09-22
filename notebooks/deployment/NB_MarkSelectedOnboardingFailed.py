@@ -83,9 +83,11 @@ target_count = len(candidate_rows)
 failed_count = 0
 errors = []
 for r in candidate_rows:
-    sch = r["source_schema"]
-    tbl = r["object_name"]
-    att = r.get("onboarding_attempt_id")
+    row_dict = r.asDict(recursive=True)
+
+    sch = row_dict["source_schema"]
+    tbl = row_dict["object_name"]
+    att = row_dict.get("onboarding_attempt_id")
     try:
         succ = repo.mark_assessment_onboarding_failed(
             connection_id=connection_id,

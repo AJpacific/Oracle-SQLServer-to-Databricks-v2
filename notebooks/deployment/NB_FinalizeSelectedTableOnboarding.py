@@ -100,10 +100,19 @@ failed_count = 0
 errors = []
 
 for row in candidate_rows:
-    schema = row["source_schema"]
-    table = row["object_name"]
-    source_sys = row.get("source_system") or conn_dict.get("source_system")
-    effective_attempt_id = attempt_id or row.get("onboarding_attempt_id") or None
+    row_dict = row.asDict(recursive=True)
+
+    schema = row_dict["source_schema"]
+    table = row_dict["object_name"]
+    source_sys = (
+        row_dict.get("source_system")
+        or conn_dict.get("source_system")
+    )
+    effective_attempt_id = (
+        attempt_id
+        or row_dict.get("onboarding_attempt_id")
+        or None
+    )
 
     try:
         # 1. Recompute deterministic source_table_id for identity v2
