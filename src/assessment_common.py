@@ -3,8 +3,8 @@ assessment_common.py - source-neutral pieces of a broad source assessment.
 
 Source-specific notebooks discover objects with their own dialect SQL (through
 the adapter) and then call into this module to build the *normalized* assessment
-record, classify complexity, and describe the persistence key. Keeping this
-here means Oracle and SQL Server write an identical `source_assessment` shape.
+record and describe the persistence key. Keeping this here means Oracle and
+SQL Server write an identical `source_assessment` shape.
 
 No Oracle or SQL Server SQL belongs in this module. Pure: no Spark, no dbutils.
 """
@@ -31,15 +31,13 @@ OBJECT_TYPES = ("TABLE", "VIEW", "PROCEDURE", "FUNCTION", "PACKAGE",
 
 COMPATIBILITY_STATUSES = ("COMPATIBLE", "REVIEW", "MANUAL", "UNABLE_TO_ASSESS")
 
-COMPLEXITIES = ("LOW", "MEDIUM", "HIGH", "NOT_APPLICABLE")
-
 # Ordered field list of one normalized assessment record. Both sources must
 # produce exactly these fields so the shared MERGE and views stay stable.
 ASSESSMENT_FIELDS = (
     "assessment_id", "run_id", "connection_id", "source_system", "source_server",
     "source_database", "source_schema", "object_name", "object_type",
     "row_count", "row_count_method", "size_mb", "column_count",
-    "compatibility_status", "complexity", "assessment_message", "is_selected",
+    "compatibility_status", "assessment_message", "is_selected",
 )
 
 # Natural key used to MERGE an assessment record idempotently.
@@ -51,7 +49,7 @@ ASSESSMENT_MERGE_KEYS = ("assessment_id", "connection_id", "source_schema",
 ASSESSMENT_UPDATE_FIELDS = (
     "run_id", "source_system", "source_server", "source_database", "row_count",
     "row_count_method", "size_mb", "column_count", "compatibility_status",
-    "complexity", "assessment_message",
+    "assessment_message",
 )
 
 
@@ -62,17 +60,6 @@ def summarize_table_compatibility(column_statuses):
     explicit, importable dependency instead of relying on a bootstrap global.
     """
     return classify_table_compatibility(column_statuses)
-
-
-def classify_complexity(row_count, column_count):
-    """Size-based complexity band for a table (never a numerical score)."""
-    rc = row_count or 0
-    cc = column_count or 0
-    if rc > 100_000_000 or cc > 200:
-        return "HIGH"
-    if rc > 1_000_000 or cc > 50:
-        return "MEDIUM"
-    return "LOW"
 
 
 def _int_or_none(value):
@@ -98,7 +85,6 @@ def build_assessment_record(assessment_id, run_id, connection_id, source_system,
                             object_name, object_type, compatibility_status,
                             row_count=None, row_count_method=UNAVAILABLE,
                             size_mb=None, column_count=None,
-                            complexity="NOT_APPLICABLE",
                             assessment_message=None, is_selected=False):
     """Return one normalized assessment record as a dict.
 
@@ -120,7 +106,6 @@ def build_assessment_record(assessment_id, run_id, connection_id, source_system,
         "size_mb": _float_or_none(size_mb),
         "column_count": _int_or_none(column_count),
         "compatibility_status": compatibility_status,
-        "complexity": complexity or "NOT_APPLICABLE",
         "assessment_message": assessment_message,
         "is_selected": bool(is_selected),
     }
@@ -144,8 +129,6 @@ def validate_assessment_record(record):
     if record["compatibility_status"] not in COMPATIBILITY_STATUSES:
         raise ValueError(
             f"unsupported compatibility_status: {record['compatibility_status']!r}")
-    if record["complexity"] not in COMPLEXITIES:
-        raise ValueError(f"unsupported complexity: {record['complexity']!r}")
     return record
 
 

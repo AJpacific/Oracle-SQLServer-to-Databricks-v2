@@ -560,7 +560,7 @@ class TestAssessmentRecordParity(unittest.TestCase):
             source_system=system, source_server="srv", source_database="db",
             source_schema="S", object_name="T", object_type="TABLE",
             compatibility_status="COMPATIBLE", row_count=10,
-            row_count_method=method, column_count=3, complexity="LOW")
+            row_count_method=method, column_count=3)
 
     def test_both_sources_produce_identical_fields(self):
         o = self._record("oracle", assess_common.ESTIMATED)
@@ -773,8 +773,7 @@ class TestFutureSourceExtension(unittest.TestCase):
             source_system="fakedb", source_server="h", source_database="db",
             source_schema="S", object_name="T", object_type="TABLE",
             compatibility_status="COMPATIBLE", row_count=5,
-            row_count_method=assess_common.CATALOG, column_count=2,
-            complexity=assess_common.classify_complexity(5, 2))
+            row_count_method=assess_common.CATALOG, column_count=2)
         self.assertEqual(sorted(record), sorted(assess_common.ASSESSMENT_FIELDS))
 
     def test_shared_inventory_accepts_fake_adapter_output(self):

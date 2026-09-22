@@ -199,7 +199,7 @@ CREATE TABLE IF NOT EXISTS {ctrl('source_assessment')} (
   source_system STRING, source_server STRING, source_database STRING,
   source_schema STRING, object_name STRING, object_type STRING,
   row_count BIGINT, row_count_method STRING, size_mb DECIMAL(18,2),
-  column_count INT, compatibility_status STRING, complexity STRING,
+  column_count INT, compatibility_status STRING,
   assessment_message STRING, is_selected BOOLEAN,
   selection_status STRING, selected_ts TIMESTAMP, selected_by STRING,
   onboarding_run_id STRING, onboarding_attempt_id STRING,

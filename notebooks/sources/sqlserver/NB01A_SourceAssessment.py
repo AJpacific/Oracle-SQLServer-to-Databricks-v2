@@ -116,8 +116,7 @@ for schema in schemas:
             obj = t["OBJECT_NAME"]
             row_count, size_mb, method = stats.get(
                 obj, (t["ROW_COUNT"], None, ROW_COUNT_METHOD))
-            comp, complexity, msg, col_count = (
-                "UNABLE_TO_ASSESS", "NOT_APPLICABLE", None, None)
+            comp, msg, col_count = ("UNABLE_TO_ASSESS", None, None)
             try:
                 cols = _q(adapter.columns_metadata_query(src_db, schema, obj))
                 statuses = [
@@ -129,7 +128,6 @@ for schema in schemas:
                 ]
                 col_count = len(cols)
                 comp = assess_common.summarize_table_compatibility(statuses)
-                complexity = assess_common.classify_complexity(row_count, col_count)
             except Exception as e:
                 msg = f"column assessment failed: {failcls.sanitize_message(e)[:400]}"
                 print(f"  [warn] {schema}.{obj}: {msg}")
@@ -138,7 +136,7 @@ for schema in schemas:
                 source_schema=schema, object_name=obj, object_type="TABLE",
                 row_count=row_count, row_count_method=method or ROW_COUNT_METHOD,
                 size_mb=size_mb, column_count=col_count,
-                compatibility_status=comp, complexity=complexity,
+                compatibility_status=comp,
                 assessment_message=msg))
 
     # ---- VIEWS (sys.views) ----
