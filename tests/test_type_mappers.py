@@ -182,11 +182,16 @@ class TestOracleMappingRegression(unittest.TestCase):
         self.assertEqual(_outcome(res_none), ("TIMESTAMP", "REVIEW", "UNKNOWN"))
         self.assertIn("unavailable", res_none.notes.lower())
 
-        # invalid / unsupported precision: BLOCKED, UNKNOWN, None
-        for bad in (-1, 10, 99, "bad"):
+        # non-numeric, negative, or out-of-range precision: REVIEW, UNKNOWN, TIMESTAMP
+        for bad in (-1, 10, 99, 100, "bad", "abc"):
             with self.subTest(bad=bad):
-                res_bad = self.mapper.map_column("TIMESTAMP", scale=bad)
-                self.assertEqual(_outcome(res_bad), (None, "BLOCKED", "UNKNOWN"))
+                res_bad = self.mapper.map_column("TIMESTAMP", scale=bad, is_nullable=True)
+                self.assertEqual(_outcome(res_bad), ("TIMESTAMP", "REVIEW", "UNKNOWN"))
+                self.assertTrue(res_bad.is_nullable)
+
+                res_bad_not_null = self.mapper.map_column("TIMESTAMP", scale=bad, is_nullable=False)
+                self.assertEqual(_outcome(res_bad_not_null), ("TIMESTAMP", "REVIEW", "UNKNOWN"))
+                self.assertFalse(res_bad_not_null.is_nullable)
 
         # builtin fallback consistency when YAML is absent
         builtin_mapper = OracleTypeMapper()
@@ -339,11 +344,16 @@ class TestSqlServerMappingRegression(unittest.TestCase):
         self.assertEqual(_outcome(res_none), ("TIME(6)", "REVIEW", "UNKNOWN"))
         self.assertIn("unavailable", res_none.notes.lower())
 
-        # invalid / unsupported scale: BLOCKED, UNKNOWN, None
-        for bad_scale in (-1, 8, 99, "bad"):
+        # non-numeric, negative, or out-of-range scale: REVIEW, UNKNOWN, TIME(6)
+        for bad_scale in (-1, 8, 99, 100, "bad", "abc"):
             with self.subTest(bad_scale=bad_scale):
-                res_bad = self.mapper.map_column("time", scale=bad_scale)
-                self.assertEqual(_outcome(res_bad), (None, "BLOCKED", "UNKNOWN"))
+                res_bad = self.mapper.map_column("time", scale=bad_scale, is_nullable=True)
+                self.assertEqual(_outcome(res_bad), ("TIME(6)", "REVIEW", "UNKNOWN"))
+                self.assertTrue(res_bad.is_nullable)
+
+                res_bad_not_null = self.mapper.map_column("time", scale=bad_scale, is_nullable=False)
+                self.assertEqual(_outcome(res_bad_not_null), ("TIME(6)", "REVIEW", "UNKNOWN"))
+                self.assertFalse(res_bad_not_null.is_nullable)
 
         # builtin rules fallback consistency when YAML is absent
         builtin_mapper = SqlServerTypeMapper()

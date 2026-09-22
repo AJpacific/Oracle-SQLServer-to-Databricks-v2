@@ -133,7 +133,12 @@ class OracleTypeMapper(SourceTypeMapper):
             status=status, fidelity=fidelity, notes=notes,
             is_nullable=bool(is_nullable))
 
-    def _map_timestamp(self, source_type, fractional_precision, is_nullable):
+    def _map_timestamp(
+        self,
+        source_type,
+        fractional_precision,
+        is_nullable,
+    ):
         if fractional_precision is None:
             return ColumnMappingResult(
                 source_type=source_type or "TIMESTAMP",
@@ -141,8 +146,9 @@ class OracleTypeMapper(SourceTypeMapper):
                 status=REVIEW,
                 fidelity=UNKNOWN,
                 notes=(
-                    "Oracle TIMESTAMP fractional-second precision is unavailable; "
-                    "manual review is required"
+                    "Oracle TIMESTAMP fractional-second precision is "
+                    "unavailable; mapped to Databricks TIMESTAMP for "
+                    "manual review"
                 ),
                 is_nullable=bool(is_nullable),
             )
@@ -152,12 +158,13 @@ class OracleTypeMapper(SourceTypeMapper):
         except (TypeError, ValueError):
             return ColumnMappingResult(
                 source_type=source_type or "TIMESTAMP",
-                databricks_delta_type=None,
-                status=BLOCKED,
+                databricks_delta_type="TIMESTAMP",
+                status=REVIEW,
                 fidelity=UNKNOWN,
                 notes=(
-                    f"Invalid Oracle TIMESTAMP fractional-second precision: "
-                    f"{fractional_precision!r}"
+                    f"Invalid Oracle TIMESTAMP fractional-second precision "
+                    f"{fractional_precision!r}; mapped to Databricks "
+                    "TIMESTAMP for manual review"
                 ),
                 is_nullable=bool(is_nullable),
             )
@@ -170,7 +177,8 @@ class OracleTypeMapper(SourceTypeMapper):
                 fidelity=EXACT,
                 notes=(
                     f"Oracle TIMESTAMP({precision_value}) mapped to "
-                    "Databricks TIMESTAMP with compatible fractional precision"
+                    "Databricks TIMESTAMP with compatible fractional "
+                    "precision"
                 ),
                 is_nullable=bool(is_nullable),
             )
@@ -182,20 +190,23 @@ class OracleTypeMapper(SourceTypeMapper):
                 status=REVIEW,
                 fidelity=LOSSY,
                 notes=(
-                    f"Oracle TIMESTAMP({precision_value}) mapped to Databricks "
-                    "TIMESTAMP; fractional precision above 6 may be truncated"
+                    f"Oracle TIMESTAMP({precision_value}) mapped to "
+                    "Databricks TIMESTAMP; fractional precision above "
+                    "six digits may be truncated"
                 ),
                 is_nullable=bool(is_nullable),
             )
 
         return ColumnMappingResult(
             source_type=source_type or "TIMESTAMP",
-            databricks_delta_type=None,
-            status=BLOCKED,
+            databricks_delta_type="TIMESTAMP",
+            status=REVIEW,
             fidelity=UNKNOWN,
             notes=(
-                f"Unsupported Oracle TIMESTAMP fractional-second precision: "
-                f"{precision_value}"
+                f"Oracle TIMESTAMP fractional-second precision "
+                f"{precision_value} is outside the expected Oracle "
+                "range 0 through 9; mapped to Databricks TIMESTAMP "
+                "for manual review"
             ),
             is_nullable=bool(is_nullable),
         )

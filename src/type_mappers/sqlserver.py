@@ -75,7 +75,7 @@ _BUILTIN_RULES = {
     "datetimeoffset": ("TIMESTAMP", REVIEW, LOSSY,
                        "timezone offset dropped when converted to Delta TIMESTAMP; confirm policy"),
     "time": ("TIME(6)", REVIEW, UNKNOWN,
-             "Fallback mapping used only when SQL Server time precision is unavailable; precision-aware mapping is implemented in SqlServerTypeMapper._map_time"),
+             "Fallback mapping used when SQL Server time precision is unavailable; precision-aware mapping is implemented in SqlServerTypeMapper._map_time"),
     "sql_variant": (None, BLOCKED, UNKNOWN,
                     "sql_variant stores heterogeneous types; cannot be safely auto-mapped"),
     "hierarchyid": (None, BLOCKED, UNKNOWN,
@@ -138,29 +138,30 @@ class SqlServerTypeMapper(SourceTypeMapper):
             is_nullable=bool(is_nullable))
 
     def _map_time(self, source_type, scale, is_nullable):
-        try:
-            if scale is None:
-                return ColumnMappingResult(
-                    source_type=source_type or "time",
-                    databricks_delta_type="TIME(6)",
-                    status=REVIEW,
-                    fidelity=UNKNOWN,
-                    notes=(
-                        "SQL Server time precision is unavailable; "
-                        "mapped to Databricks TIME(6) for manual review"
-                    ),
-                    is_nullable=bool(is_nullable),
-                )
+        if scale is None:
+            return ColumnMappingResult(
+                source_type=source_type or "time",
+                databricks_delta_type="TIME(6)",
+                status=REVIEW,
+                fidelity=UNKNOWN,
+                notes=(
+                    "SQL Server time precision is unavailable; "
+                    "mapped to Databricks TIME(6) for manual review"
+                ),
+                is_nullable=bool(is_nullable),
+            )
 
+        try:
             time_precision = int(scale)
         except (TypeError, ValueError):
             return ColumnMappingResult(
                 source_type=source_type or "time",
-                databricks_delta_type=None,
-                status=BLOCKED,
+                databricks_delta_type="TIME(6)",
+                status=REVIEW,
                 fidelity=UNKNOWN,
                 notes=(
-                    f"Invalid SQL Server time precision: {scale!r}"
+                    f"Invalid SQL Server time precision {scale!r}; "
+                    "mapped to Databricks TIME(6) for manual review"
                 ),
                 is_nullable=bool(is_nullable),
             )
@@ -193,11 +194,13 @@ class SqlServerTypeMapper(SourceTypeMapper):
 
         return ColumnMappingResult(
             source_type=source_type or "time",
-            databricks_delta_type=None,
-            status=BLOCKED,
+            databricks_delta_type="TIME(6)",
+            status=REVIEW,
             fidelity=UNKNOWN,
             notes=(
-                f"Unsupported SQL Server time precision: {time_precision}"
+                f"SQL Server time precision {time_precision} is outside "
+                "the expected SQL Server range 0 through 7; "
+                "mapped to Databricks TIME(6) for manual review"
             ),
             is_nullable=bool(is_nullable),
         )
