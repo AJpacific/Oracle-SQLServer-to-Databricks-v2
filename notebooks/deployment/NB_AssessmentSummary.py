@@ -62,6 +62,13 @@ query = f"""
 
 rows = spark.sql(query).collect()
 
+# Convert PySpark Row objects to Python dictionaries.
+# Python dictionaries support .get().
+rows = [
+    row.asDict(recursive=True)
+    for row in rows
+]
+
 if not rows:
     business_status = "NO_RESULTS"
     exit_payload = {

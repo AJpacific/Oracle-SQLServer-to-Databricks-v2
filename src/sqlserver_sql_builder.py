@@ -378,63 +378,84 @@ def list_routines_query(database: str = None, owner: str = None) -> str:
     )
 
 
-def table_statistics_query(database: str = None, owner: str = None) -> str:
-    """SQL Server table statistics from catalog metadata (ROW_COUNT_METHOD=CATALOG).
+def table_statistics_query(
+    database: str = None,
+    owner: str = None,
+) -> str:
+    """
+    SQL Server table statistics from catalog metadata.
 
-    ROW_COUNT is the catalog row count of the heap/clustered partitions
-    (``index_id IN (0,1)``). It is catalog metadata, not a ``COUNT_BIG(*)``
-    executed against the table, so it is labelled CATALOG rather than EXACT.
+    ROW_COUNT is the catalog row count from heap or clustered-index
+    partitions where index_id is 0 or 1.
 
-    SIZE_MB is the total **reserved** size of the table: base heap or clustered
-    storage plus all nonclustered indexes, covering every allocation-unit type:
+    SIZE_MB is the total reserved size of the table, including base storage,
+    nonclustered indexes, LOB data, and row-overflow data.
 
-      * IN_ROW_DATA (type 1) and ROW_OVERFLOW_DATA (type 3) are reached through
-        ``allocation_units.container_id = partitions.hobt_id``
-      * LOB_DATA (type 2) is reached through
-        ``allocation_units.container_id = partitions.partition_id``
-
-    The two relationships are collected with UNION ALL rather than an OR join, so
-    each allocation unit contributes exactly once and neither branch duplicates
-    the other's rows. Row count and size are aggregated in independent CTEs and
-    joined by object_id, so the row count is never multiplied by the allocation
-    join.
+    The query intentionally avoids a leading WITH/CTE because Spark JDBC
+    wraps dbtable queries inside an outer SELECT during schema resolution.
     """
     p = _ss_prefix(database)
+
     return (
-        "(WITH row_counts AS ("
-        "SELECT pr.object_id, SUM(pr.rows) AS ROW_COUNT "
-        f"FROM {p}partitions pr WHERE pr.index_id IN (0,1) "
-        "GROUP BY pr.object_id"
-        "), allocation_pages AS ("
-        "SELECT pr.object_id, au.total_pages AS total_pages "
-        f"FROM {p}partitions pr "
-        f"JOIN {p}allocation_units au "
-        "ON au.container_id = pr.hobt_id AND au.type IN (1,3) "
-        "UNION ALL "
-        "SELECT pr.object_id, au.total_pages AS total_pages "
-        f"FROM {p}partitions pr "
-        f"JOIN {p}allocation_units au "
-        "ON au.container_id = pr.partition_id AND au.type = 2"
-        "), size_pages AS ("
-        "SELECT object_id, SUM(total_pages) AS total_pages "
-        "FROM allocation_pages GROUP BY object_id"
-        ") "
-        "SELECT s.name AS SCHEMA_NAME, t.name AS OBJECT_NAME, "
-        "COALESCE(row_counts.ROW_COUNT, 0) AS ROW_COUNT, "
-        "CAST(COALESCE(size_pages.total_pages, 0) * 8.0 / 1024 "
-        "AS DECIMAL(18,2)) AS SIZE_MB, "
+        "("
+        "SELECT "
+        "s.name AS SCHEMA_NAME, "
+        "t.name AS OBJECT_NAME, "
+        "CAST("
+        "COALESCE(row_counts.ROW_COUNT, 0) "
+        "AS BIGINT"
+        ") AS ROW_COUNT, "
+        "CAST("
+        "COALESCE(size_pages.total_pages, 0) * 8.0 / 1024.0 "
+        "AS DECIMAL(18,2)"
+        ") AS SIZE_MB, "
         "'CATALOG' AS ROW_COUNT_METHOD "
         f"FROM {p}tables t "
-        f"JOIN {p}schemas s ON t.schema_id = s.schema_id "
-        "LEFT JOIN row_counts ON row_counts.object_id = t.object_id "
-        "LEFT JOIN size_pages ON size_pages.object_id = t.object_id "
+        f"INNER JOIN {p}schemas s "
+        "ON t.schema_id = s.schema_id "
+        "LEFT JOIN ("
+        "SELECT "
+        "pr.object_id, "
+        "SUM(pr.rows) AS ROW_COUNT "
+        f"FROM {p}partitions pr "
+        "WHERE pr.index_id IN (0,1) "
+        "GROUP BY pr.object_id"
+        ") row_counts "
+        "ON row_counts.object_id = t.object_id "
+        "LEFT JOIN ("
+        "SELECT "
+        "allocation_pages.object_id, "
+        "SUM(allocation_pages.total_pages) AS total_pages "
+        "FROM ("
+        "SELECT "
+        "pr.object_id, "
+        "au.total_pages "
+        f"FROM {p}partitions pr "
+        f"INNER JOIN {p}allocation_units au "
+        "ON au.container_id = pr.hobt_id "
+        "AND au.type IN (1,3) "
+        "UNION ALL "
+        "SELECT "
+        "pr.object_id, "
+        "au.total_pages "
+        f"FROM {p}partitions pr "
+        f"INNER JOIN {p}allocation_units au "
+        "ON au.container_id = pr.partition_id "
+        "AND au.type = 2"
+        ") allocation_pages "
+        "GROUP BY allocation_pages.object_id"
+        ") size_pages "
+        "ON size_pages.object_id = t.object_id "
         f"WHERE {_ss_schema_filter(owner)}"
         ") q"
     )
 
 
-def module_definition_query(database: str = None, owner: str = None,
-                            object_name: str = None) -> str:
+def module_definition_query(
+    database: str = None,
+    owner: str = None,
+    object_name: str = None,
+) -> str:
     """SQL Server object definition text from sys.sql_modules as DEFINITION_TEXT.
 
     An encrypted or otherwise inaccessible module returns a NULL definition,

@@ -582,31 +582,125 @@ def probe_connection(adapter, source_server=None, source_database=None):
 
 
 def persist_assessment_records(records):
-    """MERGE normalized assessment records; retry-safe for one assessment_id.
-
-    is_selected is never overwritten, so a selection made during registration
-    survives a re-assessment of the same assessment_id.
     """
+    Persist normalized assessment records using the target table schema.
+
+    Decimal fields are converted to decimal.Decimal.
+    The MERGE inserts only assessment-owned columns, leaving downstream
+    selection and onboarding fields unchanged or null.
+    """
+    from decimal import Decimal
+
     from pyspark.sql import functions as F
+    from pyspark.sql.types import DecimalType
+
     if not records:
         return {}
-    for r in records:
-        assess_common.validate_assessment_record(r)
-    df = (spark.createDataFrame(records)
-          .select(*assess_common.ASSESSMENT_FIELDS)
-          .withColumn("captured_ts", F.current_timestamp()))
-    df.createOrReplaceTempView("_assessed_objects")
+
+    for record in records:
+        assess_common.validate_assessment_record(record)
+
+    assessment_fields = list(
+        assess_common.ASSESSMENT_FIELDS
+    )
+
+    target_schema = (
+        spark.table(
+            _plain(
+                ctrl_table("source_assessment")
+            )
+        )
+        .select(*assessment_fields)
+        .schema
+    )
+
+    def _coerce_value(value, data_type):
+        if value is None:
+            return None
+
+        if isinstance(data_type, DecimalType):
+            decimal_value = (
+                value
+                if isinstance(value, Decimal)
+                else Decimal(str(value))
+            )
+
+            return decimal_value.quantize(
+                Decimal(1).scaleb(-data_type.scale)
+            )
+
+        return value
+
+    values = [
+        tuple(
+            _coerce_value(
+                record.get(schema_field.name),
+                schema_field.dataType,
+            )
+            for schema_field in target_schema.fields
+        )
+        for record in records
+    ]
+
+    df = (
+        spark.createDataFrame(
+            values,
+            schema=target_schema,
+        )
+        .withColumn(
+            "captured_ts",
+            F.current_timestamp(),
+        )
+    )
+
+    df.createOrReplaceTempView(
+        "_assessed_objects"
+    )
+
     on_clause = " AND ".join(
-        f"t.{k} = s.{k}" for k in assess_common.ASSESSMENT_MERGE_KEYS)
+        f"t.{key} = s.{key}"
+        for key in assess_common.ASSESSMENT_MERGE_KEYS
+    )
+
     set_clause = ", ".join(
-        f"t.{c} = s.{c}" for c in assess_common.ASSESSMENT_UPDATE_FIELDS)
-    spark.sql(f"""
+        f"t.{column} = s.{column}"
+        for column in assess_common.ASSESSMENT_UPDATE_FIELDS
+    )
+
+    insert_columns = assessment_fields + [
+        "captured_ts"
+    ]
+
+    insert_column_clause = ", ".join(
+        insert_columns
+    )
+
+    insert_value_clause = ", ".join(
+        f"s.{column}"
+        for column in insert_columns
+    )
+
+    spark.sql(
+        f"""
         MERGE INTO {ctrl_table('source_assessment')} t
-        USING _assessed_objects s ON {on_clause}
-        WHEN MATCHED THEN UPDATE SET {set_clause}, t.captured_ts = s.captured_ts
-        WHEN NOT MATCHED THEN INSERT *
-    """)
-    return assess_common.summarize_compatibility(records)
+        USING _assessed_objects s
+          ON {on_clause}
+
+        WHEN MATCHED THEN UPDATE SET
+          {set_clause},
+          t.captured_ts = s.captured_ts
+
+        WHEN NOT MATCHED THEN INSERT (
+          {insert_column_clause}
+        ) VALUES (
+          {insert_value_clause}
+        )
+        """
+    )
+
+    return assess_common.summarize_compatibility(
+        records
+    )
 
 
 def persist_inventory_rows(rows):
@@ -683,32 +777,102 @@ def persist_inventory_rows(rows):
 
 
 def persist_sql_object_records(records):
-    """MERGE normalized SQL-object records; preserves APPROVED/REJECTED review."""
+    """
+    MERGE normalized SQL-object records while preserving APPROVED or REJECTED
+    review decisions.
+
+    Uses the existing Delta table schema instead of Python inference so fields
+    that are null across an ASSESS-only run retain their intended STRING types.
+    """
     from pyspark.sql import functions as F
+
     if not records:
         return {}
-    df = (spark.createDataFrame(records)
-          .select(*sqlobj_common.SQL_OBJECT_FIELDS)
-          .withColumn("captured_ts", F.current_timestamp())
-          .withColumn("updated_ts", F.current_timestamp()))
-    df.createOrReplaceTempView("_sql_objects")
+
+    sql_object_fields = list(
+        sqlobj_common.SQL_OBJECT_FIELDS
+    )
+
+    target_schema = (
+        spark.table(
+            _plain(
+                ctrl_table(
+                    "sql_object_assessment"
+                )
+            )
+        )
+        .select(*sql_object_fields)
+        .schema
+    )
+
+    values = [
+        tuple(
+            record.get(field)
+            for field in sql_object_fields
+        )
+        for record in records
+    ]
+
+    df = (
+        spark.createDataFrame(
+            values,
+            schema=target_schema,
+        )
+        .withColumn(
+            "captured_ts",
+            F.current_timestamp(),
+        )
+        .withColumn(
+            "updated_ts",
+            F.current_timestamp(),
+        )
+    )
+
+    df.createOrReplaceTempView(
+        "_sql_objects"
+    )
+
     on_clause = " AND ".join(
-        f"t.{k} = s.{k}" for k in sqlobj_common.SQL_OBJECT_MERGE_KEYS)
+        f"t.{key} = s.{key}"
+        for key
+        in sqlobj_common.SQL_OBJECT_MERGE_KEYS
+    )
+
     set_clause = ", ".join(
-        f"t.{c} = s.{c}" for c in sqlobj_common.SQL_OBJECT_UPDATE_FIELDS)
-    terminal = ", ".join(
-        f"'{s}'" for s in sqlobj_common.TERMINAL_REVIEW_STATUSES)
-    spark.sql(f"""
+        f"t.{column} = s.{column}"
+        for column
+        in sqlobj_common.SQL_OBJECT_UPDATE_FIELDS
+    )
+
+    terminal_statuses = ", ".join(
+        f"'{status}'"
+        for status
+        in sqlobj_common.TERMINAL_REVIEW_STATUSES
+    )
+
+    spark.sql(
+        f"""
         MERGE INTO {ctrl_table('sql_object_assessment')} t
-        USING _sql_objects s ON {on_clause}
-        WHEN MATCHED THEN UPDATE SET {set_clause},
-            t.review_status = CASE
-                WHEN t.review_status IN ({terminal}) THEN t.review_status
-                ELSE s.review_status END,
-            t.updated_ts = s.updated_ts
+        USING _sql_objects s
+          ON {on_clause}
+
+        WHEN MATCHED THEN UPDATE SET
+          {set_clause},
+          t.review_status =
+            CASE
+              WHEN t.review_status IN ({terminal_statuses})
+                THEN t.review_status
+              ELSE s.review_status
+            END,
+          t.updated_ts = s.updated_ts
+
         WHEN NOT MATCHED THEN INSERT *
-    """)
-    return sqlobj_common.summarize_complexity(records)
+        """
+    )
+
+    return sqlobj_common.summarize_complexity(
+        records
+    )
 
 
 def resolve_assessment_schemas(adapter, source_database, include_schemas,
