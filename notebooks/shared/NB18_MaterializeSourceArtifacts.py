@@ -1,9 +1,9 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # NB18_MaterializeSourceArtifacts
-# MAGIC Materializes original Oracle and SQL Server source-object definitions
-# MAGIC from sql_object_assessment into deterministic .sql files inside
-# MAGIC Unity Catalog Volumes. It never converts, executes, or deploys source SQL.
+# MAGIC Original source definitions are read from `sql_object_assessment` and
+# MAGIC materialized unchanged as `.sql` artifacts inside Unity Catalog Volumes.
+# MAGIC It never converts, classifies, reviews, executes, or deploys source SQL.
 
 # COMMAND ----------
 

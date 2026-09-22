@@ -58,9 +58,8 @@
   The query structure is covered by unit tests; the resulting numbers have
   **not** been compared against a live SQL Server instance (see "Validation
   status" below).
-- Source assessment and SQL-object assessment are retry-safe: re-running the
-  same `assessment_id` updates its own rows instead of duplicating them, and an
-  existing `APPROVED`/`REJECTED` review decision is preserved.
+- Source assessment and SQL-object inventory are retry-safe: re-running the
+  same `assessment_id` updates its own rows instead of duplicating them.
 - Assessment-based, collision-safe registration (`NB01B`). New rows are created
   inactive (`is_active = false`, `current_status = 'REGISTERED'`).
   Target collisions are checked across registrations by normalized target FQN.
@@ -140,14 +139,15 @@
 - `table_run_log.status` is normalized to `SUCCEEDED` / `FAILED`; the detailed
   operational state lives on `source_table_control` / `delta_sync_queue`, and
   `failure_stage` + `error_category` carry the precise meaning.
-- SQL-object assessment and limited deterministic conversion drafts (`NB13`);
-  every generated draft is `PENDING_REVIEW` and is never executed. Discovery
-  query failures are counted separately from inaccessible definitions, which
-  persist as `UNABLE_TO_ASSESS`; coverage is `COMPLETE`, `PARTIAL`, or `FAILED`.
+- Source SQL-object inventory (`NB13`): original source-definition extraction
+  only. Definitions are stored unchanged in `sql_object_assessment` (historical
+  table name retained). Discovery query failures are counted separately from
+  inaccessible definitions, which persist with an explicit `error_message`;
+  coverage is `COMPLETE`, `PARTIAL`, or `FAILED`.
 - **SQL object artifact materialization (`NB18`):** Preserves original Oracle (VIEW, PROCEDURE, FUNCTION, PACKAGE, PACKAGE_BODY) and SQL Server (VIEW, PROCEDURE, FUNCTION) non-table database object definitions as raw `.sql` files in Unity Catalog Volumes (`_source_artifacts`).
   - Stored under deterministic path `/Volumes/<target_catalog>/<target_schema>/_source_artifacts/<safe_connection_id>/<safe_source_schema>/<type_directory>/<safe_object_name>.sql`.
   - Content comes strictly from `sql_object_assessment.source_definition` unchanged.
-  - The feature preserves source SQL as an artifact for retention, review, analysis, and controlled future conversion.
+  - The feature preserves source SQL as an artifact for retention, review, and analysis. The accelerator does not convert, classify, review, execute, or deploy view, procedure, function, package, or package-body SQL.
   - It does NOT make Oracle PL/SQL or SQL Server T-SQL executable in Databricks and does NOT automatically deploy Databricks views.
   - Live Unity Catalog Volume privileges (`CREATE VOLUME`, `READ VOLUME`, `WRITE VOLUME`) must be validated.
 
@@ -219,16 +219,15 @@
 ## Limitations / non-goals
 - No third pipeline, no generalized workflow engine, no custom scheduler
   (Databricks Jobs orchestrate).
-- No general SQL parser; conversion uses limited, literal/comment-safe textual
-  replacements for simple views only. Procedures/functions/packages produce
-  non-executable redesign guidance.
-- Converted views, procedures, and functions are never executed or deployed
-  automatically.
+- No SQL conversion of any kind: no SQL parser, no textual rewriting, no
+  dialect translation, and no conversion drafts. Original source definitions
+  are only inventoried and materialized unchanged as `.sql` artifacts.
+- Views, procedures, functions, packages, and package bodies are never
+  classified, reviewed, executed, or deployed automatically.
 - No Gold layer, no reporting warehouse, no cloud-billing ingestion, no
   automatic cost optimization, no anomaly detection, no ServiceNow/paging.
 - DQ rules are the fixed MVP set only; arbitrary SQL expressions are rejected.
-- Optional AI conversion requires a pre-approved, configured endpoint; without
-  one, routine conversion is `NOT_CONFIGURED` (never fabricated).
+- No AI conversion of source SQL objects.
 - No new source systems beyond Oracle and SQL Server.
 - Existing physical-source IDs require the explicit dry-run-first
   `deployment/NB_MigrateSourceTableIdentityV2` upgrade. Initialization never

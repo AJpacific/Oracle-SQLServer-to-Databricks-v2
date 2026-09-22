@@ -134,7 +134,6 @@ try:
     from src import watermark as wm
     from src import reconciliation as recon
     from src import failure_classifier as failcls
-    from src import sql_object_converter as sqlconv
     from src import dq_rules as dqr
     from src import etl_work_unit as etlwu
     from src import assessment_common as assess_common
@@ -181,7 +180,6 @@ except ModuleNotFoundError:
     import watermark as wm
     import reconciliation as recon
     import failure_classifier as failcls
-    import sql_object_converter as sqlconv
     import dq_rules as dqr
     import etl_work_unit as etlwu
     import assessment_common as assess_common
@@ -778,11 +776,10 @@ def persist_inventory_rows(rows):
 
 def persist_sql_object_records(records):
     """
-    MERGE normalized SQL-object records while preserving APPROVED or REJECTED
-    review decisions.
+    MERGE normalized SQL-object inventory records into `sql_object_assessment`.
 
-    Uses the existing Delta table schema instead of Python inference so fields
-    that are null across an ASSESS-only run retain their intended STRING types.
+    Uses the existing Delta table schema instead of Python inference so an
+    inaccessible definition retains its intended STRING type.
     """
     from pyspark.sql import functions as F
 
@@ -844,10 +841,17 @@ def persist_sql_object_records(records):
         in sqlobj_common.SQL_OBJECT_UPDATE_FIELDS
     )
 
-    terminal_statuses = ", ".join(
-        f"'{status}'"
-        for status
-        in sqlobj_common.TERMINAL_REVIEW_STATUSES
+    insert_columns = sql_object_fields + [
+        "captured_ts", "updated_ts"
+    ]
+
+    insert_column_clause = ", ".join(
+        insert_columns
+    )
+
+    insert_value_clause = ", ".join(
+        f"s.{column}"
+        for column in insert_columns
     )
 
     spark.sql(
@@ -858,21 +862,21 @@ def persist_sql_object_records(records):
 
         WHEN MATCHED THEN UPDATE SET
           {set_clause},
-          t.review_status =
-            CASE
-              WHEN t.review_status IN ({terminal_statuses})
-                THEN t.review_status
-              ELSE s.review_status
-            END,
           t.updated_ts = s.updated_ts
 
-        WHEN NOT MATCHED THEN INSERT *
+        WHEN NOT MATCHED THEN INSERT (
+          {insert_column_clause}
+        ) VALUES (
+          {insert_value_clause}
+        )
         """
     )
 
-    return sqlobj_common.summarize_complexity(
-        records
-    )
+    summary = {}
+    for record in records:
+        object_type = record.get("object_type")
+        summary[object_type] = summary.get(object_type, 0) + 1
+    return summary
 
 
 def resolve_assessment_schemas(adapter, source_database, include_schemas,

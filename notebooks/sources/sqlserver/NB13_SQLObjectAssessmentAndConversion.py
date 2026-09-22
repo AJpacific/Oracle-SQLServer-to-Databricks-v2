@@ -1,13 +1,13 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # SQL Server / NB13_SQLObjectAssessmentAndConversion
-# MAGIC Extracts **SQL Server** object definitions from `sys.sql_modules`, then
-# MAGIC hands each definition to the shared classifier/converter. ASSESS records
-# MAGIC complexity; CONVERT also produces a limited deterministic draft. Every
-# MAGIC generated draft is PENDING_REVIEW and is NEVER executed or deployed. An
-# MAGIC encrypted or inaccessible module is UNABLE_TO_ASSESS with an explicit
-# MAGIC reason - never fabricated - and an unrecognized module code is skipped
-# MAGIC rather than relabelled.
+# MAGIC Extracts and inventories original source SQL-object definitions for
+# MAGIC unchanged artifact materialization. Reads **SQL Server** object
+# MAGIC definitions from `sys.sql_modules` and stores each definition exactly as
+# MAGIC extracted in `sql_object_assessment`. It never classifies, converts,
+# MAGIC reviews, executes, or deploys source SQL. An encrypted or inaccessible
+# MAGIC module is recorded with an explicit reason - never fabricated - and an
+# MAGIC unrecognized module code is skipped rather than relabelled.
 
 # COMMAND ----------
 
@@ -21,23 +21,19 @@ SOURCE_SYSTEM = "sqlserver"
 
 dbutils.widgets.text("connection_id", "")
 dbutils.widgets.text("assessment_id", "")
-dbutils.widgets.dropdown("mode", "ASSESS", ["ASSESS", "CONVERT"])
 dbutils.widgets.text("include_schemas", "")
 dbutils.widgets.text("include_object_types", "VIEW,PROCEDURE,FUNCTION")
-dbutils.widgets.dropdown("use_ai", "false", ["true", "false"])
 
 connection_id = dbutils.widgets.get("connection_id").strip() or CONNECTION_ID
 assessment_id = dbutils.widgets.get("assessment_id").strip() or _uuid.uuid4().hex
-mode = dbutils.widgets.get("mode").strip()
 include_schemas = [s.strip() for s in
                    dbutils.widgets.get("include_schemas").split(",") if s.strip()]
 include_types = {t.strip().upper() for t in
                  dbutils.widgets.get("include_object_types").split(",") if t.strip()}
-use_ai = dbutils.widgets.get("use_ai") == "true"
 run_id = get_run_id()
 
 connection_id = require_connection_id(
-    connection_id, "SQL Server SQL-object assessment")
+    connection_id, "SQL Server SQL-object inventory")
 
 repo = control_repo()
 
@@ -49,8 +45,8 @@ src_server, src_db = cd.get("source_server"), cd.get("source_database")
 if not src_db:
     raise ValueError("SQL Server connections require source_database")
 adapter = get_source_adapter_for_connection(connection)   # requires VALID
-print(f"NB13 {mode} for SQL Server connection {connection_id} "
-      f"(database={src_db}); assessment_id={assessment_id}")
+print(f"NB13 source SQL object inventory for SQL Server connection "
+      f"{connection_id} (database={src_db}); assessment_id={assessment_id}")
 
 
 def _q(query):
@@ -127,12 +123,12 @@ records = [
         assessment_id=assessment_id, run_id=run_id, connection_id=connection_id,
         source_system=SOURCE_SYSTEM, source_database=src_db,
         source_schema=schema, object_name=name, object_type=otype,
-        source_definition=definition, mode=mode, use_ai=use_ai)
+        source_definition=definition)
     for schema, name, otype, definition in definitions
 ]
 
 summary = persist_sql_object_records(records)
-print("Complexity summary:", summary)
+print("Source SQL object inventory summary:", summary)
 
 business_status = sqlobj_common.discovery_business_status(
     schema_discovery_failed=schema_discovery_failed,

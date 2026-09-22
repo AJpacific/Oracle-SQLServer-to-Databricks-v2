@@ -231,9 +231,7 @@ CREATE TABLE IF NOT EXISTS {ctrl('sql_object_assessment')} (
   assessment_id STRING, run_id STRING, connection_id STRING,
   source_system STRING, source_database STRING, source_schema STRING,
   object_name STRING, object_type STRING, source_definition STRING,
-  complexity_category STRING, classification_reason STRING,
-  converted_definition STRING, conversion_language STRING,
-  conversion_status STRING, review_status STRING, error_message STRING,
+  error_message STRING,
   captured_ts TIMESTAMP, updated_ts TIMESTAMP
 ) USING DELTA
 """)

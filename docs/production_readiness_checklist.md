@@ -61,7 +61,7 @@ cannot be `READY` while required live checks remain `NOT_EXECUTED`.
 | Oracle incremental extraction | Databricks and Oracle | Frozen temporal interval returns exactly expected rows | Not recorded | Queue bounds and source query evidence | NOT_EXECUTED | TBD | Test retry with newer rows |
 | Oracle datatype round trips | Databricks and Oracle | Representative mapped values preserve documented fidelity | Not recorded | Source/Bronze comparison | NOT_EXECUTED | TBD | Include NUMBER and temporal families |
 | Oracle LOB handling | Databricks and Oracle | CLOB, NCLOB, and BLOB samples stream and round-trip within documented limits | Not recorded | Sample comparison and metrics | NOT_EXECUTED | TBD | Record payload sizes |
-| Oracle SQL-object definition access | Databricks and Oracle | View/routine/package text is accessible or honestly marked unable to assess | Not recorded | NB13 output and grants | NOT_EXECUTED | TBD | Generated drafts remain unexecuted |
+| Oracle SQL-object definition access | Databricks and Oracle | View/routine/package text is accessible or honestly marked inaccessible | Not recorded | NB13 output and grants | NOT_EXECUTED | TBD | Definitions are inventoried unchanged, never converted |
 
 ## D. SQL Server checks
 

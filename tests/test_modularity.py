@@ -841,23 +841,21 @@ class TestFutureSourceExtension(unittest.TestCase):
 
 
 class TestSqlObjectCommonRules(unittest.TestCase):
-    def test_generated_draft_is_pending_review(self):
+    def test_definition_is_inventoried_unchanged(self):
+        definition = "CREATE VIEW v AS\n  SELECT a FROM t\n"
         record = sqlobj_common.build_sql_object_record(
             assessment_id="a1", run_id="r1", connection_id="c1",
             source_system="oracle", source_database=None, source_schema="S",
             object_name="V", object_type="VIEW",
-            source_definition="CREATE VIEW v AS SELECT a FROM t",
-            mode="CONVERT")
-        self.assertEqual(record["conversion_status"], "GENERATED")
-        self.assertEqual(record["review_status"], sqlobj_common.PENDING_REVIEW)
+            source_definition=definition)
+        self.assertEqual(record["source_definition"], definition)
+        self.assertIsNone(record["error_message"])
 
-    def test_missing_definition_is_unable_to_assess(self):
+    def test_missing_definition_records_an_explicit_reason(self):
         record = sqlobj_common.build_sql_object_record(
             assessment_id="a1", run_id="r1", connection_id="c1",
             source_system="sqlserver", source_database="db", source_schema="S",
             object_name="P", object_type="PROCEDURE", source_definition=None)
-        self.assertEqual(record["complexity_category"], "UNABLE_TO_ASSESS")
-        self.assertEqual(record["review_status"], sqlobj_common.NOT_REVIEWED)
         self.assertIn("not accessible", record["error_message"])
 
     def test_unsupported_object_type_rejected(self):
@@ -868,9 +866,47 @@ class TestSqlObjectCommonRules(unittest.TestCase):
                 source_schema="S", object_name="TR", object_type="TRIGGER",
                 source_definition="...")
 
-    def test_terminal_review_statuses_are_preserved_by_contract(self):
-        self.assertIn("APPROVED", sqlobj_common.TERMINAL_REVIEW_STATUSES)
-        self.assertIn("REJECTED", sqlobj_common.TERMINAL_REVIEW_STATUSES)
+    def test_merge_key_isolates_connections_and_assessments(self):
+        self.assertEqual(
+            sqlobj_common.SQL_OBJECT_MERGE_KEYS,
+            ("assessment_id", "connection_id", "source_schema",
+             "object_type", "object_name"))
+
+
+class TestSqlObjectPersistenceContract(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        block = shared_nb("_common.py").split(
+            "def persist_sql_object_records", 1)[1]
+        cls.block = block.split("\ndef ", 1)[0]
+
+    def test_merge_uses_an_explicit_insert_column_list(self):
+        self.assertIn("insert_column_clause", self.block)
+        self.assertNotIn("INSERT *", self.block)
+
+    def test_merge_targets_the_retained_table_and_shared_keys(self):
+        self.assertIn("sql_object_assessment", self.block)
+        self.assertIn("sqlobj_common.SQL_OBJECT_MERGE_KEYS", self.block)
+        self.assertIn("sqlobj_common.SQL_OBJECT_UPDATE_FIELDS", self.block)
+
+    def test_no_review_or_conversion_columns_are_persisted(self):
+        for removed in ("review_status", "conversion_status",
+                        "converted_definition", "complexity_category",
+                        "classification_reason", "conversion_language",
+                        "summarize_complexity"):
+            self.assertNotIn(removed, self.block)
+
+    def test_control_table_ddl_has_no_conversion_columns(self):
+        ddl = shared_nb("NB00_ControlTableInit.py").split(
+            "CREATE TABLE IF NOT EXISTS {ctrl('sql_object_assessment')}", 1)[1]
+        ddl = ddl.split("USING DELTA", 1)[0]
+        for removed in ("converted_definition", "conversion_status",
+                        "conversion_language", "complexity_category",
+                        "classification_reason", "review_status"):
+            self.assertNotIn(removed, ddl)
+        for kept in ("source_definition", "error_message", "captured_ts",
+                     "updated_ts"):
+            self.assertIn(kept, ddl)
 
 
 if __name__ == "__main__":

@@ -1,12 +1,13 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # Oracle / NB13_SQLObjectAssessmentAndConversion
-# MAGIC Extracts **Oracle** view text (`ALL_VIEWS`) and routine/package source
-# MAGIC (`ALL_SOURCE`, assembled in line order), then hands each definition to the
-# MAGIC shared classifier/converter. ASSESS records complexity; CONVERT also
-# MAGIC produces a limited deterministic draft. Every generated draft is
-# MAGIC PENDING_REVIEW and is NEVER executed or deployed. An inaccessible
-# MAGIC definition is UNABLE_TO_ASSESS with an explicit reason - never fabricated.
+# MAGIC Extracts and inventories original source SQL-object definitions for
+# MAGIC unchanged artifact materialization. Reads **Oracle** view text
+# MAGIC (`ALL_VIEWS`) and routine/package source (`ALL_SOURCE`, assembled in
+# MAGIC line order) and stores each definition exactly as extracted in
+# MAGIC `sql_object_assessment`. It never classifies, converts, reviews,
+# MAGIC executes, or deploys source SQL. An inaccessible definition is recorded
+# MAGIC with an explicit reason - never fabricated.
 
 # COMMAND ----------
 
@@ -20,23 +21,19 @@ SOURCE_SYSTEM = "oracle"
 
 dbutils.widgets.text("connection_id", "")
 dbutils.widgets.text("assessment_id", "")
-dbutils.widgets.dropdown("mode", "ASSESS", ["ASSESS", "CONVERT"])
 dbutils.widgets.text("include_schemas", "")
 dbutils.widgets.text("include_object_types",
                      "VIEW,PROCEDURE,FUNCTION,PACKAGE")
-dbutils.widgets.dropdown("use_ai", "false", ["true", "false"])
 
 connection_id = dbutils.widgets.get("connection_id").strip() or CONNECTION_ID
 assessment_id = dbutils.widgets.get("assessment_id").strip() or _uuid.uuid4().hex
-mode = dbutils.widgets.get("mode").strip()
 include_schemas = [s.strip() for s in
                    dbutils.widgets.get("include_schemas").split(",") if s.strip()]
 include_types = {t.strip().upper() for t in
                  dbutils.widgets.get("include_object_types").split(",") if t.strip()}
-use_ai = dbutils.widgets.get("use_ai") == "true"
 run_id = get_run_id()
 
-connection_id = require_connection_id(connection_id, "Oracle SQL-object assessment")
+connection_id = require_connection_id(connection_id, "Oracle SQL-object inventory")
 
 repo = control_repo()
 
@@ -46,7 +43,7 @@ connection = require_valid_connection(connection_id, SOURCE_SYSTEM)
 cd = connection.asDict()
 src_server, src_db = cd.get("source_server"), cd.get("source_database")
 adapter = get_source_adapter_for_connection(connection)   # requires VALID
-print(f"NB13 {mode} for Oracle connection {connection_id}; "
+print(f"NB13 source SQL object inventory for Oracle connection {connection_id}; "
       f"assessment_id={assessment_id}")
 
 
@@ -159,12 +156,12 @@ records = [
         assessment_id=assessment_id, run_id=run_id, connection_id=connection_id,
         source_system=SOURCE_SYSTEM, source_database=src_db,
         source_schema=schema, object_name=name, object_type=otype,
-        source_definition=definition, mode=mode, use_ai=use_ai)
+        source_definition=definition)
     for schema, name, otype, definition in definitions
 ]
 
 summary = persist_sql_object_records(records)
-print("Complexity summary:", summary)
+print("Source SQL object inventory summary:", summary)
 
 business_status = sqlobj_common.discovery_business_status(
     schema_discovery_failed=schema_discovery_failed,

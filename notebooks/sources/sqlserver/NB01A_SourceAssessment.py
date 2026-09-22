@@ -146,7 +146,7 @@ for schema in schemas:
                 records.append(_record(
                     source_schema=schema, object_name=v["OBJECT_NAME"],
                     object_type="VIEW", compatibility_status="REVIEW",
-                    assessment_message="assess conversion in NB13"))
+                    assessment_message="source definition inventory handled by NB13"))
         except Exception as e:
             _capture_assessment_error("view_discovery", e, schema)
 
@@ -161,7 +161,7 @@ for schema in schemas:
                 records.append(_record(
                     source_schema=schema, object_name=rt["OBJECT_NAME"],
                     object_type=otype, compatibility_status="MANUAL",
-                    assessment_message="assess conversion in NB13"))
+                    assessment_message="source definition inventory handled by NB13"))
         except Exception as e:
             _capture_assessment_error("routine_discovery", e, schema)
 

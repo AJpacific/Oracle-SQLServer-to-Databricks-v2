@@ -77,7 +77,6 @@ src/
   source_registry.py
   sql_builder.py
   sql_object_assessment_common.py
-  sql_object_converter.py
   sqlserver_sql_builder.py
   strategy.py
   worklist_utils.py
@@ -171,8 +170,8 @@ reporting views, but never duplicate responsibilities or checkpoints.
 **INGEST pipeline (source -> Bronze).** Owns connection selection/validation,
 source assessment and inventory, object discovery, metadata mapping and Bronze
 provisioning, full and incremental loads into Bronze, source-to-Bronze
-reconciliation, ingest checkpoints, failed-ingest recovery, and SQL-object
-assessment/conversion drafts.
+reconciliation, ingest checkpoints, failed-ingest recovery, and source
+SQL-object inventory.
 
 **ETL pipeline (Bronze -> Silver).** Starts only after Bronze ingestion
 succeeds. Owns Bronze-to-Silver transformation, data-quality checks and
@@ -281,10 +280,15 @@ reads a source secret scope.
   (checkpoint-only and finalization-only retries never reapply data).
 
 ### SQL objects
-- `NB13_SQLObjectAssessmentAndConversion` (ASSESS/CONVERT) captures Oracle
-  `ALL_VIEWS`/`ALL_SOURCE` and SQL Server `sys.sql_modules` definitions,
-  classifies complexity, and produces limited deterministic Databricks SQL drafts
-  for simple views. Every draft is `PENDING_REVIEW`; nothing is executed.
+- `NB13_SQLObjectAssessmentAndConversion` retains its historical filename for
+  workspace-path compatibility. It performs original source-definition
+  extraction only: it captures Oracle `ALL_VIEWS`/`ALL_SOURCE` and SQL Server
+  `sys.sql_modules` text and stores it unchanged in `sql_object_assessment`
+  (the table name is also retained; it now holds only source SQL-object
+  definitions and their inventory metadata).
+- The accelerator preserves source SQL definitions as artifacts. It does not
+  convert, classify, review, execute, or deploy view, procedure, function,
+  package, or package-body SQL.
 
 ### Bronze-to-Silver ETL and data quality
 - Enable per table with `etl_is_active`, a Silver target, and `dq_rule` rows.

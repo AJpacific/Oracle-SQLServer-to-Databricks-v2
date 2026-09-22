@@ -75,8 +75,8 @@ T06 Assessment Summary
 | `T03_ForEach_Validate_Connection` | `sources/<source>/NB00A_UpsertAndValidateConnection` (For Each `{{tasks.T02_Get_Configured_Connection_Worklist.values.worklist}}`) | `run_id: {{tasks.T00_Create_Run_Context.values.run_id}}`, `connection_id: {{input.connection_id}}`, `catalog: da_accelerators`, `control_schema: control` | `status`, `connection_status`, `run_id`, `connection_id`, `source_system`, `source_database` |
 | `T04_Get_Valid_Connection_Worklist` | `deployment/NB_GetConnectionWorklist` (depends_on: `T03_ForEach_Validate_Connection`) | `run_id`, `source_system` (fixed: `oracle` or `sqlserver`), `connection_mode: VALID`, optional `max_connections`, optional `only_connection_ids`, optional `exclude_connection_ids` | `worklist`, `worklist_count` |
 | `T05_ForEach_Connection_Assessment` | `sources/<source>/NB01A_SourceAssessment` (For Each `{{tasks.T04_Get_Valid_Connection_Worklist.values.worklist}}`) | `run_id`, `connection_id: {{input.connection_id}}` | `assessment_id`, `objects`, `summary` |
-| `T06_ForEach_SQL_Object_Extraction` | `sources/<source>/NB13_SQLObjectAssessmentAndConversion` (For Each `{{tasks.T04_Get_Valid_Connection_Worklist.values.worklist}}`) | `run_id`, `connection_id: {{input.connection_id}}`, `mode: ASSESS`, `include_object_types: VIEW,PROCEDURE,FUNCTION,PACKAGE` (Oracle) or `VIEW,PROCEDURE,FUNCTION` (SQL Server) | `assessment_id`, `objects`, `summary` |
-| `T07_Assessment_Summary` | `deployment/NB_AssessmentSummary` (run_if: ALL_DONE, depends_on: `T05_ForEach_Connection_Assessment`, `T06_ForEach_SQL_Object_Extraction`) | `run_id`, `source_system` | `connections_assessed`, `assessments`, `objects_assessed`, `selected_table_count`, `business_status` |
+| `T06_ForEach_Source_SQL_Object_Inventory` | `sources/<source>/NB13_SQLObjectAssessmentAndConversion` (For Each `{{tasks.T04_Get_Valid_Connection_Worklist.values.worklist}}`) | `run_id`, `connection_id: {{input.connection_id}}`, `include_object_types: VIEW,PROCEDURE,FUNCTION,PACKAGE` (Oracle) or `VIEW,PROCEDURE,FUNCTION` (SQL Server) | `assessment_id`, `objects`, `summary` |
+| `T07_Assessment_Summary` | `deployment/NB_AssessmentSummary` (run_if: ALL_DONE, depends_on: `T05_ForEach_Connection_Assessment`, `T06_ForEach_Source_SQL_Object_Inventory`) | `run_id`, `source_system` | `connections_assessed`, `assessments`, `objects_assessed`, `selected_table_count`, `business_status` |
 
 *Note on orchestration:*
 - `source_connection` is pre-populated by an operator or trusted configuration process; NB00A validates an existing row and never inserts or updates connection configuration metadata.
@@ -216,7 +216,7 @@ Create Run Context (T00)
 | `T11_ForEach_Full_Load` | `shared/NB09_FullLoad` | `connection_id`, `source_table_id`, `run_id`, `attempt_number` | - |
 | `T12_Full_Reconciliation` | `shared/NB12_ValidationAndReconciliation` | `run_id`, `mode=full` | - |
 | `T13_Commit_Initial_State` | `shared/NB10_PostFullLoadState` | `run_id` | - |
-| `T14_Oracle_SQL_Object_Assessment` *or* `T14_SQLServer_SQL_Object_Assessment` | `sources/oracle/NB13_SQLObjectAssessmentAndConversion` *or* `sources/sqlserver/NB13_SQLObjectAssessmentAndConversion` | `run_id`, `connection_id`, `assessment_id`, `mode`, `include_schemas`, `include_object_types`, `use_ai` | `assessment_id`, `objects`, `summary` |
+| `T14_Oracle_Source_SQL_Object_Inventory` *or* `T14_SQLServer_Source_SQL_Object_Inventory` | `sources/oracle/NB13_SQLObjectAssessmentAndConversion` *or* `sources/sqlserver/NB13_SQLObjectAssessmentAndConversion` | `run_id`, `connection_id`, `assessment_id`, `include_schemas`, `include_object_types` | `assessment_id`, `objects`, `summary` |
 | `T15_Notify_Ingest_Failures` | `shared/NB16_NotifyFailures` (run_if: ALL_DONE) | `run_id`, `pipeline_name=INGEST` | - |
 
 **Orchestration model.** `T05`-`T09` are **bulk** shared metadata tasks: each
@@ -265,9 +265,9 @@ After Full Load initial state commit succeeds (`T13_Commit_Initial_State` / `NB1
 | `T21_Delta_Apply` | `shared/NB11b_DeltaSyncApply` | `run_id`, `connection_id`, `source_table_id`, `attempt_number`, `parent_run_id`, `recovery_action` |
 | `T22_Delta_Summary` | `shared/NB12_ValidationAndReconciliation` | `run_id`, `mode=delta` |
 | `T23_Get_Valid_Oracle_Connections` | `deployment/NB_GetConnectionWorklist` (depends_on: `T22_Delta_Summary`) | `run_id`, `source_system: oracle`, `connection_mode: VALID` |
-| `T24_ForEach_Refresh_Oracle_NB13` | `sources/oracle/NB13_SQLObjectAssessmentAndConversion` (For Each `{{tasks.T23_Get_Valid_Oracle_Connections.values.worklist}}`) | `run_id`, `connection_id: {{input.connection_id}}`, `mode: ASSESS`, `include_object_types: VIEW,PROCEDURE,FUNCTION,PACKAGE`, `use_ai: false` |
+| `T24_ForEach_Refresh_Oracle_NB13` | `sources/oracle/NB13_SQLObjectAssessmentAndConversion` (For Each `{{tasks.T23_Get_Valid_Oracle_Connections.values.worklist}}`) | `run_id`, `connection_id: {{input.connection_id}}`, `include_object_types: VIEW,PROCEDURE,FUNCTION,PACKAGE` |
 | `T25_Get_Valid_SQLServer_Connections` | `deployment/NB_GetConnectionWorklist` (depends_on: `T22_Delta_Summary`) | `run_id`, `source_system: sqlserver`, `connection_mode: VALID` |
-| `T26_ForEach_Refresh_SQLServer_NB13` | `sources/sqlserver/NB13_SQLObjectAssessmentAndConversion` (For Each `{{tasks.T25_Get_Valid_SQLServer_Connections.values.worklist}}`) | `run_id`, `connection_id: {{input.connection_id}}`, `mode: ASSESS`, `include_object_types: VIEW,PROCEDURE,FUNCTION`, `use_ai: false` |
+| `T26_ForEach_Refresh_SQLServer_NB13` | `sources/sqlserver/NB13_SQLObjectAssessmentAndConversion` (For Each `{{tasks.T25_Get_Valid_SQLServer_Connections.values.worklist}}`) | `run_id`, `connection_id: {{input.connection_id}}`, `include_object_types: VIEW,PROCEDURE,FUNCTION` |
 | `T27_Materialize_Source_Artifacts` | `shared/NB18_MaterializeSourceArtifacts` (depends_on: `T24_ForEach_Refresh_Oracle_NB13`, `T26_ForEach_Refresh_SQLServer_NB13`) | `run_id: {{tasks.T19_Create_Run_Context.values.run_id}}`, `connection_id: ""`, `only_source_system: ""`, `only_assessment_id: ""`, `volume_name: "_source_artifacts"`, `catalog: "da_accelerators"`, `control_schema: "control"` |
 | `T28_Notify_Delta_Failures` | `shared/NB16_NotifyFailures` (run_if: ALL_DONE) | `run_id`, `pipeline_name=INGEST_DELTA` |
 

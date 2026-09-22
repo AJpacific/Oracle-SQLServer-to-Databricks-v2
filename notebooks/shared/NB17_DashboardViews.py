@@ -68,10 +68,13 @@ latest_soa AS (
 ),
 soa AS (
   SELECT o.connection_id,
-    count(CASE WHEN o.complexity_category='AUTO_CONVERT' THEN 1 END) AS auto_convert,
-    count(CASE WHEN o.complexity_category='CONVERT_WITH_REVIEW' THEN 1 END) AS convert_with_review,
-    count(CASE WHEN o.complexity_category='MANUAL_REDESIGN' THEN 1 END) AS manual_redesign,
-    count(CASE WHEN o.complexity_category='UNABLE_TO_ASSESS' THEN 1 END) AS sql_object_unable
+    count(1) AS sql_objects_inventoried,
+    count(CASE WHEN o.source_definition IS NOT NULL
+                AND trim(o.source_definition) <> '' THEN 1 END)
+      AS sql_objects_with_definition,
+    count(CASE WHEN o.source_definition IS NULL
+                 OR trim(o.source_definition) = '' THEN 1 END)
+      AS sql_objects_without_definition
   FROM {ctrl('sql_object_assessment')} o
   JOIN latest_soa l
     ON o.connection_id = l.connection_id
@@ -80,10 +83,9 @@ soa AS (
 )
 SELECT sa.*, sc.connection_name, sc.connection_status, sc.is_active,
   sc.last_validated_ts,
-  coalesce(soa.auto_convert, 0) AS auto_convert,
-  coalesce(soa.convert_with_review, 0) AS convert_with_review,
-  coalesce(soa.manual_redesign, 0) AS manual_redesign,
-  coalesce(soa.sql_object_unable, 0) AS sql_object_unable
+  coalesce(soa.sql_objects_inventoried, 0) AS sql_objects_inventoried,
+  coalesce(soa.sql_objects_with_definition, 0) AS sql_objects_with_definition,
+  coalesce(soa.sql_objects_without_definition, 0) AS sql_objects_without_definition
 FROM sa
 LEFT JOIN soa ON sa.connection_id = soa.connection_id
 LEFT JOIN {ctrl('source_connection')} sc
