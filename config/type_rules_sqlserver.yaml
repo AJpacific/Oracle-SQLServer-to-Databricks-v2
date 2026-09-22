@@ -93,15 +93,15 @@ types:
 
   text:
     databricks_delta: STRING
-    status: REVIEW
-    fidelity: LOSSY
-    notes: "deprecated SQL Server text type; review before migrating"
+    status: AUTO
+    fidelity: EXACT
+    notes: "Deprecated SQL Server text mapped to Databricks STRING"
 
   ntext:
     databricks_delta: STRING
-    status: REVIEW
-    fidelity: LOSSY
-    notes: "deprecated SQL Server ntext type; review before migrating"
+    status: AUTO
+    fidelity: EXACT
+    notes: "Deprecated SQL Server ntext mapped to Databricks STRING with Unicode content preserved"
 
   # ---- binary ----
   binary:
@@ -177,10 +177,10 @@ types:
     notes: "timezone offset dropped when converted to Delta TIMESTAMP; confirm timezone-fidelity policy"
 
   time:
-    databricks_delta: STRING
+    databricks_delta: TIME(6)
     status: REVIEW
-    fidelity: LOSSY
-    notes: "no Delta time-of-day type; retained as STRING - confirm representation"
+    fidelity: UNKNOWN
+    notes: "Fallback mapping used only when SQL Server time precision is unavailable; precision-aware mapping is implemented in SqlServerTypeMapper._map_time"
 
   # ---- types requiring an explicit approved policy (never auto-STRING) ----
   sql_variant:

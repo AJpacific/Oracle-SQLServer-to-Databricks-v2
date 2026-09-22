@@ -107,5 +107,41 @@ class TestEtlReconciliation(unittest.TestCase):
             recon.reconcile_etl_interval(10, 8, 2, 7).status, recon.FAIL)
 
 
+class TestDatabricksTypeValidationAndDDL(unittest.TestCase):
+    def test_time_type_validation_accepted(self):
+        # Bare TIME is accepted
+        self.assertEqual(dq.normalize_cast_type("time"), "TIME")
+        self.assertEqual(dq.normalize_cast_type("TIME"), "TIME")
+        # TIME(0) through TIME(6) are accepted
+        for p in range(7):
+            self.assertEqual(dq.normalize_cast_type(f"TIME({p})"), f"TIME({p})")
+            self.assertEqual(dq.normalize_cast_type(f"time( {p} )"), f"TIME( {p} )".upper())
+
+    def test_time_type_validation_rejected(self):
+        # TIME(7) and invalid precisions must be rejected
+        for invalid_type in ("TIME(7)", "time(7)", "TIME(8)", "TIME(-1)", "TIME(bad)", "TIME()"):
+            with self.subTest(invalid_type=invalid_type):
+                with self.assertRaises(ValueError):
+                    dq.normalize_cast_type(invalid_type)
+
+    def test_ddl_build_create_table_preserves_time_precision(self):
+        import ddl_builder as ddl
+        stmt = ddl.build_create_table(
+            catalog="main",
+            schema="sales",
+            table="orders",
+            columns=[
+                ("order_time", "TIME(3)", True),
+                ("order_note", "STRING", True),
+                ("id", "INT", False),
+            ]
+        )
+        self.assertIn("`order_time` TIME(3)", stmt)
+        self.assertIn("`order_note` STRING", stmt)
+        self.assertIn("`id` INT NOT NULL", stmt)
+        self.assertIn("USING DELTA", stmt)
+
+
 if __name__ == "__main__":
     unittest.main()
+

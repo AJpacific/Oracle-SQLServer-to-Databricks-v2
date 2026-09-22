@@ -37,10 +37,11 @@ _REJECTING_SEVERITIES = {"ERROR", "REJECT", "BLOCK", "CRITICAL"}
 _SIMPLE_CAST_TYPES = {
     "STRING", "BOOLEAN", "BYTE", "TINYINT", "SHORT", "SMALLINT", "INT",
     "INTEGER", "LONG", "BIGINT", "FLOAT", "REAL", "DOUBLE", "DATE",
-    "TIMESTAMP", "TIMESTAMP_NTZ", "BINARY",
+    "TIMESTAMP", "TIMESTAMP_NTZ", "BINARY", "TIME",
 }
 _PARAMETRIC_CAST = re.compile(
     r"^(DECIMAL|NUMERIC)\s*\(\s*\d{1,2}\s*(,\s*\d{1,2}\s*)?\)$")
+_TIME_CAST = re.compile(r"^TIME\s*\(\s*[0-6]\s*\)$")
 
 
 def normalize_cast_type(rule_value):
@@ -48,7 +49,7 @@ def normalize_cast_type(rule_value):
     token = (rule_value or "").strip().upper()
     if not token:
         raise ValueError("DATA_TYPE requires a target type in rule_value")
-    if token in _SIMPLE_CAST_TYPES or _PARAMETRIC_CAST.match(token):
+    if token in _SIMPLE_CAST_TYPES or _PARAMETRIC_CAST.match(token) or _TIME_CAST.match(token):
         return token
     raise ValueError(f"unsupported DATA_TYPE target type: {rule_value!r}")
 

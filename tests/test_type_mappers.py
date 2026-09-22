@@ -118,8 +118,16 @@ class TestOracleMappingRegression(unittest.TestCase):
             (("CLOB", None, None), ("STRING", "AUTO", "WIDENED")),
             (("DATE", None, None), ("TIMESTAMP", "AUTO", "WIDENED")),
             (("TIMESTAMP(6)", None, None), ("TIMESTAMP", "AUTO", "EXACT")),
+            (("TIMESTAMP(3)", None, None), ("TIMESTAMP", "AUTO", "EXACT")),
+            (("TIMESTAMP(7)", None, None), ("TIMESTAMP", "REVIEW", "LOSSY")),
+            (("TIMESTAMP(9)", None, None), ("TIMESTAMP", "REVIEW", "LOSSY")),
             (("TIMESTAMP(6) WITH TIME ZONE", None, None),
              ("TIMESTAMP", "REVIEW", "LOSSY")),
+            (("TIMESTAMP(6) WITH LOCAL TIME ZONE", None, None),
+             ("TIMESTAMP", "REVIEW", "LOSSY")),
+            (("INTERVAL YEAR TO MONTH", None, None), ("STRING", "REVIEW", "LOSSY")),
+            (("INTERVAL DAY TO SECOND", None, None), ("STRING", "REVIEW", "LOSSY")),
+            (("LONG", None, None), ("STRING", "REVIEW", "LOSSY")),
             (("RAW", None, None), ("BINARY", "AUTO", "EXACT")),
             (("BFILE", None, None), ("STRING", "BLOCKED", "UNKNOWN")),
             (("BOOLEAN", None, None), ("BOOLEAN", "AUTO", "EXACT")),
@@ -133,6 +141,115 @@ class TestOracleMappingRegression(unittest.TestCase):
                 self.assertEqual(
                     _outcome(self.mapper.map_column(
                         args[0], precision=args[1], scale=args[2])), expected)
+
+    def test_oracle_date_mapping(self):
+        res_null = self.mapper.map_column("DATE", is_nullable=True)
+        self.assertEqual(_outcome(res_null), ("TIMESTAMP", "AUTO", "WIDENED"))
+        self.assertTrue(res_null.is_nullable)
+        self.assertIn("second precision", res_null.notes.lower())
+
+        res_not_null = self.mapper.map_column("date", is_nullable=False)
+        self.assertEqual(_outcome(res_not_null), ("TIMESTAMP", "AUTO", "WIDENED"))
+        self.assertFalse(res_not_null.is_nullable)
+
+    def test_timestamp_precision_mapping_regression(self):
+        # TIMESTAMP(0) through TIMESTAMP(6): AUTO, EXACT, TIMESTAMP
+        for p in range(7):
+            with self.subTest(precision=p):
+                res = self.mapper.map_column("TIMESTAMP", scale=p, is_nullable=True)
+                self.assertEqual(_outcome(res), ("TIMESTAMP", "AUTO", "EXACT"))
+                self.assertTrue(res.is_nullable)
+
+                res_not_null = self.mapper.map_column("TIMESTAMP", scale=p, is_nullable=False)
+                self.assertFalse(res_not_null.is_nullable)
+
+                # Form with embedded precision in type string
+                res_embedded = self.mapper.map_column(f"TIMESTAMP({p})")
+                self.assertEqual(_outcome(res_embedded), ("TIMESTAMP", "AUTO", "EXACT"))
+
+        # TIMESTAMP(7) through TIMESTAMP(9): REVIEW, LOSSY, TIMESTAMP
+        for p in (7, 8, 9):
+            with self.subTest(high_precision=p):
+                res_high = self.mapper.map_column("TIMESTAMP", scale=p)
+                self.assertEqual(_outcome(res_high), ("TIMESTAMP", "REVIEW", "LOSSY"))
+                self.assertIn("truncated", res_high.notes.lower())
+
+                res_emb_high = self.mapper.map_column(f"TIMESTAMP({p})")
+                self.assertEqual(_outcome(res_emb_high), ("TIMESTAMP", "REVIEW", "LOSSY"))
+
+        # missing precision: REVIEW, UNKNOWN, TIMESTAMP
+        res_none = self.mapper.map_column("TIMESTAMP", scale=None)
+        self.assertEqual(_outcome(res_none), ("TIMESTAMP", "REVIEW", "UNKNOWN"))
+        self.assertIn("unavailable", res_none.notes.lower())
+
+        # invalid / unsupported precision: BLOCKED, UNKNOWN, None
+        for bad in (-1, 10, 99, "bad"):
+            with self.subTest(bad=bad):
+                res_bad = self.mapper.map_column("TIMESTAMP", scale=bad)
+                self.assertEqual(_outcome(res_bad), (None, "BLOCKED", "UNKNOWN"))
+
+        # builtin fallback consistency when YAML is absent
+        builtin_mapper = OracleTypeMapper()
+        self.assertEqual(_outcome(builtin_mapper.map_column("TIMESTAMP", scale=6)),
+                         ("TIMESTAMP", "AUTO", "EXACT"))
+        self.assertEqual(_outcome(builtin_mapper.map_column("TIMESTAMP", scale=None)),
+                         ("TIMESTAMP", "REVIEW", "UNKNOWN"))
+        self.assertEqual(_outcome(builtin_mapper.map_column("DATE")),
+                         ("TIMESTAMP", "AUTO", "WIDENED"))
+        self.assertEqual(_outcome(builtin_mapper.map_column("LONG")),
+                         ("STRING", "REVIEW", "LOSSY"))
+        self.assertEqual(_outcome(builtin_mapper.map_column("INTERVAL YEAR TO MONTH")),
+                         ("STRING", "REVIEW", "LOSSY"))
+
+    def test_oracle_does_not_define_standalone_time_rule(self):
+        yaml_rules = _yaml_types(ORACLE_RULES)
+        self.assertNotIn("time", yaml_rules)
+        res = self.mapper.map_column("time")
+        self.assertEqual(res.status, "BLOCKED")
+        self.assertIsNone(res.databricks_delta_type)
+
+    def test_oracle_timestamp_metadata_pipeline_integration(self):
+        import inventory_common as inv
+        adapter = get_source_adapter("oracle")
+        # Simulating row from Oracle columns_metadata_query
+        raw_metadata_col = {
+            "COLUMN_NAME": "CREATED_TS",
+            "ORDINAL_POSITION": 3,
+            "IS_NULLABLE": "YES",
+            "DATA_TYPE": "TIMESTAMP(6)",
+            "CHARACTER_MAXIMUM_LENGTH": None,
+            "NUMERIC_PRECISION": None,
+            "NUMERIC_SCALE": 6,
+            "DATETIME_PRECISION": 6,
+        }
+        identity = {
+            "run_id": "r1", "source_table_id": "conn1__hr__emp", "connection_id": "conn1",
+            "source_system": "oracle", "source_server": "srv", "source_database": "xe",
+            "source_schema": "hr", "source_table": "emp"
+        }
+        inv_row = inv.normalize_inventory_row(raw_metadata_col, identity)
+        inv_dict = dict(zip(inv.INVENTORY_FIELDS, inv_row))
+        # Confirm numeric_scale carries data_scale 6
+        self.assertEqual(inv_dict["numeric_scale"], 6)
+
+        # Simulate NB03 mapping generation:
+        mapping_res = adapter.load_type_mapper().map_column(
+            source_type=inv_dict["data_type"],
+            precision=inv_dict["numeric_precision"],
+            scale=inv_dict["numeric_scale"],
+            length=inv_dict["character_maximum_length"],
+            is_nullable=(inv_dict["is_nullable"] == "YES"),
+        )
+        self.assertEqual(mapping_res.databricks_delta_type, "TIMESTAMP")
+        self.assertEqual(mapping_res.status, "AUTO")
+        self.assertEqual(mapping_res.fidelity, "EXACT")
+
+        # Apply column policy:
+        policy = adapter.apply_column_policy(inv_dict, mapping_res)
+        self.assertTrue(policy.include_column)
+        self.assertTrue(policy.is_writable)
+        self.assertFalse(policy.requires_review)
+        self.assertEqual(policy.mapping_status, "AUTO")
 
     def test_number_precision_scale_regression(self):
         cases = (
@@ -155,6 +272,13 @@ class TestOracleMappingRegression(unittest.TestCase):
     def test_every_yaml_rule_outcome_and_notes(self):
         for source_type, rule in _yaml_types(ORACLE_RULES).items():
             if source_type.lower() == "number":
+                continue
+            if source_type.lower() == "timestamp":
+                # Fallback rule validation:
+                result = self.mapper.map_column(source_type)
+                self.assertEqual(result.databricks_delta_type, "TIMESTAMP")
+                self.assertEqual(result.status, "REVIEW")
+                self.assertEqual(result.fidelity, "UNKNOWN")
                 continue
             with self.subTest(source_type=source_type):
                 result = self.mapper.map_column(source_type)
@@ -179,6 +303,8 @@ class TestSqlServerMappingRegression(unittest.TestCase):
             ("money", ("DECIMAL(19,4)", "AUTO", "EXACT")),
             ("smallmoney", ("DECIMAL(10,4)", "AUTO", "EXACT")),
             ("varchar(max)", ("STRING", "AUTO", "EXACT")),
+            ("text", ("STRING", "AUTO", "EXACT")),
+            ("ntext", ("STRING", "AUTO", "EXACT")),
             ("datetime2(7)", ("TIMESTAMP", "AUTO", "LOSSY")),
             ("timestamp", ("BINARY", "AUTO", "EXACT")),
             ("rowversion", ("BINARY", "AUTO", "EXACT")),
@@ -191,6 +317,44 @@ class TestSqlServerMappingRegression(unittest.TestCase):
             with self.subTest(source_type=source_type):
                 self.assertEqual(
                     _outcome(self.mapper.map_column(source_type)), expected)
+
+    def test_time_precision_mapping_regression(self):
+        # time(0) through time(6): AUTO, EXACT, TIME(p)
+        for p in range(7):
+            with self.subTest(precision=p):
+                res = self.mapper.map_column("time", scale=p, is_nullable=True)
+                self.assertEqual(_outcome(res), (f"TIME({p})", "AUTO", "EXACT"))
+                self.assertTrue(res.is_nullable)
+
+                res_not_null = self.mapper.map_column("time", scale=p, is_nullable=False)
+                self.assertFalse(res_not_null.is_nullable)
+
+        # time(7): REVIEW, LOSSY, TIME(6), explains 7th digit truncation
+        res7 = self.mapper.map_column("time", scale=7)
+        self.assertEqual(_outcome(res7), ("TIME(6)", "REVIEW", "LOSSY"))
+        self.assertIn("seventh", res7.notes.lower())
+
+        # missing scale: REVIEW, UNKNOWN, TIME(6), explains precision unavailable
+        res_none = self.mapper.map_column("time", scale=None)
+        self.assertEqual(_outcome(res_none), ("TIME(6)", "REVIEW", "UNKNOWN"))
+        self.assertIn("unavailable", res_none.notes.lower())
+
+        # invalid / unsupported scale: BLOCKED, UNKNOWN, None
+        for bad_scale in (-1, 8, 99, "bad"):
+            with self.subTest(bad_scale=bad_scale):
+                res_bad = self.mapper.map_column("time", scale=bad_scale)
+                self.assertEqual(_outcome(res_bad), (None, "BLOCKED", "UNKNOWN"))
+
+        # builtin rules fallback consistency when YAML is absent
+        builtin_mapper = SqlServerTypeMapper()
+        self.assertEqual(_outcome(builtin_mapper.map_column("time", scale=3)),
+                         ("TIME(3)", "AUTO", "EXACT"))
+        self.assertEqual(_outcome(builtin_mapper.map_column("time", scale=None)),
+                         ("TIME(6)", "REVIEW", "UNKNOWN"))
+        self.assertEqual(_outcome(builtin_mapper.map_column("text")),
+                         ("STRING", "AUTO", "EXACT"))
+        self.assertEqual(_outcome(builtin_mapper.map_column("ntext")),
+                         ("STRING", "AUTO", "EXACT"))
 
     def test_decimal_precision_scale_regression(self):
         cases = (
@@ -209,6 +373,13 @@ class TestSqlServerMappingRegression(unittest.TestCase):
 
     def test_every_yaml_rule_outcome_and_notes(self):
         for source_type, rule in _yaml_types(SQLSERVER_RULES).items():
+            if source_type.lower() == "time":
+                # time precision-aware dispatch takes precedence over generic YAML notes
+                result = self.mapper.map_column(source_type)
+                self.assertEqual(result.databricks_delta_type, "TIME(6)")
+                self.assertEqual(result.status, "REVIEW")
+                self.assertEqual(result.fidelity, "UNKNOWN")
+                continue
             with self.subTest(source_type=source_type):
                 result = self.mapper.map_column(source_type)
                 self.assertEqual(result.databricks_delta_type,
@@ -216,6 +387,51 @@ class TestSqlServerMappingRegression(unittest.TestCase):
                 self.assertEqual(result.status, rule["status"])
                 self.assertEqual(result.fidelity, rule["fidelity"])
                 self.assertEqual(result.notes, rule.get("notes") or "")
+
+    def test_time_precision_metadata_pipeline_integration(self):
+        import inventory_common as inv
+        adapter = get_source_adapter("sqlserver", source_database="TestDb")
+        raw_metadata_col = {
+            "COLUMN_NAME": "event_time",
+            "ORDINAL_POSITION": 2,
+            "IS_NULLABLE": "YES",
+            "DATA_TYPE": "time",
+            "CHARACTER_MAXIMUM_LENGTH": None,
+            "NUMERIC_PRECISION": 16,
+            "NUMERIC_SCALE": 3,
+            "DATETIME_PRECISION": 3,
+            "IS_IDENTITY": 0,
+            "IS_COMPUTED": 0,
+            "IS_HIDDEN": 0,
+            "IS_ROWVERSION": 0,
+            "SOURCE_TYPE_SCHEMA": "sys",
+        }
+        identity = {
+            "run_id": "r1", "source_table_id": "conn1__dbo__events", "connection_id": "conn1",
+            "source_system": "sqlserver", "source_server": "srv", "source_database": "TestDb",
+            "source_schema": "dbo", "source_table": "events"
+        }
+        inv_row = inv.normalize_inventory_row(raw_metadata_col, identity)
+        inv_dict = dict(zip(inv.INVENTORY_FIELDS, inv_row))
+        # Confirm numeric_scale carries the scale 3
+        self.assertEqual(inv_dict["numeric_scale"], 3)
+        # Simulate NB03 mapping generation:
+        mapping_res = adapter.load_type_mapper().map_column(
+            source_type=inv_dict["data_type"],
+            precision=inv_dict["numeric_precision"],
+            scale=inv_dict["numeric_scale"],
+            length=inv_dict["character_maximum_length"],
+            is_nullable=(inv_dict["is_nullable"] == "YES"),
+        )
+        self.assertEqual(mapping_res.databricks_delta_type, "TIME(3)")
+        self.assertEqual(mapping_res.status, "AUTO")
+        self.assertEqual(mapping_res.fidelity, "EXACT")
+        # Apply column policy
+        policy = adapter.apply_column_policy(inv_dict, mapping_res)
+        self.assertTrue(policy.include_column)
+        self.assertTrue(policy.is_writable)
+        self.assertFalse(policy.requires_review)
+        self.assertEqual(policy.mapping_status, "AUTO")
 
 
 class TestYamlValidation(unittest.TestCase):

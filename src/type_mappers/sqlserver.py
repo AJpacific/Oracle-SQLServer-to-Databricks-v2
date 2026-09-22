@@ -46,10 +46,10 @@ _BUILTIN_RULES = {
     "varchar": ("STRING", AUTO, EXACT, ""),
     "nchar": ("STRING", AUTO, EXACT, ""),
     "nvarchar": ("STRING", AUTO, EXACT, ""),
-    "text": ("STRING", REVIEW, LOSSY,
-             "deprecated SQL Server text type; review before migrating"),
-    "ntext": ("STRING", REVIEW, LOSSY,
-              "deprecated SQL Server ntext type; review before migrating"),
+    "text": ("STRING", AUTO, EXACT,
+             "Deprecated SQL Server text mapped to Databricks STRING"),
+    "ntext": ("STRING", AUTO, EXACT,
+              "Deprecated SQL Server ntext mapped to Databricks STRING with Unicode content preserved"),
     "binary": ("BINARY", AUTO, EXACT, ""),
     "varbinary": ("BINARY", AUTO, EXACT, ""),
     "image": ("BINARY", REVIEW, LOSSY,
@@ -74,8 +74,8 @@ _BUILTIN_RULES = {
                   "a datetime2(7) source loses the seventh digit"),
     "datetimeoffset": ("TIMESTAMP", REVIEW, LOSSY,
                        "timezone offset dropped when converted to Delta TIMESTAMP; confirm policy"),
-    "time": ("STRING", REVIEW, LOSSY,
-             "no Delta time-of-day type; retained as STRING - confirm representation"),
+    "time": ("TIME(6)", REVIEW, UNKNOWN,
+             "Fallback mapping used only when SQL Server time precision is unavailable; precision-aware mapping is implemented in SqlServerTypeMapper._map_time"),
     "sql_variant": (None, BLOCKED, UNKNOWN,
                     "sql_variant stores heterogeneous types; cannot be safely auto-mapped"),
     "hierarchyid": (None, BLOCKED, UNKNOWN,
@@ -116,6 +116,12 @@ class SqlServerTypeMapper(SourceTypeMapper):
         if family in ("decimal", "numeric"):
             return self._map_decimal(
                 source_type, precision, scale, is_nullable)
+        if family == "time":
+            return self._map_time(
+                source_type,
+                scale,
+                is_nullable,
+            )
 
         rule = self._lookup(family)
         if rule is None:
@@ -130,6 +136,71 @@ class SqlServerTypeMapper(SourceTypeMapper):
             source_type=source_type or "", databricks_delta_type=datatype,
             status=status, fidelity=fidelity, notes=notes,
             is_nullable=bool(is_nullable))
+
+    def _map_time(self, source_type, scale, is_nullable):
+        try:
+            if scale is None:
+                return ColumnMappingResult(
+                    source_type=source_type or "time",
+                    databricks_delta_type="TIME(6)",
+                    status=REVIEW,
+                    fidelity=UNKNOWN,
+                    notes=(
+                        "SQL Server time precision is unavailable; "
+                        "mapped to Databricks TIME(6) for manual review"
+                    ),
+                    is_nullable=bool(is_nullable),
+                )
+
+            time_precision = int(scale)
+        except (TypeError, ValueError):
+            return ColumnMappingResult(
+                source_type=source_type or "time",
+                databricks_delta_type=None,
+                status=BLOCKED,
+                fidelity=UNKNOWN,
+                notes=(
+                    f"Invalid SQL Server time precision: {scale!r}"
+                ),
+                is_nullable=bool(is_nullable),
+            )
+
+        if 0 <= time_precision <= 6:
+            return ColumnMappingResult(
+                source_type=source_type or "time",
+                databricks_delta_type=f"TIME({time_precision})",
+                status=AUTO,
+                fidelity=EXACT,
+                notes=(
+                    f"SQL Server time({time_precision}) mapped to "
+                    f"Databricks TIME({time_precision})"
+                ),
+                is_nullable=bool(is_nullable),
+            )
+
+        if time_precision == 7:
+            return ColumnMappingResult(
+                source_type=source_type or "time",
+                databricks_delta_type="TIME(6)",
+                status=REVIEW,
+                fidelity=LOSSY,
+                notes=(
+                    "SQL Server time(7) mapped to Databricks TIME(6); "
+                    "the seventh fractional-second digit is truncated"
+                ),
+                is_nullable=bool(is_nullable),
+            )
+
+        return ColumnMappingResult(
+            source_type=source_type or "time",
+            databricks_delta_type=None,
+            status=BLOCKED,
+            fidelity=UNKNOWN,
+            notes=(
+                f"Unsupported SQL Server time precision: {time_precision}"
+            ),
+            is_nullable=bool(is_nullable),
+        )
 
     def _map_decimal(self, source_type, precision, scale, is_nullable):
         precision_value = precision if precision is not None else 18

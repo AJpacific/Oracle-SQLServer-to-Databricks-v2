@@ -41,22 +41,23 @@ _BUILTIN_RULES = {
     "NCLOB": ("STRING", AUTO, WIDENED,
               "NCLOB materialized as Delta STRING; validate Unicode round-trip, JDBC LOB handling, payload size"),
     "LONG": ("STRING", REVIEW, LOSSY,
-             "deprecated LONG type; only one per table, review before migrating"),
+             "Deprecated Oracle LONG type; manual review required because extraction and size restrictions differ from standard character types"),
     "BINARY_FLOAT": ("FLOAT", AUTO, EXACT, ""),
     "BINARY_DOUBLE": ("DOUBLE", AUTO, EXACT, ""),
     "FLOAT": ("DOUBLE", AUTO, WIDENED,
               "Oracle FLOAT is binary-precision NUMBER; widened to DOUBLE"),
     "DATE": ("TIMESTAMP", AUTO, WIDENED,
-             "Oracle DATE carries a time component; mapped to Delta TIMESTAMP"),
-    "TIMESTAMP": ("TIMESTAMP", AUTO, EXACT, ""),
+             "Oracle DATE stores date and time to second precision; mapped to Databricks TIMESTAMP"),
+    "TIMESTAMP": ("TIMESTAMP", REVIEW, UNKNOWN,
+                  "Fallback mapping used when Oracle TIMESTAMP fractional-second precision is unavailable; precision-aware mapping is implemented in OracleTypeMapper"),
     "TIMESTAMP WITH TIME ZONE": ("TIMESTAMP", REVIEW, LOSSY,
-                                 "timezone offset dropped when converted to Delta TIMESTAMP; confirm policy"),
+                                 "Oracle TIMESTAMP WITH TIME ZONE contains timezone or region semantics that are not fully preserved by Databricks TIMESTAMP; explicit normalization policy required"),
     "TIMESTAMP WITH LOCAL TIME ZONE": ("TIMESTAMP", REVIEW, LOSSY,
-                                       "session-local timezone semantics lost; confirm policy"),
+                                       "Oracle TIMESTAMP WITH LOCAL TIME ZONE uses database and session timezone semantics; explicit normalization policy required before automated migration"),
     "INTERVAL YEAR TO MONTH": ("STRING", REVIEW, LOSSY,
-                               "no Delta interval type; retained as STRING"),
+                               "Oracle INTERVAL YEAR TO MONTH retained as STRING pending an approved native interval round-trip policy"),
     "INTERVAL DAY TO SECOND": ("STRING", REVIEW, LOSSY,
-                               "no Delta interval type; retained as STRING"),
+                               "Oracle INTERVAL DAY TO SECOND retained as STRING pending an approved native interval round-trip policy"),
     "RAW": ("BINARY", AUTO, EXACT, ""),
     "LONG RAW": ("BINARY", REVIEW, LOSSY,
                  "deprecated LONG RAW; review before migrating"),
@@ -109,6 +110,14 @@ class OracleTypeMapper(SourceTypeMapper):
         if family == "NUMBER":
             return self._map_number(
                 source_type, precision, scale, is_nullable)
+        if family == "TIMESTAMP":
+            effective_precision = scale
+            if effective_precision is None and source_type:
+                m = re.search(r"\((.*?)\)", source_type)
+                if m:
+                    effective_precision = m.group(1).strip()
+            return self._map_timestamp(
+                source_type, effective_precision, is_nullable)
 
         rule = self._lookup(family)
         if rule is None:
@@ -123,6 +132,73 @@ class OracleTypeMapper(SourceTypeMapper):
             source_type=source_type or "", databricks_delta_type=datatype,
             status=status, fidelity=fidelity, notes=notes,
             is_nullable=bool(is_nullable))
+
+    def _map_timestamp(self, source_type, fractional_precision, is_nullable):
+        if fractional_precision is None:
+            return ColumnMappingResult(
+                source_type=source_type or "TIMESTAMP",
+                databricks_delta_type="TIMESTAMP",
+                status=REVIEW,
+                fidelity=UNKNOWN,
+                notes=(
+                    "Oracle TIMESTAMP fractional-second precision is unavailable; "
+                    "manual review is required"
+                ),
+                is_nullable=bool(is_nullable),
+            )
+
+        try:
+            precision_value = int(fractional_precision)
+        except (TypeError, ValueError):
+            return ColumnMappingResult(
+                source_type=source_type or "TIMESTAMP",
+                databricks_delta_type=None,
+                status=BLOCKED,
+                fidelity=UNKNOWN,
+                notes=(
+                    f"Invalid Oracle TIMESTAMP fractional-second precision: "
+                    f"{fractional_precision!r}"
+                ),
+                is_nullable=bool(is_nullable),
+            )
+
+        if 0 <= precision_value <= 6:
+            return ColumnMappingResult(
+                source_type=source_type or "TIMESTAMP",
+                databricks_delta_type="TIMESTAMP",
+                status=AUTO,
+                fidelity=EXACT,
+                notes=(
+                    f"Oracle TIMESTAMP({precision_value}) mapped to "
+                    "Databricks TIMESTAMP with compatible fractional precision"
+                ),
+                is_nullable=bool(is_nullable),
+            )
+
+        if 7 <= precision_value <= 9:
+            return ColumnMappingResult(
+                source_type=source_type or "TIMESTAMP",
+                databricks_delta_type="TIMESTAMP",
+                status=REVIEW,
+                fidelity=LOSSY,
+                notes=(
+                    f"Oracle TIMESTAMP({precision_value}) mapped to Databricks "
+                    "TIMESTAMP; fractional precision above 6 may be truncated"
+                ),
+                is_nullable=bool(is_nullable),
+            )
+
+        return ColumnMappingResult(
+            source_type=source_type or "TIMESTAMP",
+            databricks_delta_type=None,
+            status=BLOCKED,
+            fidelity=UNKNOWN,
+            notes=(
+                f"Unsupported Oracle TIMESTAMP fractional-second precision: "
+                f"{precision_value}"
+            ),
+            is_nullable=bool(is_nullable),
+        )
 
     def _map_number(self, source_type, precision, scale, is_nullable):
         precision_value = precision

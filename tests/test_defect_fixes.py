@@ -223,13 +223,15 @@ class TestRuleValidationHardening(unittest.TestCase):
                          available_columns=self.COLS)
 
     def test_invalid_data_type_target_fails(self):
-        with self.assertRaises(ValueError):
-            dq.validate_rule({"rule_type": "DATA_TYPE", "column_name": "id",
-                              "rule_value": "SELECT 1"},
-                             available_columns=self.COLS)
+        for bad in ("SELECT 1", "TIME(7)", "TIME(8)"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    dq.validate_rule({"rule_type": "DATA_TYPE", "column_name": "id",
+                                      "rule_value": bad},
+                                     available_columns=self.COLS)
 
     def test_valid_data_type_targets(self):
-        for t in ("INT", "timestamp", "DECIMAL(10,2)", "string"):
+        for t in ("INT", "timestamp", "DECIMAL(10,2)", "string", "TIME", "TIME(0)", "TIME(3)", "TIME(6)"):
             dq.validate_rule({"rule_type": "DATA_TYPE", "column_name": "id",
                               "rule_value": t}, available_columns=self.COLS)
 

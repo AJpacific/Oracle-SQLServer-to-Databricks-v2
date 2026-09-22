@@ -82,44 +82,44 @@ types:
     databricks_delta: STRING
     status: REVIEW
     fidelity: LOSSY
-    notes: "deprecated LONG type (one per table); review before migrating"
+    notes: "Deprecated Oracle LONG type; manual review required because extraction and size restrictions differ from standard character types"
 
   # ---- datetime ----
   date:
     databricks_delta: TIMESTAMP
     status: AUTO
     fidelity: WIDENED
-    notes: "Oracle DATE carries a time component; mapped to Delta TIMESTAMP"
+    notes: "Oracle DATE stores date and time to second precision; mapped to Databricks TIMESTAMP"
 
   timestamp:
     databricks_delta: TIMESTAMP
-    status: AUTO
-    fidelity: EXACT
-    notes: "verify fractional-seconds precision against Delta TIMESTAMP (micros)"
+    status: REVIEW
+    fidelity: UNKNOWN
+    notes: "Fallback mapping used when Oracle TIMESTAMP fractional-second precision is unavailable; precision-aware mapping is implemented in OracleTypeMapper"
 
   timestamp with time zone:
     databricks_delta: TIMESTAMP
     status: REVIEW
     fidelity: LOSSY
-    notes: "timezone offset dropped when converted to Delta TIMESTAMP; confirm policy"
+    notes: "Oracle TIMESTAMP WITH TIME ZONE contains timezone or region semantics that are not fully preserved by Databricks TIMESTAMP; explicit normalization policy required"
 
   timestamp with local time zone:
     databricks_delta: TIMESTAMP
     status: REVIEW
     fidelity: LOSSY
-    notes: "session-local timezone semantics lost; confirm policy"
+    notes: "Oracle TIMESTAMP WITH LOCAL TIME ZONE uses database and session timezone semantics; explicit normalization policy required before automated migration"
 
   interval year to month:
     databricks_delta: STRING
     status: REVIEW
     fidelity: LOSSY
-    notes: "no Delta interval type; retained as STRING"
+    notes: "Oracle INTERVAL YEAR TO MONTH retained as STRING pending an approved native interval round-trip policy"
 
   interval day to second:
     databricks_delta: STRING
     status: REVIEW
     fidelity: LOSSY
-    notes: "no Delta interval type; retained as STRING"
+    notes: "Oracle INTERVAL DAY TO SECOND retained as STRING pending an approved native interval round-trip policy"
 
   # ---- binary ----
   raw:
