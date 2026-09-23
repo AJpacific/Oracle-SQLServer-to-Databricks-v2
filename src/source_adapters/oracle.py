@@ -69,6 +69,12 @@ class OracleSourceAdapter(SourceAdapter):
     def primary_key_query(self, source_database, source_schema, source_table):
         return sqlb.primary_key_query(source_schema, source_table)
 
+    def batch_columns_metadata_query(self, source_database, tables: list):
+        return sqlb.batch_columns_metadata_query(tables)
+
+    def batch_primary_key_query(self, source_database, tables: list):
+        return sqlb.batch_primary_key_query(tables)
+
     def top_n_probe_query(self, source_database, source_schema, source_table, n):
         return sqlb.build_top_n_probe(source_schema, source_table, n)
 

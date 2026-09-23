@@ -12,7 +12,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(os.path.dirname(HERE), "src")
-for p in (SRC, os.path.dirname(HERE)):
+for p in (SRC, HERE, os.path.dirname(HERE)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
@@ -31,56 +31,122 @@ from _fakes import FakeSpark, FakeRow  # noqa: E402
 class TestConnectionInput(unittest.TestCase):
     def _base(self, **over):
         d = {
-            "connection_id": "oracle_1",
-            "connection_name": "Oracle One",
+            "connection_id": "c1",
+            "connection_name": "Connection One",
             "source_system": "oracle",
-            "secret_scope": "oracle-source-1",
+            "source_database": "ORCL",
+            "secret_scope": "scope-1",
         }
         d.update(over)
         return d
 
-    def test_valid_oracle_input_normalizes(self):
-        out = normalize_connection_input(self._base())
+    def test_sqlserver_populated_database(self):
+        # A. SQL Server populated database: accepted, source_database remains BI_HomeCredit
+        out = normalize_connection_input(self._base(
+            connection_id="ss_1",
+            source_system="sqlserver",
+            source_database="BI_HomeCredit",
+            secret_scope="ss-1",
+        ))
+        self.assertEqual(out["source_system"], "sqlserver")
+        self.assertEqual(out["source_database"], "BI_HomeCredit")
+
+    def test_sqlserver_null_database(self):
+        # B. SQL Server NULL database: accepted as discovery mode, source_database is None
+        out = normalize_connection_input(self._base(
+            connection_id="ss_1",
+            source_system="sqlserver",
+            source_database=None,
+            secret_scope="ss-1",
+        ))
+        self.assertEqual(out["source_system"], "sqlserver")
+        self.assertIsNone(out["source_database"])
+
+    def test_sqlserver_empty_database(self):
+        # C. SQL Server empty database: accepted as discovery mode
+        out = normalize_connection_input(self._base(
+            connection_id="ss_1",
+            source_system="sqlserver",
+            source_database="",
+            secret_scope="ss-1",
+        ))
+        self.assertEqual(out["source_system"], "sqlserver")
+        self.assertIsNone(out["source_database"])
+
+    def test_sqlserver_whitespace_database(self):
+        # D. SQL Server whitespace database: accepted as discovery mode after normalization
+        out = normalize_connection_input(self._base(
+            connection_id="ss_1",
+            source_system="sqlserver",
+            source_database="   ",
+            secret_scope="ss-1",
+        ))
+        self.assertEqual(out["source_system"], "sqlserver")
+        self.assertIsNone(out["source_database"])
+
+    def test_sqlserver_blank_database_not_persisted_as_master(self):
+        # Blank SQL Server connection must never be converted to master
+        for blank_db in (None, "", "   "):
+            with self.subTest(blank_db=blank_db):
+                out = normalize_connection_input(self._base(
+                    connection_id="ss_1",
+                    source_system="sqlserver",
+                    source_database=blank_db,
+                    secret_scope="ss-1",
+                ))
+                self.assertNotEqual(out.get("source_database"), "master")
+                self.assertIsNone(out.get("source_database"))
+
+    def test_oracle_populated_database(self):
+        # E. Oracle populated database/service: accepted
+        out = normalize_connection_input(self._base(
+            connection_id="ora_1",
+            source_system="oracle",
+            source_database="ORCL",
+        ))
         self.assertEqual(out["source_system"], "oracle")
+        self.assertEqual(out["source_database"], "ORCL")
         self.assertFalse(out["trust_server_certificate"])
 
-    def test_sqlserver_connection_scope(self):
-        # Blank source_database is valid for multi-database discovery parent connection
-        out_blank = normalize_connection_input(self._base(
-            connection_id="ss_1", source_system="sqlserver",
-            secret_scope="ss-1"))
-        self.assertEqual(out_blank["source_system"], "sqlserver")
-        self.assertIsNone(out_blank.get("source_database"))
-
-        # Populated source_database is valid for single-database connection scope
-        out_pop = normalize_connection_input(self._base(
-            connection_id="ss_1", source_system="mssql", secret_scope="ss-1",
-            source_database="SourceDb"))
-        self.assertEqual(out_pop["source_system"], "sqlserver")
-        self.assertEqual(out_pop["source_database"], "SourceDb")
+    def test_oracle_missing_database_fails(self):
+        # F. Oracle missing database/service (None, "", "   "): rejected with clear validation error
+        for missing in (None, "", "   "):
+            with self.subTest(missing=missing), self.assertRaises(ValueError) as ctx:
+                normalize_connection_input(self._base(
+                    source_system="oracle",
+                    source_database=missing,
+                ))
+            self.assertIn("oracle connections require source_database", str(ctx.exception))
 
     def test_invalid_source_system_fails(self):
+        # G. Unsupported source system
         with self.assertRaises(ValueError):
             normalize_connection_input(self._base(source_system="db2"))
 
     def test_missing_source_system_fails(self):
+        # G. Missing source system
         for missing in (None, "", "   "):
             with self.subTest(missing=missing), self.assertRaises(ValueError):
                 normalize_connection_input(self._base(source_system=missing))
 
     def test_missing_required_fields_fail(self):
+        # H. Other required connection fields
         with self.assertRaises(ValueError):
             normalize_connection_input(self._base(connection_id=""))
+        with self.assertRaises(ValueError):
+            normalize_connection_input(self._base(connection_name=""))
         with self.assertRaises(ValueError):
             normalize_connection_input(self._base(secret_scope=""))
 
     def test_trust_default_false(self):
+        # H. Trust server certificate default and explicit setting
         self.assertFalse(
             normalize_connection_input(self._base())["trust_server_certificate"])
         self.assertTrue(normalize_connection_input(
             self._base(trust_server_certificate=True))["trust_server_certificate"])
 
     def test_require_connection_id_trims_and_rejects_blank(self):
+        # H. require_connection_id validation
         self.assertEqual(require_connection_id("  c1  "), "c1")
         for value in (None, "", "  "):
             with self.subTest(value=value), self.assertRaises(ValueError):

@@ -146,6 +146,14 @@ class SourceAdapter(ABC):
     def primary_key_query(self, source_database, source_schema, source_table):
         ...
 
+    def batch_columns_metadata_query(self, source_database, tables: list):
+        """Return a batch column metadata query for multiple candidate tables in a database."""
+        raise NotImplementedError("Batch column metadata query is not implemented for this adapter")
+
+    def batch_primary_key_query(self, source_database, tables: list):
+        """Return a batch primary key metadata query for multiple candidate tables in a database."""
+        raise NotImplementedError("Batch primary key query is not implemented for this adapter")
+
     @abstractmethod
     def top_n_probe_query(self, source_database, source_schema, source_table, n):
         ...

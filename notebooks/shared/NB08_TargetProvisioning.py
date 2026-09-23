@@ -28,16 +28,28 @@ def ctrl(t):
 # Onboarding is scoped to exactly one connection. Collision detection remains
 # global across all active registrations.
 # Equivalent to: repo.active_tables_for_connection(connection_id, decision="AUTO_MIGRATE", include_onboarding=True)
-auto = spark.sql(f"""
-    SELECT *
-    FROM {ctrl('source_table_control')}
-    WHERE connection_id = {escape_string_literal(connection_id)}
-      AND upper(trim(coalesce(table_decision, ''))) = 'AUTO_MIGRATE'
-      AND upper(trim(coalesce(current_status, ''))) IN (
-          'READY_FOR_PROVISIONING',
-          'PROVISION_FAILED'
-      )
-""").collect()
+candidates = None
+if run_id:
+    candidates = repo.registered_tables_for_onboarding_run(connection_id, run_id).collect()
+    auto = [
+        r for r in candidates
+        if (r["table_decision"] or "").strip().upper() == "AUTO_MIGRATE"
+        and (r["current_status"] or "").strip().upper() in (
+            "READY_FOR_PROVISIONING",
+            "PROVISION_FAILED",
+        )
+    ]
+else:
+    auto = spark.sql(f"""
+        SELECT *
+        FROM {ctrl('source_table_control')}
+        WHERE connection_id = {escape_string_literal(connection_id)}
+          AND upper(trim(coalesce(table_decision, ''))) = 'AUTO_MIGRATE'
+          AND upper(trim(coalesce(current_status, ''))) IN (
+              'READY_FOR_PROVISIONING',
+              'PROVISION_FAILED'
+          )
+    """).collect()
 
 print("AUTO_MIGRATE tables to provision:", len(auto))
 
@@ -183,6 +195,41 @@ if failed > 0:
     )
 
 if len(auto) == 0:
+    if run_id and candidates is not None:
+        if len(candidates) == 0:
+            raise RuntimeError(
+                f"Scope mismatch: no registered tables found for connection {connection_id} and run {run_id}."
+            )
+        all_auto = [
+            r for r in candidates
+            if (r["table_decision"] or "").strip().upper() == "AUTO_MIGRATE"
+        ]
+        if not all_auto:
+            print("No AUTO_MIGRATE tables registered for this run (all MANUAL_REVIEW/BLOCKED).")
+            dbutils.notebook.exit(json.dumps({
+                "status": "SUCCEEDED",
+                "business_status": "NO_AUTO_MIGRATE_CANDIDATES",
+                "run_id": run_id,
+                "connection_id": connection_id,
+                "provisioning_candidates": 0,
+                "provisioned": 0,
+                "failed": 0,
+            }))
+        already_provisioned = [
+            r for r in all_auto
+            if (r["current_status"] or "").strip().upper() == "PROVISIONED"
+        ]
+        if len(already_provisioned) == len(all_auto):
+            print(f"All {len(all_auto)} AUTO_MIGRATE tables are already PROVISIONED.")
+            dbutils.notebook.exit(json.dumps({
+                "status": "SUCCEEDED",
+                "business_status": "ALREADY_PROVISIONED",
+                "run_id": run_id,
+                "connection_id": connection_id,
+                "provisioning_candidates": len(all_auto),
+                "provisioned": len(already_provisioned),
+                "failed": 0,
+            }))
     raise RuntimeError(
         "No AUTO_MIGRATE tables found in READY_FOR_PROVISIONING or "
         "PROVISION_FAILED state. Provisioning cannot report success."
@@ -190,6 +237,7 @@ if len(auto) == 0:
 
 dbutils.notebook.exit(json.dumps({
     "status": "SUCCEEDED",
+    "business_status": "COMPLETE",
     "run_id": run_id,
     "connection_id": connection_id,
     "provisioning_candidates": len(auto),

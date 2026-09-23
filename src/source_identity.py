@@ -45,7 +45,7 @@ SQLSERVER = "sqlserver"
 
 # Sources whose connection identity is incomplete without an explicit database.
 # SQL Server permits blank source_database for database-discovery parent connections.
-SOURCES_REQUIRING_DATABASE = frozenset()
+SOURCES_REQUIRING_DATABASE = frozenset({ORACLE})
 
 LEGACY_SOURCE_IDENTITY_VERSION = 1
 SOURCE_IDENTITY_VERSION = 2

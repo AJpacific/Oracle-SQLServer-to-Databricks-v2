@@ -324,7 +324,8 @@ def normalize_connection_input(raw: dict) -> dict:
     """Validate + normalize non-secret connection metadata (pure, no Spark).
 
     Enforces required fields, normalizes ``source_system`` (raising on an
-    unknown system), requires ``source_database`` for SQL Server, and defaults
+    unknown system), requires ``source_database`` for Oracle (SQL Server
+    permits blank for all-accessible-databases discovery mode), and defaults
     ``trust_server_certificate`` to False. Never accepts or returns a username,
     password, token, or credential-bearing URL.
     """
@@ -438,6 +439,63 @@ class ControlRepository:
             decision=decision,
             include_onboarding=include_onboarding,
         )
+
+    def registered_tables_for_onboarding_run(
+        self,
+        connection_id: str,
+        run_id: str,
+    ):
+        """Return candidate tables owned by connection_id and registered by run_id.
+
+        Candidate rules:
+        - Exact connection_id.
+        - Exact current onboarding run_id (onboarding_run_id in source_assessment).
+        - Successfully registered by the current run (registration_completed_ts IS NOT NULL).
+        - Not retired or decommissioned in source_table_control.
+        - Preserves actual source_database, source identity version, and target configuration.
+        - Preserves repair run idempotency: tables already transitioned to INVENTORIED,
+          MAPPED, READY_FOR_PROVISIONING, or PROVISIONED remain in the candidate set.
+        - Strictly excludes unrelated historical tables belonging to the same connection.
+        """
+        connection_id = require_connection_id(
+            connection_id, "registered_tables_for_onboarding_run"
+        )
+        run_id = _validate_bounded_identifier(run_id, "run_id")
+
+        sql = f"""
+            SELECT DISTINCT
+                stc.connection_id,
+                stc.source_table_id,
+                stc.source_database,
+                stc.source_schema,
+                stc.source_table,
+                stc.source_system,
+                stc.source_server,
+                stc.target_catalog,
+                stc.target_schema,
+                stc.target_table,
+                stc.mapping_status,
+                stc.is_active,
+                stc.current_status,
+                stc.table_decision,
+                stc.delete_policy,
+                stc.source_identity_version,
+                stc.legacy_source_table_id,
+                stc.watermark_column
+            FROM {self.ctrl('source_table_control')} stc
+            JOIN {self.ctrl('source_assessment')} sa
+              ON stc.connection_id = sa.connection_id
+             AND stc.source_schema = sa.source_schema
+             AND stc.source_table = sa.object_name
+             AND coalesce(stc.source_database, '') = coalesce(sa.source_database, '')
+            WHERE stc.connection_id = {escape_string_literal(connection_id)}
+              AND sa.onboarding_run_id = {escape_string_literal(run_id)}
+              AND sa.object_type = 'TABLE'
+              AND sa.is_selected = true
+              AND sa.registration_completed_ts IS NOT NULL
+              AND coalesce(stc.current_status, '') NOT IN ('RETIRED', 'DECOMMISSIONED')
+        """
+        return self.spark.sql(sql)
 
     # ---------------------------------------------------- connection registry
 

@@ -239,49 +239,82 @@ WHERE connection_id = '<connection_id>'
 
 ---
 
-## Future Job 1B - Automated Selected-Table Onboarding Workflow (Target Architecture)
+## Job 1B - Automated Selected-Table Onboarding Workflow (Optimized Architecture)
 
-Future Job 1B automatically discovers selected assessment batches and onboards tables without requiring selected schema, selected table, or target routing parameters. All target routing is resolved from `accelerator_target_config`.
+Job 1B automatically discovers selected assessment batches and onboards tables without requiring selected schema, selected table, or target routing parameters. All target routing is resolved from `accelerator_target_config`.
 
-### Target Logical Sequence:
+### Execution-Scope Separation:
+
+To eliminate duplicate JDBC metadata queries, duplicate inventory writes, and unnecessary orchestration overhead when a single connection owns multiple assessment batches (e.g., 8 assessment batches under 1 connection with 137 registered tables):
+- **Assessment-scoped stages:** Execute per `assessment_id` (T00, T01, T02, T09, T10).
+- **Connection-scoped stages:** Execute exactly once per distinct `connection_id` (T02B, T03, T04, T05, T06, T07, T08).
+- Concurrency (`concurrency: 3`) is applied after deduplication.
+- SQL Server and Oracle Job 1B definitions are managed directly in Databricks and are not deployed from repository YAML.
+
+> [!NOTE]
+> Job 1B definitions are maintained directly in Databricks. Export the live Databricks Job configuration before major structural changes if an external backup or review artifact is required.
+
+### Logical Sequence:
 ```text
-Create Run Context (T00)
--> Get Selected Assessment Worklist (T01)
--> For Each connection_id + assessment_id (T02):
-     Register Selected Tables (T02A) [atomic claim, ends at REGISTERED]
-     Source Inventory (T02B)
-     Type Normalization (T02C)
-     Mapping Generation (T02D)
-     Mapping Validation (T02E)
-     Table Decision (T02F)
-     Target Provisioning (T02G) [provisions & activates AUTO_MIGRATE]
-     Finalize Selected Table Onboarding (T02H) [verifies PROVISIONED & marks ONBOARDED]
--> Mark Downstream Failures (T03, run_if: AT_LEAST_ONE_FAILED)
--> Notify Failures (T04, run_if: ALL_DONE)
+J1B_T00_Create_Run_Context
+    |
+    v
+J1B_T01_Get_Selected_Assessments (source_system: sqlserver or oracle)
+    |
+    v
+J1B_T02_Register_Selected_Tables (ForEach assessment worklist from T01, concurrency: 3)
+    |
+    v
+J1B_T02B_Get_Registered_Connections (NB_GetRegisteredConnectionWorklist: deduplicated connection worklist)
+    |
+    v
+J1B_T03_Source_Inventory (ForEach connection worklist from T02B, concurrency: 3)
+    |
+    v
+J1B_T04_Type_Normalization (ForEach connection worklist from T02B, concurrency: 3)
+    |
+    v
+J1B_T05_Mapping_Generation (ForEach connection worklist from T02B, concurrency: 3)
+    |
+    v
+J1B_T06_Mapping_Validation (ForEach connection worklist from T02B, concurrency: 3)
+    |
+    v
+J1B_T07_Table_Decision (ForEach connection worklist from T02B, concurrency: 3)
+    |
+    v
+J1B_T08_Target_Provisioning (ForEach connection worklist from T02B, concurrency: 3)
+    |
+    +-----------------------------------------------+
+    |                                               |
+    v                                               v
+J1B_T09_Finalize_Onboarding            J1B_T10_Mark_Downstream_Failure
+(ForEach original assessment worklist, (ForEach original assessment worklist,
+ concurrency: 3)                       concurrency: 3, run_if: AT_LEAST_ONE_FAILED)
 ```
 
-| Task key | Notebook | Parameters | Output |
-|---|---|---|---|
-| `T00_Create_Run_Context` | `deployment/NB_CreateRunContext` | optional `run_id`, `run_prefix` | `run_id` only |
-| `T01_Get_Selected_Assessment_Worklist` | `deployment/NB_GetSelectedAssessmentWorklist` | `run_id`, `source_system` (fixed in YAML), optional `max_batches`, optional `only_connection_ids`, optional `only_assessment_ids`, optional `include_failed_retries` | `worklist`, `worklist_count`, `selected_table_count`, `connection_count` |
-| `T02_ForEach_Assessment_Batch` | For Each `{{tasks.T01_Get_Selected_Assessment_Worklist.values.worklist}}` (`connection_id`, `assessment_id`) | Sub-pipeline tasks below: | - |
-| -> `T02A_Register_Selected_Tables` | `shared/NB01B_RegisterSelectedTables` | `run_id`, `connection_id: {{input.connection_id}}`, `assessment_id: {{input.assessment_id}}`, `selection_mode=ASSESSMENT_FLAGS` | `status`, `business_status`, `registered_count`, `worklist` |
-| -> `T02B_Source_Inventory` | `sources/<source>/NB01_SourceInventory` | `run_id`, `connection_id: {{input.connection_id}}`, `include_onboarding=True` | tables, columns |
-| -> `T02C_Type_Normalization` | `shared/NB02_TypeNormalization` | `run_id`, `connection_id: {{input.connection_id}}` | - |
-| -> `T02D_Mapping` | `shared/NB03_MappingRulesGeneration` | `run_id`, `connection_id: {{input.connection_id}}` | - |
-| -> `T02E_Mapping_Validation` | `shared/NB04_MappingValidation` | `run_id`, `connection_id: {{input.connection_id}}` | - |
-| -> `T02F_Table_Decision` | `shared/NB07_TableDecisionGeneration` | `run_id`, `connection_id: {{input.connection_id}}` | - |
-| -> `T02G_Provision_Bronze` | `shared/NB08_TargetProvisioning` | `run_id`, `connection_id: {{input.connection_id}}` | - |
-| -> `T02H_Finalize_Onboarding` | `deployment/NB_FinalizeSelectedTableOnboarding` | `run_id`, `connection_id: {{input.connection_id}}`, `assessment_id: {{input.assessment_id}}` | `status`, `business_status`, `onboarded_count` |
-| `T03_Mark_Downstream_Failures` | `deployment/NB_MarkSelectedOnboardingFailed` (run_if: AT_LEAST_ONE_FAILED) | `run_id`, `connection_id`, `assessment_id`, `failed_stage`, `error_message` | `failed_count`, `business_status` |
-| `T04_Notify_Onboarding_Failures` | `shared/NB16_NotifyFailures` (run_if: ALL_DONE) | `run_id`, `pipeline_name=INGEST_ONBOARDING` | - |
+| Task key | Execution Scope | Notebook | Inputs / Parameters | Output Task Values |
+|---|---|---|---|---|
+| `J1B_T00_Create_Run_Context` | Run-level | `deployment/NB_CreateRunContext` | `run_id`, `run_prefix`, `catalog`, `control_schema` | `run_id` |
+| `J1B_T01_Get_Selected_<Source>_Assessments` | Assessment | `deployment/NB_GetSelectedAssessmentWorklist` | `run_id`, `source_system`, `catalog`, `control_schema`, `max_batches`, `only_connection_ids`, `only_assessment_ids`, `exclude_connection_ids`, `include_failed_retries` | `worklist`, `worklist_count`, `selected_table_count`, `connection_count` |
+| `J1B_T02_Register_Selected_Tables` | Assessment (ForEach `T01.worklist`, concurrency: 3) | `shared/NB01B_RegisterSelectedTables` | `run_id`, `connection_id: {{input.connection_id}}`, `assessment_id: {{input.assessment_id}}`, `selection_mode: ASSESSMENT_FLAGS`, `catalog`, `control_schema`, `include_failed_retries` | `status`, `business_status`, `selected_count`, `validated_count`, `claimed_count`, `registered_count`, `already_registered_count`, `failed_count`, `skipped_count`, `conflict_count` |
+| `J1B_T02B_Get_Registered_<Source>_Connections` | Connection Worklist Generation | `deployment/NB_GetRegisteredConnectionWorklist` | `run_id`, `source_system`, `catalog`, `control_schema`, `only_connection_ids`, `exclude_connection_ids` | `worklist` (`[{"connection_id": "..."}]`), `connection_count`, `registration_owner_count`, `status`, `business_status` |
+| `J1B_T03_<Source>_Source_Inventory` | Connection (ForEach `T02B.worklist`, concurrency: 3) | `sources/<source>/NB01_SourceInventory` | `run_id`, `connection_id: {{input.connection_id}}`, `catalog`, `control_schema`, `include_onboarding: true` | `candidate_table_count`, `inventoried_table_count`, `failed_table_count`, `columns_written`, `databases_processed`, `status`, `business_status` |
+| `J1B_T04_Type_Normalization` | Connection (ForEach `T02B.worklist`, concurrency: 3) | `shared/NB02_TypeNormalization` | `run_id`, `connection_id: {{input.connection_id}}`, `catalog`, `control_schema` | `status`, `columns` |
+| `J1B_T05_Mapping_Generation` | Connection (ForEach `T02B.worklist`, concurrency: 3) | `shared/NB03_MappingRulesGeneration` | `run_id`, `connection_id: {{input.connection_id}}`, `catalog`, `control_schema` | `status`, `columns` |
+| `J1B_T06_Mapping_Validation` | Connection (ForEach `T02B.worklist`, concurrency: 3) | `shared/NB04_MappingValidation` | `run_id`, `connection_id: {{input.connection_id}}`, `catalog`, `control_schema` | `status`, `findings` |
+| `J1B_T07_Table_Decision` | Connection (ForEach `T02B.worklist`, concurrency: 3) | `shared/NB07_TableDecisionGeneration` | `run_id`, `connection_id: {{input.connection_id}}`, `catalog`, `control_schema` | `status`, `tables` |
+| `J1B_T08_Target_Provisioning` | Connection (ForEach `T02B.worklist`, concurrency: 3) | `shared/NB08_TargetProvisioning` | `run_id`, `connection_id: {{input.connection_id}}`, `catalog`, `control_schema` | `status`, `business_status`, `provisioning_candidates`, `provisioned`, `failed` |
+| `J1B_T09_Finalize_Onboarding` | Assessment (ForEach `T01.worklist`, concurrency: 3) | `deployment/NB_FinalizeSelectedTableOnboarding` | `run_id`, `connection_id: {{input.connection_id}}`, `assessment_id: {{input.assessment_id}}`, `catalog`, `control_schema` | `status`, `business_status`, `onboarded_count`, `review_required_count`, `blocked_count`, `failed_count` |
+| `J1B_T10_Mark_Downstream_Failure` | Assessment (ForEach `T01.worklist`, concurrency: 3, run_if: AT_LEAST_ONE_FAILED) | `deployment/NB_MarkSelectedOnboardingFailed` | `run_id`, `connection_id: {{input.connection_id}}`, `assessment_id: {{input.assessment_id}}`, `failed_stage: FINALIZATION`, `error_message`, `catalog`, `control_schema` | `status`, `business_status`, `target_count`, `failed_count` |
 
-### Orchestration and Parameter Isolation:
-- **Internal values only:** Tasks pass strictly `run_id`, `connection_id`, and `assessment_id` (and child `attempt_id` where scoped).
-- **No user-entered inputs:** Zero user-entered connection parameters, zero user-entered selected table lists, zero user-entered target-routing parameters.
-- **Downstream failure recording (`T03`):** When any task in the batch fails, `NB_MarkSelectedOnboardingFailed` receives the exact `run_id`, `connection_id`, `assessment_id`, the validated `failed_stage` (one of `INVENTORY`, `TYPE_NORMALIZATION`, `MAPPING_GENERATION`, `MAPPING_VALIDATION`, `TABLE_DECISION`, `TARGET_PROVISIONING`, `FINALIZATION`), and a sanitized bounded orchestration error message. It marks only still-incomplete rows owned by `run_id` as `FAILED`, preserving already `ONBOARDED` tables and rows owned by other runs.
-- **Worklist payload safety:** All worklists enforce `TASK_VALUE_LIMIT_BYTES = 40_000` bytes (measured in UTF-8 bytes) via `validate_task_value_payload()`.
-- **Job YAML unchanged:** Databricks Job YAML files are deferred and not committed in this task.
+### Orchestration and Parameter Isolation Guarantees:
+- **Scope Contract:** T02 may run $N$ times for $N$ assessment IDs under 1 connection, but T03 through T08 execute strictly once for that distinct connection. T09 and T10 return to the original $N$ assessment batches.
+- **Candidate Isolation:** Connection-level stages process strictly current-run registered tables (`repo.registered_tables_for_onboarding_run(connection_id, run_id)`), isolating against historical tables owned by the same connection.
+- **Metadata Batching:** Inventory stages batch column and primary key JDBC queries at the `(connection_id, source_database)` level, avoiding individual JDBC queries per table.
+- **Internal values only:** Tasks pass strictly `run_id`, `connection_id`, and `assessment_id`. No secrets, passwords, JDBC URLs, or user-entered connection parameters are passed across task parameters.
+- **Downstream failure recording (`J1B_T10`):** Marks only still-incomplete rows owned by the current `run_id`, preserving already `ONBOARDED` tables and rows owned by other runs.
+- **Worklist payload safety:** All worklists enforce `TASK_VALUE_LIMIT_BYTES = 40_000` bytes via `validate_task_value_payload()`. Zero credentials or endpoints are present in emitted worklists.
 
 ---
 

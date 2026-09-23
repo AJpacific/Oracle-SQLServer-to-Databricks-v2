@@ -329,24 +329,9 @@ already_registered_count = 0
 registration_failed_count = 0
 worklist = []
 
-def _verify_exact_registration(candidate):
+def _validate_registration_dict(candidate, reg):
     cid = candidate["connection_id"]
     sid = candidate["source_table_id"]
-    v_rows = spark.sql(f"""
-        SELECT connection_id, source_table_id, source_identity_version,
-               source_database,
-               target_catalog, target_schema, target_table
-        FROM {ctrl('source_table_control')}
-        WHERE connection_id = {escape_string_literal(cid)}
-          AND source_table_id = {escape_string_literal(sid)}
-    """).collect()
-    if not v_rows:
-        raise RuntimeError(f"Registration verification failed: no registration found for {cid}.{sid}")
-    if len(v_rows) > 1:
-        raise RuntimeError(f"Registration verification failed: duplicate registrations found for {cid}.{sid}")
-
-    reg = v_rows[0].asDict() if hasattr(v_rows[0], "asDict") else dict(v_rows[0])
-
     if reg.get("connection_id") != cid or reg.get("source_table_id") != sid:
         raise RuntimeError(f"Registration identity mismatch for {cid}.{sid}")
 
@@ -378,14 +363,33 @@ def _verify_exact_registration(candidate):
             f"does not match registered target ({act_cat}.{act_sch}.{act_tbl})"
         )
 
+def _verify_exact_registration(candidate):
+    cid = candidate["connection_id"]
+    sid = candidate["source_table_id"]
+    v_rows = spark.sql(f"""
+        SELECT connection_id, source_table_id, source_identity_version,
+               source_database,
+               target_catalog, target_schema, target_table
+        FROM {ctrl('source_table_control')}
+        WHERE connection_id = {escape_string_literal(cid)}
+          AND source_table_id = {escape_string_literal(sid)}
+    """).collect()
+    if not v_rows:
+        raise RuntimeError(f"Registration verification failed: no registration found for {cid}.{sid}")
+    if len(v_rows) > 1:
+        raise RuntimeError(f"Registration verification failed: duplicate registrations found for {cid}.{sid}")
+
+    reg = v_rows[0].asDict() if hasattr(v_rows[0], "asDict") else dict(v_rows[0])
+    _validate_registration_dict(candidate, reg)
+
 if selection_mode == "ASSESSMENT_FLAGS":
-    # 1. Process new valid registrations with atomic claim and post-claim verification
+    # 1. Acquire atomic claims per table to preserve strict attempt ownership
+    claimed_valid = []
     for c in valid:
         schema = c["source_schema"]
         table = c["source_table"]
         sid = c["source_table_id"]
         attempt_id = new_run_id("attempt")
-        claimed = False
         try:
             claim_res = repo.claim_assessment_selection_row(
                 connection_id, assessment_id, schema, table, run_id, attempt_id,
@@ -399,58 +403,109 @@ if selection_mode == "ASSESSMENT_FLAGS":
                 errors.append(f"{schema}.{table}: {msg}")
                 continue
 
-            claimed = True
             claim_acquired_count += 1
+            claimed_valid.append((c, attempt_id))
+        except Exception as exc:
+            registration_failed_count += 1
+            safe_err = failcls.sanitize_message(exc)
+            errors.append(f"{schema}.{table}: {safe_err}")
 
-            # Insert new registration into source_table_control
-            src_df = spark.range(1).select(
-                F.lit(sid).cast("string").alias("source_table_id"),
-                F.lit(connection_id).cast("string").alias("connection_id"),
-                F.lit(c["source_system"]).cast("string").alias("source_system"),
-                F.lit(c["source_server"]).cast("string").alias("source_server"),
-                F.lit(c["source_database"]).cast("string").alias("source_database"),
-                F.lit(schema).cast("string").alias("source_schema"),
-                F.lit(table).cast("string").alias("source_table"),
-                F.lit(c["target_catalog"]).cast("string").alias("target_catalog"),
-                F.lit(c["target_schema"]).cast("string").alias("target_schema"),
-                F.lit(c["target_table"]).cast("string").alias("target_table"),
-                F.lit(c["mapping_status"]).cast("string").alias("mapping_status"),
-                F.lit(False).cast("boolean").alias("is_active"),
-                F.lit("REGISTERED").cast("string").alias("current_status"),
-                F.lit(False).cast("boolean").alias("initial_load_completed"),
-                F.lit("IGNORE_DELETES").cast("string").alias("delete_policy"),
-                F.lit(SOURCE_IDENTITY_VERSION).cast("int").alias("source_identity_version"),
-                F.lit(None).cast("string").alias("legacy_source_table_id"),
-                F.current_timestamp().alias("created_ts"),
-                F.current_timestamp().alias("updated_ts")
+    claimed_already_registered = []
+    for c in already_registered:
+        schema = c["source_schema"]
+        table = c["source_table"]
+        sid = c["source_table_id"]
+        attempt_id = new_run_id("attempt")
+        try:
+            claim_res = repo.claim_assessment_selection_row(
+                connection_id, assessment_id, schema, table, run_id, attempt_id,
+                allow_failed_retry=include_failed_retries,
+                source_database=c["source_database"]
             )
-            src_df.createOrReplaceTempView("_single_register_row")
-            spark.sql(f"""
-                MERGE INTO {ctrl('source_table_control')} t
-                USING _single_register_row s
-                ON t.connection_id = s.connection_id
-               AND t.source_table_id = s.source_table_id
-                WHEN NOT MATCHED THEN INSERT (
-                    source_table_id, connection_id, source_system, source_server,
-                    source_database, source_schema, source_table, target_catalog,
-                    target_schema, target_table, mapping_status, is_active,
-                    current_status, initial_load_completed, delete_policy,
-                    source_identity_version, legacy_source_table_id,
-                    created_ts, updated_ts
-                ) VALUES (
-                    s.source_table_id, s.connection_id, s.source_system, s.source_server,
-                    s.source_database, s.source_schema, s.source_table, s.target_catalog,
-                    s.target_schema, s.target_table, s.mapping_status, s.is_active,
-                    s.current_status, s.initial_load_completed, s.delete_policy,
-                    s.source_identity_version, s.legacy_source_table_id,
-                    s.created_ts, s.updated_ts
-                )
-            """)
+            if not claim_res.acquired:
+                claim_conflict_count += 1
+                msg = f"claim conflict: {claim_res.reason or 'could not acquire claim'}"
+                skipped.append((schema, table, msg))
+                errors.append(f"{schema}.{table}: {msg}")
+                continue
 
-            # Verify exact registration exists in source_table_control
-            _verify_exact_registration(c)
+            claim_acquired_count += 1
+            claimed_already_registered.append((c, attempt_id))
+        except Exception as exc:
+            registration_failed_count += 1
+            safe_err = failcls.sanitize_message(exc)
+            errors.append(f"{schema}.{table}: {safe_err}")
 
-            # Transition exact assessment row to REGISTERED (never ONBOARDED in NB01B)
+    # 2. Batch insert all claimed valid registrations into source_table_control via single MERGE
+    if claimed_valid:
+        reg_rows = [Row(
+            source_table_id=c["source_table_id"], connection_id=c["connection_id"],
+            source_system=c["source_system"], source_server=c["source_server"],
+            source_database=c["source_database"], source_schema=c["source_schema"],
+            source_table=c["source_table"], target_catalog=c["target_catalog"],
+            target_schema=c["target_schema"], target_table=c["target_table"],
+            mapping_status=c["mapping_status"],
+            is_active=False,
+            current_status="REGISTERED",
+            initial_load_completed=False,
+            delete_policy="IGNORE_DELETES",
+            source_identity_version=SOURCE_IDENTITY_VERSION,
+            legacy_source_table_id=None
+        ) for c, _ in claimed_valid]
+        src_df = (spark.createDataFrame(reg_rows)
+                  .withColumn("created_ts", F.current_timestamp())
+                  .withColumn("updated_ts", F.current_timestamp()))
+        src_df.createOrReplaceTempView("_batch_register_rows")
+        spark.sql(f"""
+            MERGE INTO {ctrl('source_table_control')} t
+            USING _batch_register_rows s
+            ON t.connection_id = s.connection_id
+           AND t.source_table_id = s.source_table_id
+            WHEN NOT MATCHED THEN INSERT (
+                source_table_id, connection_id, source_system, source_server,
+                source_database, source_schema, source_table, target_catalog,
+                target_schema, target_table, mapping_status, is_active,
+                current_status, initial_load_completed, delete_policy,
+                source_identity_version, legacy_source_table_id,
+                created_ts, updated_ts
+            ) VALUES (
+                s.source_table_id, s.connection_id, s.source_system, s.source_server,
+                s.source_database, s.source_schema, s.source_table, s.target_catalog,
+                s.target_schema, s.target_table, s.mapping_status, s.is_active,
+                s.current_status, s.initial_load_completed, s.delete_policy,
+                s.source_identity_version, s.legacy_source_table_id,
+                s.created_ts, s.updated_ts
+            )
+        """)
+
+    # 3. Batch verify exact registrations in source_table_control
+    all_claimed = claimed_valid + claimed_already_registered
+    v_rows_map = {}
+    if all_claimed:
+        claimed_sids = [c["source_table_id"] for c, _ in all_claimed]
+        sids_in = ", ".join(escape_string_literal(sid) for sid in claimed_sids)
+        v_rows = spark.sql(f"""
+            SELECT connection_id, source_table_id, source_identity_version,
+                   source_database, target_catalog, target_schema, target_table
+            FROM {ctrl('source_table_control')}
+            WHERE connection_id = {escape_string_literal(connection_id)}
+              AND source_table_id IN ({sids_in})
+        """).collect()
+        for vr in v_rows:
+            vr_dict = vr.asDict() if hasattr(vr, "asDict") else dict(vr)
+            v_rows_map[vr_dict["source_table_id"]] = vr_dict
+
+    for c, attempt_id in claimed_valid:
+        schema = c["source_schema"]
+        table = c["source_table"]
+        sid = c["source_table_id"]
+        try:
+            reg = v_rows_map.get(sid)
+            if not reg:
+                _verify_exact_registration(c)
+            else:
+                _validate_registration_dict(c, reg)
+
             succ = repo.mark_assessment_registration_succeeded(
                 connection_id, assessment_id, schema, table, run_id, attempt_id,
                 source_database=c["source_database"]
@@ -460,46 +515,29 @@ if selection_mode == "ASSESSMENT_FLAGS":
 
             registered_count += 1
             worklist.append({"connection_id": connection_id, "source_table_id": sid})
-
         except Exception as exc:
             registration_failed_count += 1
             safe_err = failcls.sanitize_message(exc)
             errors.append(f"{schema}.{table}: {safe_err}")
-            if claimed:
-                try:
-                    repo.mark_assessment_onboarding_failed(
-                        connection_id, assessment_id, schema, table,
-                        run_id, attempt_id, failed_stage="REGISTRATION", error=safe_err,
-                        source_database=c["source_database"]
-                    )
-                except Exception as state_exc:
-                    print(f"[warn] Failed to set FAILED state on {schema}.{table}: {failcls.sanitize_message(state_exc)}")
+            try:
+                repo.mark_assessment_onboarding_failed(
+                    connection_id, assessment_id, schema, table,
+                    run_id, attempt_id, failed_stage="REGISTRATION", error=safe_err,
+                    source_database=c["source_database"]
+                )
+            except Exception as state_exc:
+                print(f"[warn] Failed to set FAILED state on {schema}.{table}: {failcls.sanitize_message(state_exc)}")
 
-    # 2. Confirm already-registered candidates
-    for c in already_registered:
+    for c, attempt_id in claimed_already_registered:
         schema = c["source_schema"]
         table = c["source_table"]
         sid = c["source_table_id"]
-        attempt_id = new_run_id("attempt")
-        claimed = False
         try:
-            claim_res = repo.claim_assessment_selection_row(
-                connection_id, assessment_id, schema, table, run_id, attempt_id,
-                allow_failed_retry=include_failed_retries,
-                source_database=c["source_database"]
-            )
-            if not claim_res.acquired:
-                claim_conflict_count += 1
-                msg = f"claim conflict: {claim_res.reason or 'could not acquire claim'}"
-                skipped.append((schema, table, msg))
-                errors.append(f"{schema}.{table}: {msg}")
-                continue
-
-            claimed = True
-            claim_acquired_count += 1
-
-            # Idempotent confirmation: verify registration exists with matching immutable target
-            _verify_exact_registration(c)
+            reg = v_rows_map.get(sid)
+            if not reg:
+                _verify_exact_registration(c)
+            else:
+                _validate_registration_dict(c, reg)
 
             succ = repo.mark_assessment_registration_succeeded(
                 connection_id, assessment_id, schema, table, run_id, attempt_id,
@@ -510,20 +548,18 @@ if selection_mode == "ASSESSMENT_FLAGS":
 
             already_registered_count += 1
             worklist.append({"connection_id": connection_id, "source_table_id": sid})
-
         except Exception as exc:
             registration_failed_count += 1
             safe_err = failcls.sanitize_message(exc)
             errors.append(f"{schema}.{table}: {safe_err}")
-            if claimed:
-                try:
-                    repo.mark_assessment_onboarding_failed(
-                        connection_id, assessment_id, schema, table,
-                        run_id, attempt_id, failed_stage="REGISTRATION", error=safe_err,
-                        source_database=c["source_database"]
-                    )
-                except Exception as state_exc:
-                    print(f"[warn] Failed to set FAILED state on {schema}.{table}: {failcls.sanitize_message(state_exc)}")
+            try:
+                repo.mark_assessment_onboarding_failed(
+                    connection_id, assessment_id, schema, table,
+                    run_id, attempt_id, failed_stage="REGISTRATION", error=safe_err,
+                    source_database=c["source_database"]
+                )
+            except Exception as state_exc:
+                print(f"[warn] Failed to set FAILED state on {schema}.{table}: {failcls.sanitize_message(state_exc)}")
 
 else:
     # Legacy WIDGETS mode: preserves existing batch registration and selection marking
@@ -623,8 +659,14 @@ try:
     dbutils.jobs.taskValues.set(key="assessment_id", value=assessment_id)
     dbutils.jobs.taskValues.set(key="status", value=execution_status)
     dbutils.jobs.taskValues.set(key="business_status", value=business_status)
+    dbutils.jobs.taskValues.set(key="selected_count", value=selected_count)
+    dbutils.jobs.taskValues.set(key="validated_count", value=validated_count)
+    dbutils.jobs.taskValues.set(key="claimed_count", value=claim_acquired_count)
     dbutils.jobs.taskValues.set(key="registered_count", value=registered_count)
     dbutils.jobs.taskValues.set(key="already_registered_count", value=already_registered_count)
+    dbutils.jobs.taskValues.set(key="failed_count", value=failed_count)
+    dbutils.jobs.taskValues.set(key="skipped_count", value=skipped_count)
+    dbutils.jobs.taskValues.set(key="conflict_count", value=conflict_count)
 except Exception:
     pass
 

@@ -1,40 +1,3 @@
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=0, skipped=1, failed=0
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=1, unchanged=0, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=1, unchanged=0, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=1, unchanged=0, skipped=0, failed=0
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, skipped=0, failed=0
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=0, skipped=1, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=2, materialized=0, updated=0, unchanged=1, skipped=1, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=0, skipped=1, failed=0
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=0, skipped=1, failed=0
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=1, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=1, unchanged=0, skipped=0, failed=0
-NB18 complete: status=FAILED, business_status=PARTIAL, discovered=2, materialized=1, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=SUCCEEDED, business_status=NO_OBJECTS, discovered=0, materialized=0, updated=0, unchanged=0, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, skipped=0, failed=0
 test_oracle_adapter_returns_oracle_discovery (test_assessment.TestAdapterDiscoveryRouting.test_oracle_adapter_returns_oracle_discovery) ... ok
 test_sqlserver_adapter_returns_sqlserver_discovery (test_assessment.TestAdapterDiscoveryRouting.test_sqlserver_adapter_returns_sqlserver_discovery) ... ok
 test_mandatory_discovery_failure_is_failed (test_assessment.TestAssessmentDiscoveryStatus.test_mandatory_discovery_failure_is_failed) ... ok
@@ -67,11 +30,15 @@ test_zero_allocation_tables_are_not_null (test_assessment.TestSqlServerDiscovery
 test_invalid_source_system_fails (test_connection_registry.TestConnectionInput.test_invalid_source_system_fails) ... ok
 test_missing_required_fields_fail (test_connection_registry.TestConnectionInput.test_missing_required_fields_fail) ... ok
 test_missing_source_system_fails (test_connection_registry.TestConnectionInput.test_missing_source_system_fails) ... ok
+test_oracle_missing_database_fails (test_connection_registry.TestConnectionInput.test_oracle_missing_database_fails) ... ok
+test_oracle_populated_database (test_connection_registry.TestConnectionInput.test_oracle_populated_database) ... ok
 test_require_connection_id_trims_and_rejects_blank (test_connection_registry.TestConnectionInput.test_require_connection_id_trims_and_rejects_blank) ... ok
-test_sqlserver_requires_database (test_connection_registry.TestConnectionInput.test_sqlserver_requires_database) ... ok
-test_sqlserver_with_database_ok (test_connection_registry.TestConnectionInput.test_sqlserver_with_database_ok) ... ok
+test_sqlserver_blank_database_not_persisted_as_master (test_connection_registry.TestConnectionInput.test_sqlserver_blank_database_not_persisted_as_master) ... ok
+test_sqlserver_empty_database (test_connection_registry.TestConnectionInput.test_sqlserver_empty_database) ... ok
+test_sqlserver_null_database (test_connection_registry.TestConnectionInput.test_sqlserver_null_database) ... ok
+test_sqlserver_populated_database (test_connection_registry.TestConnectionInput.test_sqlserver_populated_database) ... ok
+test_sqlserver_whitespace_database (test_connection_registry.TestConnectionInput.test_sqlserver_whitespace_database) ... ok
 test_trust_default_false (test_connection_registry.TestConnectionInput.test_trust_default_false) ... ok
-test_valid_oracle_input_normalizes (test_connection_registry.TestConnectionInput.test_valid_oracle_input_normalizes) ... ok
 test_identity_is_stable_and_versioned (test_connection_registry.TestRequiredSourceIdentity.test_identity_is_stable_and_versioned) ... ok
 test_identity_never_assumes_a_source (test_connection_registry.TestRequiredSourceIdentity.test_identity_never_assumes_a_source) ... ok
 test_identity_requires_connection_id (test_connection_registry.TestRequiredSourceIdentity.test_identity_requires_connection_id) ... ok
@@ -166,6 +133,9 @@ test_bad_json_fails (test_etl_dq.TestAllowedValues.test_bad_json_fails) ... ok
 test_non_array_fails (test_etl_dq.TestAllowedValues.test_non_array_fails) ... ok
 test_parses_json_array (test_etl_dq.TestAllowedValues.test_parses_json_array) ... ok
 test_validate_allowed_values_rule (test_etl_dq.TestAllowedValues.test_validate_allowed_values_rule) ... ok
+test_ddl_build_create_table_preserves_time_precision (test_etl_dq.TestDatabricksTypeValidationAndDDL.test_ddl_build_create_table_preserves_time_precision) ... ok
+test_time_type_validation_accepted (test_etl_dq.TestDatabricksTypeValidationAndDDL.test_time_type_validation_accepted) ... ok
+test_time_type_validation_rejected (test_etl_dq.TestDatabricksTypeValidationAndDDL.test_time_type_validation_rejected) ... ok
 test_full_input_accounting_and_silver (test_etl_dq.TestEtlReconciliation.test_full_input_accounting_and_silver) ... ok
 test_full_input_accounting_mismatch_fails (test_etl_dq.TestEtlReconciliation.test_full_input_accounting_mismatch_fails) ... ok
 test_full_silver_mismatch_fails (test_etl_dq.TestEtlReconciliation.test_full_silver_mismatch_fails) ... ok
@@ -204,6 +174,8 @@ test_success_and_failure_paths_share_one_boundary (test_etl_work_unit.TestIncrem
 test_unparseable_bound_fails (test_etl_work_unit.TestIncrementalWorkUnit.test_unparseable_bound_fails) ... ok
 test_unsupported_cast_fails (test_etl_work_unit.TestIncrementalWorkUnit.test_unsupported_cast_fails) ... ok
 test_work_unit_is_immutable (test_etl_work_unit.TestIncrementalWorkUnit.test_work_unit_is_immutable) ... ok
+test_attempt_numbers_calculated_independently (test_failure_retry.TestAttemptIsolation.test_attempt_numbers_calculated_independently) ... ok
+test_retry_limits_isolated_exhausted_enters_manual_review (test_failure_retry.TestAttemptIsolation.test_retry_limits_isolated_exhausted_enters_manual_review) ... ok
 test_checkpoint_error_not_retryable (test_failure_retry.TestClassifyFailure.test_checkpoint_error_not_retryable) ... ok
 test_configuration_error_not_retryable (test_failure_retry.TestClassifyFailure.test_configuration_error_not_retryable) ... ok
 test_mapping_error_not_retryable (test_failure_retry.TestClassifyFailure.test_mapping_error_not_retryable) ... ok
@@ -216,6 +188,34 @@ test_timeout_is_retryable (test_failure_retry.TestClassifyFailure.test_timeout_i
 test_transient_compute_retryable (test_failure_retry.TestClassifyFailure.test_transient_compute_retryable) ... ok
 test_transient_connection_retryable (test_failure_retry.TestClassifyFailure.test_transient_connection_retryable) ... ok
 test_unknown_stage_normalized (test_failure_retry.TestClassifyFailure.test_unknown_stage_normalized) ... ok
+test_delta_multi_run_actions (test_failure_retry.TestDeltaMultiRun.test_delta_multi_run_actions) ... ok
+test_frozen_bounds_preserved_per_parent_run (test_failure_retry.TestFrozenBounds.test_frozen_bounds_preserved_per_parent_run) ... ok
+test_full_load_multi_run_different_tables (test_failure_retry.TestFullLoadMultiRun.test_full_load_multi_run_different_tables) ... ok
+test_full_load_multi_run_same_table (test_failure_retry.TestFullLoadMultiRun.test_full_load_multi_run_same_table) ... ok
+test_exhausted_and_eligible_coexist (test_failure_retry.TestManualReviewSeparation.test_exhausted_and_eligible_coexist) ... ok
+test_two_manual_reviews_same_table_different_runs (test_failure_retry.TestManualReviewSeparation.test_two_manual_reviews_same_table_different_runs) ... ok
+test_dedup_isolation_across_parents (test_failure_retry.TestMultiParentIdentity.test_dedup_isolation_across_parents) ... ok
+test_one_run_cannot_suppress_another_or_replace_parent_run_id (test_failure_retry.TestMultiParentIdentity.test_one_run_cannot_suppress_another_or_replace_parent_run_id) ... ok
+test_parent_run_in_partition_by (test_failure_retry.TestMultiParentIdentity.test_parent_run_in_partition_by) ... ok
+test_same_connection_table_op_under_two_runs_produces_two_items (test_failure_retry.TestMultiParentIdentity.test_same_connection_table_op_under_two_runs_produces_two_items) ... ok
+test_no_fallback_to_original_run_id (test_failure_retry.TestOldParameterRemoval.test_no_fallback_to_original_run_id) ... ok
+test_no_original_run_id_widget_declaration (test_failure_retry.TestOldParameterRemoval.test_no_original_run_id_widget_declaration) ... ok
+test_no_original_run_id_widget_get (test_failure_retry.TestOldParameterRemoval.test_no_original_run_id_widget_get) ... ok
+test_original_run_ids_declared_exactly_once (test_failure_retry.TestOldParameterRemoval.test_original_run_ids_declared_exactly_once) ... ok
+test_parent_run_id_retained (test_failure_retry.TestOldParameterRemoval.test_parent_run_id_retained) ... ok
+test_result_payload_and_task_values (test_failure_retry.TestOutputContract.test_result_payload_and_task_values) ... ok
+test_blank (test_failure_retry.TestParseOriginalRunIds.test_blank) ... ok
+test_case_preservation (test_failure_retry.TestParseOriginalRunIds.test_case_preservation) ... ok
+test_commas_only (test_failure_retry.TestParseOriginalRunIds.test_commas_only) ... ok
+test_duplicates (test_failure_retry.TestParseOriginalRunIds.test_duplicates) ... ok
+test_empty_entries (test_failure_retry.TestParseOriginalRunIds.test_empty_entries) ... ok
+test_first_seen_order (test_failure_retry.TestParseOriginalRunIds.test_first_seen_order) ... ok
+test_one_id (test_failure_retry.TestParseOriginalRunIds.test_one_id) ... ok
+test_twenty_one_unique_rejected (test_failure_retry.TestParseOriginalRunIds.test_twenty_one_unique_rejected) ... ok
+test_twenty_unique_accepted (test_failure_retry.TestParseOriginalRunIds.test_twenty_unique_accepted) ... ok
+test_two_ids (test_failure_retry.TestParseOriginalRunIds.test_two_ids) ... ok
+test_whitespace (test_failure_retry.TestParseOriginalRunIds.test_whitespace) ... ok
+test_whitespace_and_commas (test_failure_retry.TestParseOriginalRunIds.test_whitespace_and_commas) ... ok
 test_checkpoint_only_does_not_reapply (test_failure_retry.TestRecoveryAction.test_checkpoint_only_does_not_reapply) ... ok
 test_delta_retries_delta (test_failure_retry.TestRecoveryAction.test_delta_retries_delta) ... ok
 test_etl_retries_etl (test_failure_retry.TestRecoveryAction.test_etl_retries_etl) ... ok
@@ -242,6 +242,12 @@ test_same_table_operations_remain_independent_before_filtering (test_failure_ret
 test_state_only_recovery_remains_selectable (test_failure_retry.TestRetrySelectionPolicy.test_state_only_recovery_remains_selectable) ... ok
 test_unknown_pipeline_fails (test_failure_retry.TestRetrySelectionPolicy.test_unknown_pipeline_fails) ... ok
 test_worklist_uniqueness (test_failure_retry.TestRetrySelectionPolicy.test_worklist_uniqueness) ... ok
+test_source_table_id_filter_across_multiple_parent_runs (test_failure_retry.TestSourceTableFilter.test_source_table_id_filter_across_multiple_parent_runs) ... ok
+test_apostrophe_handled_safely (test_failure_retry.TestSqlSafety.test_apostrophe_handled_safely) ... ok
+test_blank_input_fails_before_sql (test_failure_retry.TestSqlSafety.test_blank_input_fails_before_sql) ... ok
+test_independent_escaping_and_filter_format (test_failure_retry.TestSqlSafety.test_independent_escaping_and_filter_format) ... ok
+test_no_raw_widget_interpolation (test_failure_retry.TestSqlSafety.test_no_raw_widget_interpolation) ... ok
+test_twenty_one_ids_fail_before_sql (test_failure_retry.TestSqlSafety.test_twenty_one_ids_fail_before_sql) ... ok
 test_batch_must_be_one_run_and_table (test_inventory_idempotency.TestInventoryKeys.test_batch_must_be_one_run_and_table) ... ok
 test_connection_and_identity_must_agree (test_inventory_idempotency.TestInventoryKeys.test_connection_and_identity_must_agree) ... ok
 test_distinct_columns_validate (test_inventory_idempotency.TestInventoryKeys.test_distinct_columns_validate) ... ok
@@ -260,6 +266,22 @@ test_validation_precedes_every_inventory_write (test_inventory_idempotency.TestI
 test_failed_inventory_raises_after_processing (test_inventory_idempotency.TestInventoryTaskStatus.test_failed_inventory_raises_after_processing) ... ok
 test_source_output_contracts_are_identical (test_inventory_idempotency.TestInventoryTaskStatus.test_source_output_contracts_are_identical) ... ok
 test_successful_inventory_exits_succeeded (test_inventory_idempotency.TestInventoryTaskStatus.test_successful_inventory_exits_succeeded) ... ok
+test_single_connection_multiple_assessments_deduplicated (test_job_1b_deduplication.TestScenarioAWorklistDeduplication.test_single_connection_multiple_assessments_deduplicated) ... ok
+test_inclusion_and_exclusion_precedence (test_job_1b_deduplication.TestScenarioBMultipleConnections.test_inclusion_and_exclusion_precedence) ... ok
+test_multiple_connections_deduplicated_and_sorted (test_job_1b_deduplication.TestScenarioBMultipleConnections.test_multiple_connections_deduplicated_and_sorted) ... ok
+test_inventory_executes_once_for_connection (test_job_1b_deduplication.TestScenarioCDuplicateInventoryPrevention.test_inventory_executes_once_for_connection) ... ok
+test_oracle_inventory_connection_scoped (test_job_1b_deduplication.TestScenarioDOracleDuplicatePrevention.test_oracle_inventory_connection_scoped) ... ok
+test_registered_tables_for_onboarding_run_scopes_by_run_id (test_job_1b_deduplication.TestScenarioECurrentRunIsolation.test_registered_tables_for_onboarding_run_scopes_by_run_id) ... ok
+test_connection_emitted_when_partial_registrations_succeed (test_job_1b_deduplication.TestScenarioFPartialRegistration.test_connection_emitted_when_partial_registrations_succeed) ... ok
+test_nb01b_preserves_atomic_claim_and_batches_merge (test_job_1b_deduplication.TestScenarioGT02Batching.test_nb01b_preserves_atomic_claim_and_batches_merge) ... ok
+test_adapter_batch_methods_exist (test_job_1b_deduplication.TestScenarioHInventoryBatching.test_adapter_batch_methods_exist) ... ok
+test_oracle_batch_metadata_queries (test_job_1b_deduplication.TestScenarioHInventoryBatching.test_oracle_batch_metadata_queries) ... ok
+test_sqlserver_batch_metadata_queries (test_job_1b_deduplication.TestScenarioHInventoryBatching.test_sqlserver_batch_metadata_queries) ... ok
+test_target_provisioning_handles_already_provisioned (test_job_1b_deduplication.TestScenarioIRepairRuns.test_target_provisioning_handles_already_provisioned) ... ok
+test_oracle_database_required (test_job_1b_deduplication.TestScenarioJBackwardCompatibility.test_oracle_database_required) ... ok
+test_source_identity_algorithm_unchanged (test_job_1b_deduplication.TestScenarioJBackwardCompatibility.test_source_identity_algorithm_unchanged) ... ok
+test_job_1b_documented_task_graph (test_job_1b_deduplication.TestScenarioKArchitectureContract.test_job_1b_documented_task_graph) ... ok
+test_job_1b_yaml_not_in_repository (test_job_1b_deduplication.TestScenarioKArchitectureContract.test_job_1b_yaml_not_in_repository) ... ok
 test_all_required_methods_present (test_modularity.TestAdapterContract.test_all_required_methods_present) ... ok
 test_object_type_normalization (test_modularity.TestAdapterContract.test_object_type_normalization) ... ok
 test_probe_queries_are_dialect_specific (test_modularity.TestAdapterContract.test_probe_queries_are_dialect_specific) ... ok
@@ -333,10 +355,14 @@ test_capabilities_are_explicit (test_modularity.TestSourceRegistration.test_capa
 test_notebook_paths_exist_on_disk (test_modularity.TestSourceRegistration.test_notebook_paths_exist_on_disk) ... ok
 test_registered_adapters_match_the_factory (test_modularity.TestSourceRegistration.test_registered_adapters_match_the_factory) ... ok
 test_unknown_source_fails_explicitly (test_modularity.TestSourceRegistration.test_unknown_source_fails_explicitly) ... ok
-test_generated_draft_is_pending_review (test_modularity.TestSqlObjectCommonRules.test_generated_draft_is_pending_review) ... ok
-test_missing_definition_is_unable_to_assess (test_modularity.TestSqlObjectCommonRules.test_missing_definition_is_unable_to_assess) ... ok
-test_terminal_review_statuses_are_preserved_by_contract (test_modularity.TestSqlObjectCommonRules.test_terminal_review_statuses_are_preserved_by_contract) ... ok
+test_definition_is_inventoried_unchanged (test_modularity.TestSqlObjectCommonRules.test_definition_is_inventoried_unchanged) ... ok
+test_merge_key_isolates_connections_and_assessments (test_modularity.TestSqlObjectCommonRules.test_merge_key_isolates_connections_and_assessments) ... ok
+test_missing_definition_records_an_explicit_reason (test_modularity.TestSqlObjectCommonRules.test_missing_definition_records_an_explicit_reason) ... ok
 test_unsupported_object_type_rejected (test_modularity.TestSqlObjectCommonRules.test_unsupported_object_type_rejected) ... ok
+test_control_table_ddl_has_no_conversion_columns (test_modularity.TestSqlObjectPersistenceContract.test_control_table_ddl_has_no_conversion_columns) ... ok
+test_merge_targets_the_retained_table_and_shared_keys (test_modularity.TestSqlObjectPersistenceContract.test_merge_targets_the_retained_table_and_shared_keys) ... ok
+test_merge_uses_an_explicit_insert_column_list (test_modularity.TestSqlObjectPersistenceContract.test_merge_uses_an_explicit_insert_column_list) ... ok
+test_no_review_or_conversion_columns_are_persisted (test_modularity.TestSqlObjectPersistenceContract.test_no_review_or_conversion_columns_are_persisted) ... ok
 test_blank_secret_scope_fails_without_leaking (test_modularity.TestTypeRulesResolution.test_blank_secret_scope_fails_without_leaking) ... ok
 test_named_rules_files_exist (test_modularity.TestTypeRulesResolution.test_named_rules_files_exist) ... ok
 test_oracle_names_its_rules_file (test_modularity.TestTypeRulesResolution.test_oracle_names_its_rules_file) ... ok
@@ -345,6 +371,22 @@ test_sqlserver_requires_database_metadata (test_modularity.TestTypeRulesResoluti
 test_unknown_source_fails_and_never_defaults (test_modularity.TestTypeRulesResolution.test_unknown_source_fails_and_never_defaults) ... ok
 test_assessment_summary_cells_compile (test_multi_connection.TestAssessmentSummaryNotebook.test_assessment_summary_cells_compile) ... ok
 test_assessment_summary_contract (test_multi_connection.TestAssessmentSummaryNotebook.test_assessment_summary_contract) ... ok
+test_blank_database_discovery_runs_only_when_valid_and_active (test_multi_connection.TestConnectionActiveEligibilityMatrix.test_blank_database_discovery_runs_only_when_valid_and_active)
+Blank database discovery connects to master only when connection is active and VALID. ... ok
+test_configured_mode_simulation_matrix (test_multi_connection.TestConnectionActiveEligibilityMatrix.test_configured_mode_simulation_matrix)
+CONFIGURED mode must include REGISTERED/VALID/FAILED with is_active=true, ... ok
+test_configured_mode_sql_predicate (test_multi_connection.TestConnectionActiveEligibilityMatrix.test_configured_mode_sql_predicate) ... ok
+test_inactive_connections_excluded_even_with_only_connection_ids (test_multi_connection.TestConnectionActiveEligibilityMatrix.test_inactive_connections_excluded_even_with_only_connection_ids)
+Inactive connections remain excluded even when specified in only_connection_ids. ... ok
+test_oracle_configured_mode_contract (test_multi_connection.TestConnectionActiveEligibilityMatrix.test_oracle_configured_mode_contract)
+Oracle Job 1A requires database/service, and honors is_active switch. ... ok
+test_sqlserver_database_worklist_defensive_filter_simulation (test_multi_connection.TestConnectionActiveEligibilityMatrix.test_sqlserver_database_worklist_defensive_filter_simulation)
+Test NB_GetAssessmentDatabaseWorklist defensive filter behavior. ... ok
+test_update_connection_status_contract (test_multi_connection.TestConnectionActiveEligibilityMatrix.test_update_connection_status_contract)
+Verify status update sets is_active and timestamps according to contract. ... ok
+test_valid_mode_simulation_matrix (test_multi_connection.TestConnectionActiveEligibilityMatrix.test_valid_mode_simulation_matrix)
+VALID mode must include VALID with is_active=true, ... ok
+test_valid_mode_sql_predicate (test_multi_connection.TestConnectionActiveEligibilityMatrix.test_valid_mode_sql_predicate) ... ok
 test_configured_discovery_exclusion_wins_entirely (test_multi_connection.TestConnectionDiscovery.test_configured_discovery_exclusion_wins_entirely) ... ok
 test_configured_discovery_filters_and_precedence (test_multi_connection.TestConnectionDiscovery.test_configured_discovery_filters_and_precedence) ... ok
 test_configured_discovery_oracle (test_multi_connection.TestConnectionDiscovery.test_configured_discovery_oracle) ... ok
@@ -383,7 +425,7 @@ test_16_failure_text_is_sanitized_and_bounded (test_multi_connection.TestConnect
 test_17_credentials_and_secrets_not_returned (test_multi_connection.TestConnectionValidationNotebookContract.test_17_credentials_and_secrets_not_returned) ... ok
 test_18_source_connection_metadata_not_mutated_by_nb00a (test_multi_connection.TestConnectionValidationNotebookContract.test_18_source_connection_metadata_not_mutated_by_nb00a) ... ok
 test_19_worklist_configured_mode_includes_all_statuses (test_multi_connection.TestConnectionValidationNotebookContract.test_19_worklist_configured_mode_includes_all_statuses) ... ok
-test_20_worklist_configured_mode_does_not_require_active (test_multi_connection.TestConnectionValidationNotebookContract.test_20_worklist_configured_mode_does_not_require_active) ... ok
+test_20_worklist_configured_mode_requires_active (test_multi_connection.TestConnectionValidationNotebookContract.test_20_worklist_configured_mode_requires_active) ... ok
 test_21_worklist_valid_mode_preserves_active_and_valid (test_multi_connection.TestConnectionValidationNotebookContract.test_21_worklist_valid_mode_preserves_active_and_valid) ... ok
 test_22_worklist_emits_only_connection_id (test_multi_connection.TestConnectionValidationNotebookContract.test_22_worklist_emits_only_connection_id) ... ok
 test_23_worklist_only_and_exclude_filters (test_multi_connection.TestConnectionValidationNotebookContract.test_23_worklist_only_and_exclude_filters) ... ok
@@ -435,6 +477,29 @@ test_full_load_target_collision_guard_behavior (test_multi_connection.TestMixedS
 test_onboarding_activation_flow_and_full_load_exclusion (test_multi_connection.TestMixedSourceOwnership.test_onboarding_activation_flow_and_full_load_exclusion) ... ok
 test_registration_and_provisioning_guard_target_collisions (test_multi_connection.TestMixedSourceOwnership.test_registration_and_provisioning_guard_target_collisions) ... ok
 test_registration_scopes_assessment_ownership_by_connection (test_multi_connection.TestMixedSourceOwnership.test_registration_scopes_assessment_ownership_by_connection) ... ok
+test_a_active_registered_connection (test_multi_connection.TestNB00ConnectionValidationAndJob1ASequence.test_a_active_registered_connection)
+Active REGISTERED connection passes NB00, remains unchanged, and enters CONFIGURED worklist. ... ok
+test_b_active_valid_connection (test_multi_connection.TestNB00ConnectionValidationAndJob1ASequence.test_b_active_valid_connection)
+Active VALID connection passes NB00 and is included in CONFIGURED and VALID worklists. ... ok
+test_c_active_failed_connection (test_multi_connection.TestNB00ConnectionValidationAndJob1ASequence.test_c_active_failed_connection)
+Active FAILED connection passes NB00, enters CONFIGURED for retry, excluded from VALID. ... ok
+test_d_active_unsupported_status (test_multi_connection.TestNB00ConnectionValidationAndJob1ASequence.test_d_active_unsupported_status)
+Active connection with unsupported status is flagged by ACTIVE_CONNECTION_INVALID_STATUS. ... ok
+test_e_active_blank_or_null_status (test_multi_connection.TestNB00ConnectionValidationAndJob1ASequence.test_e_active_blank_or_null_status)
+Active connection with blank or NULL status is flagged by ACTIVE_CONNECTION_INVALID_STATUS. ... ok
+test_f_inactive_connection_ignored_by_nb00_and_excluded_from_worklists (test_multi_connection.TestNB00ConnectionValidationAndJob1ASequence.test_f_inactive_connection_ignored_by_nb00_and_excluded_from_worklists)
+Inactive connection (is_active=false) is ignored by NB00 regardless of status, and excluded from worklists. ... ok
+test_g_null_is_active_treated_as_inactive (test_multi_connection.TestNB00ConnectionValidationAndJob1ASequence.test_g_null_is_active_treated_as_inactive)
+NULL is_active is treated as inactive: ignored by NB00 and excluded from worklists. ... ok
+test_h_operational_table_protection (test_multi_connection.TestNB00ConnectionValidationAndJob1ASequence.test_h_operational_table_protection)
+Active operational tables strictly require a VALID + active parent connection. ... ok
+test_job1a_sequence_initial_registration_to_validation (test_multi_connection.TestNB00ConnectionValidationAndJob1ASequence.test_job1a_sequence_initial_registration_to_validation)
+Job 1A sequence: REGISTERED + true -> NB00 -> CONFIGURED worklist -> Validate -> VALID + true -> VALID worklist. ... ok
+test_job1a_sequence_retry_flow (test_multi_connection.TestNB00ConnectionValidationAndJob1ASequence.test_job1a_sequence_retry_flow)
+Job 1A retry flow: FAILED + true -> NB00 -> CONFIGURED worklist -> Revalidate. ... ok
+test_nb00_validation_query_structure (test_multi_connection.TestNB00ConnectionValidationAndJob1ASequence.test_nb00_validation_query_structure) ... ok
+test_sqlite_direct_predicate_execution (test_multi_connection.TestNB00ConnectionValidationAndJob1ASequence.test_sqlite_direct_predicate_execution)
+Execute the exact NB00 predicates in an in-memory SQL database. ... ok
 test_registration_exit_payload_contract (test_multi_connection.TestRegistrationSelectionModes.test_registration_exit_payload_contract) ... ok
 test_registration_supports_assessment_flags (test_multi_connection.TestRegistrationSelectionModes.test_registration_supports_assessment_flags) ... ok
 test_check_overlapping_selected_assessments (test_multi_connection.TestSelectedAssessmentDiscovery.test_check_overlapping_selected_assessments) ... ok
@@ -780,28 +845,67 @@ test_l48_to_l55_content_integrity (test_sql_object_artifact_materialization.Test
 test_static_safety_active_conflict_does_not_mutate_manifest (test_sql_object_artifact_materialization.TestSqlObjectArtifactMaterialization.test_static_safety_active_conflict_does_not_mutate_manifest) ... ok
 test_static_safety_conditional_in_progress_claim_and_verification (test_sql_object_artifact_materialization.TestSqlObjectArtifactMaterialization.test_static_safety_conditional_in_progress_claim_and_verification) ... ok
 test_static_safety_general_merge_sql_conditioned (test_sql_object_artifact_materialization.TestSqlObjectArtifactMaterialization.test_static_safety_general_merge_sql_conditioned) ... ok
-test_generated_output_remains_pending_review (test_sql_object_converter.TestAiSafety.test_generated_output_remains_pending_review) ... ok
-test_unconfigured_ai_preserves_deterministic_output (test_sql_object_converter.TestAiSafety.test_unconfigured_ai_preserves_deterministic_output) ... ok
-test_use_ai_false_cannot_invoke_an_ai_endpoint (test_sql_object_converter.TestAiSafety.test_use_ai_false_cannot_invoke_an_ai_endpoint) ... ok
-test_cursor_forces_manual (test_sql_object_converter.TestClassify.test_cursor_forces_manual) ... ok
-test_dynamic_sql_forces_manual (test_sql_object_converter.TestClassify.test_dynamic_sql_forces_manual) ... ok
-test_keyword_inside_string_not_manual (test_sql_object_converter.TestClassify.test_keyword_inside_string_not_manual) ... ok
-test_missing_text_unable (test_sql_object_converter.TestClassify.test_missing_text_unable) ... ok
-test_oracle_package_manual (test_sql_object_converter.TestClassify.test_oracle_package_manual) ... ok
-test_simple_view_auto (test_sql_object_converter.TestClassify.test_simple_view_auto) ... ok
-test_temp_table_forces_manual (test_sql_object_converter.TestClassify.test_temp_table_forces_manual) ... ok
-test_view_with_source_syntax_review (test_sql_object_converter.TestClassify.test_view_with_source_syntax_review) ... ok
-test_empty_definition_not_started (test_sql_object_converter.TestConvert.test_empty_definition_not_started) ... ok
-test_missing_source_fails (test_sql_object_converter.TestConvert.test_missing_source_fails) ... ok
-test_oracle_nvl_and_sysdate (test_sql_object_converter.TestConvert.test_oracle_nvl_and_sysdate) ... ok
-test_procedure_not_supported_guidance (test_sql_object_converter.TestConvert.test_procedure_not_supported_guidance) ... ok
-test_replacements_skip_string_literals (test_sql_object_converter.TestConvert.test_replacements_skip_string_literals) ... ok
-test_simple_top_becomes_limit (test_sql_object_converter.TestConvert.test_simple_top_becomes_limit) ... ok
-test_sqlserver_isnull_getdate_len_brackets (test_sql_object_converter.TestConvert.test_sqlserver_isnull_getdate_len_brackets) ... ok
-test_unknown_source_never_uses_sqlserver_rewrites (test_sql_object_converter.TestConvert.test_unknown_source_never_uses_sqlserver_rewrites) ... ok
+test_blank_encrypted_or_missing_definition_is_reported (test_sql_object_converter.TestInaccessibleDefinition.test_blank_encrypted_or_missing_definition_is_reported) ... ok
+test_error_message_never_exposes_credentials (test_sql_object_converter.TestInaccessibleDefinition.test_error_message_never_exposes_credentials) ... ok
+test_unsupported_object_type_is_rejected (test_sql_object_converter.TestInaccessibleDefinition.test_unsupported_object_type_is_rejected) ... ok
+test_nb13_never_executes_or_deploys_source_sql (test_sql_object_converter.TestNoConversionBehaviourRemains.test_nb13_never_executes_or_deploys_source_sql) ... ok
+test_nb13_no_longer_exposes_mode_or_use_ai_widgets (test_sql_object_converter.TestNoConversionBehaviourRemains.test_nb13_no_longer_exposes_mode_or_use_ai_widgets) ... ok
+test_nb13_notebooks_only_inventory_definitions (test_sql_object_converter.TestNoConversionBehaviourRemains.test_nb13_notebooks_only_inventory_definitions) ... ok
+test_no_conversion_fields_exist_on_the_contract (test_sql_object_converter.TestSourceDefinitionPreserved.test_no_conversion_fields_exist_on_the_contract) ... ok
+test_oracle_definition_is_preserved_exactly (test_sql_object_converter.TestSourceDefinitionPreserved.test_oracle_definition_is_preserved_exactly) ... ok
+test_record_matches_the_field_contract (test_sql_object_converter.TestSourceDefinitionPreserved.test_record_matches_the_field_contract) ... ok
+test_source_sql_text_is_never_rewritten (test_sql_object_converter.TestSourceDefinitionPreserved.test_source_sql_text_is_never_rewritten) ... ok
+test_sqlserver_definition_is_preserved_exactly (test_sql_object_converter.TestSourceDefinitionPreserved.test_sqlserver_definition_is_preserved_exactly) ... ok
 test_complete_discovery_query_failure_is_failed (test_sql_object_converter.TestSqlObjectCoverage.test_complete_discovery_query_failure_is_failed) ... ok
 test_inaccessible_definition_is_partial_not_discovery_failure (test_sql_object_converter.TestSqlObjectCoverage.test_inaccessible_definition_is_partial_not_discovery_failure) ... ok
 test_notebooks_return_coverage_counters_and_sanitized_errors (test_sql_object_converter.TestSqlObjectCoverage.test_notebooks_return_coverage_counters_and_sanitized_errors) ... ok
+test_artifact_owner_key_includes_source_database (test_sqlserver_multi_database.TestAssessmentIsolationAcrossDatabases.test_artifact_owner_key_includes_source_database) ... ok
+test_artifact_path_includes_source_database (test_sqlserver_multi_database.TestAssessmentIsolationAcrossDatabases.test_artifact_path_includes_source_database) ... ok
+test_merge_keys_include_source_database (test_sqlserver_multi_database.TestAssessmentIsolationAcrossDatabases.test_merge_keys_include_source_database) ... ok
+test_sql_object_identity_distinguishes_databases (test_sqlserver_multi_database.TestAssessmentIsolationAcrossDatabases.test_sql_object_identity_distinguishes_databases) ... ok
+test_table_identity_distinguishes_databases (test_sqlserver_multi_database.TestAssessmentIsolationAcrossDatabases.test_table_identity_distinguishes_databases) ... ok
+test_assessment_summary_selects_source_database (test_sqlserver_multi_database.TestAssessmentSummaryMultiDatabase.test_assessment_summary_selects_source_database) ... ok
+test_oracle_nb00a_requires_database (test_sqlserver_multi_database.TestConnectionValidationMasterFallback.test_oracle_nb00a_requires_database) ... ok
+test_sqlserver_nb00a_uses_master_for_blank_database (test_sqlserver_multi_database.TestConnectionValidationMasterFallback.test_sqlserver_nb00a_uses_master_for_blank_database) ... ok
+test_nb_get_connection_worklist_allows_blank_sqlserver_database (test_sqlserver_multi_database.TestConnectionWorklistValidation.test_nb_get_connection_worklist_allows_blank_sqlserver_database) ... ok
+test_deterministic_sorting_and_deduplication (test_sqlserver_multi_database.TestDatabaseAssessmentWorklist.test_deterministic_sorting_and_deduplication) ... ok
+test_notebook_exists (test_sqlserver_multi_database.TestDatabaseAssessmentWorklist.test_notebook_exists) ... ok
+test_payload_limit_enforced (test_sqlserver_multi_database.TestDatabaseAssessmentWorklist.test_payload_limit_enforced) ... ok
+test_zero_accessible_databases_fails (test_sqlserver_multi_database.TestDatabaseAssessmentWorklist.test_zero_accessible_databases_fails) ... ok
+test_claim_row_includes_database_predicate (test_sqlserver_multi_database.TestDatabaseQualifiedStateTransitions.test_claim_row_includes_database_predicate) ... ok
+test_onboarding_failed_includes_database_predicate (test_sqlserver_multi_database.TestDatabaseQualifiedStateTransitions.test_onboarding_failed_includes_database_predicate) ... ok
+test_registration_succeeded_includes_database_predicate (test_sqlserver_multi_database.TestDatabaseQualifiedStateTransitions.test_registration_succeeded_includes_database_predicate) ... ok
+test_nb00_recomputes_identity_from_table_control_database (test_sqlserver_multi_database.TestDownstreamDatabaseRoutingWiring.test_nb00_recomputes_identity_from_table_control_database) ... ok
+test_nb09_uses_resolve_effective_source_database (test_sqlserver_multi_database.TestDownstreamDatabaseRoutingWiring.test_nb09_uses_resolve_effective_source_database) ... ok
+test_nb11a_uses_resolve_effective_source_database (test_sqlserver_multi_database.TestDownstreamDatabaseRoutingWiring.test_nb11a_uses_resolve_effective_source_database) ... ok
+test_nb11b_uses_routed_adapter_source_database (test_sqlserver_multi_database.TestDownstreamDatabaseRoutingWiring.test_nb11b_uses_routed_adapter_source_database) ... ok
+test_nb_migrate_identity_v2_uses_resolve_effective_source_database (test_sqlserver_multi_database.TestDownstreamDatabaseRoutingWiring.test_nb_migrate_identity_v2_uses_resolve_effective_source_database) ... ok
+test_source_assessment_merge_keys_include_source_database (test_sqlserver_multi_database.TestMergeKeysAndArtifactIsolation.test_source_assessment_merge_keys_include_source_database) ... ok
+test_sql_object_assessment_merge_keys_include_source_database (test_sqlserver_multi_database.TestMergeKeysAndArtifactIsolation.test_sql_object_assessment_merge_keys_include_source_database) ... ok
+test_two_databases_persist_independently (test_sqlserver_multi_database.TestMergeKeysAndArtifactIsolation.test_two_databases_persist_independently) ... ok
+test_different_databases_do_not_conflict (test_sqlserver_multi_database.TestMultiDatabaseOverlapDetection.test_different_databases_do_not_conflict) ... ok
+test_overlap_query_includes_source_database (test_sqlserver_multi_database.TestMultiDatabaseOverlapDetection.test_overlap_query_includes_source_database) ... ok
+test_true_overlap_reports_database_in_payload (test_sqlserver_multi_database.TestMultiDatabaseOverlapDetection.test_true_overlap_reports_database_in_payload) ... ok
+test_distinct_source_table_id_across_databases (test_sqlserver_multi_database.TestMultiDatabaseRegistrationAndTargetRouting.test_distinct_source_table_id_across_databases) ... ok
+test_nb01b_verifies_registered_source_database (test_sqlserver_multi_database.TestMultiDatabaseRegistrationAndTargetRouting.test_nb01b_verifies_registered_source_database) ... ok
+test_prefix_with_database_produces_isolated_targets (test_sqlserver_multi_database.TestMultiDatabaseRegistrationAndTargetRouting.test_prefix_with_database_produces_isolated_targets) ... ok
+test_target_schema_generation_modes (test_sqlserver_multi_database.TestMultiDatabaseRegistrationAndTargetRouting.test_target_schema_generation_modes) ... ok
+test_oracle_requires_configured_and_match (test_sqlserver_multi_database.TestOperationalDatabaseResolution.test_oracle_requires_configured_and_match) ... ok
+test_sqlserver_blank_configured_returns_operational (test_sqlserver_multi_database.TestOperationalDatabaseResolution.test_sqlserver_blank_configured_returns_operational) ... ok
+test_sqlserver_blank_operational_raises (test_sqlserver_multi_database.TestOperationalDatabaseResolution.test_sqlserver_blank_operational_raises) ... ok
+test_sqlserver_matching_populated_succeeds (test_sqlserver_multi_database.TestOperationalDatabaseResolution.test_sqlserver_matching_populated_succeeds) ... ok
+test_sqlserver_mismatch_raises (test_sqlserver_multi_database.TestOperationalDatabaseResolution.test_sqlserver_mismatch_raises) ... ok
+test_oracle_assessment_and_sqlobj_have_schema_widgets (test_sqlserver_multi_database.TestSchemaFilteringParameters.test_oracle_assessment_and_sqlobj_have_schema_widgets) ... ok
+test_shared_schema_resolver_filtering (test_sqlserver_multi_database.TestSchemaFilteringParameters.test_shared_schema_resolver_filtering) ... ok
+test_sqlserver_assessment_and_sqlobj_have_schema_widgets (test_sqlserver_multi_database.TestSchemaFilteringParameters.test_sqlserver_assessment_and_sqlobj_have_schema_widgets) ... ok
+test_blank_database_metadata_allowed_for_sqlserver (test_sqlserver_multi_database.TestSqlServerAdapterOverrideAndRouting.test_blank_database_metadata_allowed_for_sqlserver) ... ok
+test_clone_and_with_database (test_sqlserver_multi_database.TestSqlServerAdapterOverrideAndRouting.test_clone_and_with_database) ... ok
+test_jdbc_url_uses_database_override (test_sqlserver_multi_database.TestSqlServerAdapterOverrideAndRouting.test_jdbc_url_uses_database_override) ... ok
+test_resolve_effective_database_precedence (test_sqlserver_multi_database.TestSqlServerAdapterOverrideAndRouting.test_resolve_effective_database_precedence) ... ok
+test_excludes_system_databases (test_sqlserver_multi_database.TestSqlServerDatabaseDiscoveryQuery.test_excludes_system_databases) ... ok
+test_exposed_on_sqlserver_adapter (test_sqlserver_multi_database.TestSqlServerDatabaseDiscoveryQuery.test_exposed_on_sqlserver_adapter) ... ok
+test_oracle_adapter_does_not_expose_database_discovery (test_sqlserver_multi_database.TestSqlServerDatabaseDiscoveryQuery.test_oracle_adapter_does_not_expose_database_discovery) ... ok
+test_query_structure_and_filters (test_sqlserver_multi_database.TestSqlServerDatabaseDiscoveryQuery.test_query_structure_and_filters) ... ok
 test_adapter_can_supply_test_mapper_without_existing_mapper_edits (test_type_mappers.TestFutureSourceMapper.test_adapter_can_supply_test_mapper_without_existing_mapper_edits) ... ok
 test_adapters_return_matching_mapper (test_type_mappers.TestMapperOwnership.test_adapters_return_matching_mapper) ... ok
 test_base_contains_no_source_datatypes (test_type_mappers.TestMapperOwnership.test_base_contains_no_source_datatypes) ... ok
@@ -814,16 +918,22 @@ test_result_is_immutable (test_type_mappers.TestMapperOwnership.test_result_is_i
 test_unknown_mapper_source_fails (test_type_mappers.TestMapperOwnership.test_unknown_mapper_source_fails) ... ok
 test_every_yaml_rule_outcome_and_notes (test_type_mappers.TestOracleMappingRegression.test_every_yaml_rule_outcome_and_notes) ... ok
 test_number_precision_scale_regression (test_type_mappers.TestOracleMappingRegression.test_number_precision_scale_regression) ... ok
+test_oracle_date_mapping (test_type_mappers.TestOracleMappingRegression.test_oracle_date_mapping) ... ok
+test_oracle_does_not_define_standalone_time_rule (test_type_mappers.TestOracleMappingRegression.test_oracle_does_not_define_standalone_time_rule) ... ok
+test_oracle_timestamp_metadata_pipeline_integration (test_type_mappers.TestOracleMappingRegression.test_oracle_timestamp_metadata_pipeline_integration) ... ok
 test_oracle_type_matrix (test_type_mappers.TestOracleMappingRegression.test_oracle_type_matrix) ... ok
+test_timestamp_precision_mapping_regression (test_type_mappers.TestOracleMappingRegression.test_timestamp_precision_mapping_regression) ... ok
 test_decimal_precision_scale_regression (test_type_mappers.TestSqlServerMappingRegression.test_decimal_precision_scale_regression) ... ok
 test_every_yaml_rule_outcome_and_notes (test_type_mappers.TestSqlServerMappingRegression.test_every_yaml_rule_outcome_and_notes) ... ok
 test_sqlserver_type_matrix (test_type_mappers.TestSqlServerMappingRegression.test_sqlserver_type_matrix) ... ok
+test_time_precision_mapping_regression (test_type_mappers.TestSqlServerMappingRegression.test_time_precision_mapping_regression) ... ok
+test_time_precision_metadata_pipeline_integration (test_type_mappers.TestSqlServerMappingRegression.test_time_precision_metadata_pipeline_integration) ... ok
 test_invalid_status_and_fidelity_fail (test_type_mappers.TestYamlValidation.test_invalid_status_and_fidelity_fail) ... ok
 test_malformed_yaml_fails_without_content_echo (test_type_mappers.TestYamlValidation.test_malformed_yaml_fails_without_content_echo) ... ok
 test_source_mismatch_fails (test_type_mappers.TestYamlValidation.test_source_mismatch_fails) ... ok
 test_target_mismatch_fails (test_type_mappers.TestYamlValidation.test_target_mismatch_fails) ... ok
 
 ----------------------------------------------------------------------
-Ran 780 tests in 2.497s
+Ran 909 tests in 1.197s
 
 OK

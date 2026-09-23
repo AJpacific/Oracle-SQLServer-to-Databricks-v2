@@ -69,7 +69,7 @@ if len(safe_error) > 2000:
 
 # Find incomplete rows owned by this run
 candidate_query = f"""
-    SELECT source_schema, object_name, selection_status, onboarding_attempt_id
+    SELECT source_database, source_schema, object_name, selection_status, onboarding_attempt_id
     FROM {ctrl('source_assessment')}
     WHERE connection_id = {escape_string_literal(connection_id)}
       AND assessment_id = {escape_string_literal(assessment_id)}
@@ -85,6 +85,7 @@ errors = []
 for r in candidate_rows:
     row_dict = r.asDict(recursive=True)
 
+    s_db = row_dict.get("source_database")
     sch = row_dict["source_schema"]
     tbl = row_dict["object_name"]
     att = row_dict.get("onboarding_attempt_id")
@@ -98,6 +99,7 @@ for r in candidate_rows:
             attempt_id=att or None,
             failed_stage=failed_stage_raw,
             error=safe_error,
+            source_database=s_db,
         )
         if succ:
             failed_count += 1

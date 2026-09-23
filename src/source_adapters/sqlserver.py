@@ -182,6 +182,14 @@ class SqlServerSourceAdapter(SourceAdapter):
         db = validate_database(source_database) if source_database else None
         return ssb.primary_key_query(db, source_schema, source_table)
 
+    def batch_columns_metadata_query(self, source_database, tables: list):
+        db = validate_database(source_database) if source_database else None
+        return ssb.batch_columns_metadata_query(db, tables)
+
+    def batch_primary_key_query(self, source_database, tables: list):
+        db = validate_database(source_database) if source_database else None
+        return ssb.batch_primary_key_query(db, tables)
+
     def top_n_probe_query(self, source_database, source_schema, source_table, n):
         db = validate_database(source_database) if source_database else None
         return ssb.build_top_n_probe(db, source_schema, source_table, n)

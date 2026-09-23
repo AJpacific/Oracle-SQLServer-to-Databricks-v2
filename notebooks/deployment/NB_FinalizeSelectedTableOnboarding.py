@@ -81,7 +81,7 @@ if attempt_id:
     where_clauses.append(f"sa.onboarding_attempt_id = {escape_string_literal(attempt_id)}")
 
 candidate_query = f"""
-    SELECT sa.source_schema, sa.object_name, sa.source_system,
+    SELECT sa.source_database, sa.source_schema, sa.object_name, sa.source_system,
            sa.onboarding_run_id, sa.onboarding_attempt_id
     FROM {ctrl('source_assessment')} sa
     WHERE {' AND '.join(where_clauses)}
@@ -113,6 +113,7 @@ for row in candidate_rows:
         or row_dict.get("onboarding_attempt_id")
         or None
     )
+    effective_database = resolve_effective_source_database(row_dict, conn_dict)
 
     try:
         # 1. Recompute deterministic source_table_id for identity v2
@@ -120,14 +121,14 @@ for row in candidate_rows:
             connection_id=connection_id,
             source_system=source_sys,
             source_server=conn_dict.get("source_server"),
-            source_database=conn_dict.get("source_database"),
+            source_database=effective_database,
             source_schema=schema,
             source_table=table,
         )
 
         # 2. Resolve source_table_control row
         reg_query = f"""
-            SELECT source_table_id, connection_id, source_identity_version,
+            SELECT source_table_id, connection_id, source_database, source_identity_version,
                    table_decision, is_active, current_status,
                    target_catalog, target_schema, target_table
             FROM {ctrl('source_table_control')}
@@ -149,6 +150,12 @@ for row in candidate_rows:
             raise ValueError(f"Registration source_table_id mismatch for {schema}.{table}")
         if int(reg.get("source_identity_version") or 0) != SOURCE_IDENTITY_VERSION:
             raise ValueError(f"Registration for {schema}.{table} has invalid identity version: {reg.get('source_identity_version')}")
+        if effective_database and reg.get("source_database"):
+            if reg.get("source_database").strip().lower() != effective_database.strip().lower():
+                raise ValueError(
+                    f"Registration source_database mismatch for {schema}.{table}: "
+                    f"control has {reg.get('source_database')!r}, expected {effective_database!r}"
+                )
 
         decision = str(reg.get("table_decision") or "").upper().strip()
 
@@ -172,6 +179,7 @@ for row in candidate_rows:
                 attempt_id=effective_attempt_id or None,
                 terminal_status=terminal_status,
                 message=terminal_message,
+                source_database=effective_database,
             )
 
             if not transitioned:
@@ -218,6 +226,7 @@ for row in candidate_rows:
             object_name=table,
             run_id=run_id,
             attempt_id=effective_attempt_id,
+            source_database=effective_database,
         )
         if not succ:
             raise RuntimeError(f"Failed to transition assessment row {schema}.{table} to ONBOARDED")
@@ -238,6 +247,7 @@ for row in candidate_rows:
                 attempt_id=effective_attempt_id,
                 failed_stage="FINALIZATION",
                 error=safe_msg,
+                source_database=effective_database,
             )
         except Exception as state_exc:
             print(f"[warn] Failed to mark assessment row FAILED: {failcls.sanitize_message(state_exc)}")

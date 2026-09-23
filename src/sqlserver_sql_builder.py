@@ -164,6 +164,103 @@ def primary_key_query(database: str, owner: str, table: str) -> str:
     return q
 
 
+def _tables_predicate(tables: list, schema_col: str = "sch.name", table_col: str = "tb.name") -> str:
+    parts = []
+    for item in tables:
+        if isinstance(item, (tuple, list)):
+            sch, tbl = item[0], item[1]
+        elif isinstance(item, dict):
+            sch = item.get("source_schema") or item.get("schema")
+            tbl = item.get("source_table") or item.get("table")
+        else:
+            sch, tbl = str(item).split(".", 1)
+        s = escape_string_literal(str(sch))
+        t = escape_string_literal(str(tbl))
+        parts.append(f"({schema_col} = {s} AND {table_col} = {t})")
+    return " OR ".join(parts)
+
+
+def batch_columns_metadata_query(database: str, tables: list) -> str:
+    """Return a subquery yielding target-neutral column metadata for multiple tables.
+
+    Output labels match columns_metadata_query plus TABLE_SCHEMA and TABLE_NAME:
+      TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, ORDINAL_POSITION, IS_NULLABLE, DATA_TYPE,
+      CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE,
+      DATETIME_PRECISION, IS_IDENTITY, IS_COMPUTED, IS_HIDDEN,
+      IS_ROWVERSION, SOURCE_TYPE_SCHEMA
+    """
+    if not tables:
+        raise ValueError("tables list is required for batch column metadata query")
+    pred = _tables_predicate(tables, "sch.name", "tb.name")
+    if database:
+        prefix = f"{quote_sqlserver(database)}.sys."
+    else:
+        prefix = "sys."
+    q = f"""(
+        SELECT
+            sch.name                                      AS TABLE_SCHEMA,
+            tb.name                                       AS TABLE_NAME,
+            c.name                                        AS COLUMN_NAME,
+            c.column_id                                   AS ORDINAL_POSITION,
+            CASE WHEN c.is_nullable = 1 THEN 'YES' ELSE 'NO' END AS IS_NULLABLE,
+            ty.name                                       AS DATA_TYPE,
+            CASE
+                WHEN c.max_length = -1 THEN -1
+                WHEN ty.name IN ('nchar','nvarchar') THEN c.max_length / 2
+                ELSE c.max_length
+            END                                           AS CHARACTER_MAXIMUM_LENGTH,
+            c.precision                                   AS NUMERIC_PRECISION,
+            c.scale                                       AS NUMERIC_SCALE,
+            CASE WHEN ty.name IN ('time','datetime2','datetimeoffset')
+                 THEN c.scale END                         AS DATETIME_PRECISION,
+            CAST(c.is_identity AS INT)                    AS IS_IDENTITY,
+            CAST(c.is_computed AS INT)                    AS IS_COMPUTED,
+            CAST(c.is_hidden AS INT)                      AS IS_HIDDEN,
+            CASE WHEN ty.name IN ('timestamp','rowversion') THEN 1 ELSE 0 END
+                                                          AS IS_ROWVERSION,
+            tsch.name                                     AS SOURCE_TYPE_SCHEMA
+        FROM {prefix}columns c
+        JOIN {prefix}tables tb   ON c.object_id = tb.object_id
+        JOIN {prefix}schemas sch ON tb.schema_id = sch.schema_id
+        JOIN {prefix}types ty    ON c.user_type_id = ty.user_type_id
+        JOIN {prefix}schemas tsch ON ty.schema_id = tsch.schema_id
+        WHERE ({pred})
+    ) q"""
+    return q
+
+
+def batch_primary_key_query(database: str, tables: list) -> str:
+    """Return a subquery yielding ordered primary-key columns for multiple tables.
+
+    Output labels: TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, KEY_POSITION.
+    """
+    if not tables:
+        raise ValueError("tables list is required for batch primary key query")
+    pred = _tables_predicate(tables, "sch.name", "tb.name")
+    if database:
+        prefix = f"{quote_sqlserver(database)}.sys."
+    else:
+        prefix = "sys."
+    q = f"""(
+        SELECT sch.name AS TABLE_SCHEMA,
+               tb.name AS TABLE_NAME,
+               c.name AS COLUMN_NAME,
+               ic.key_ordinal AS KEY_POSITION
+        FROM {prefix}indexes i
+        JOIN {prefix}index_columns ic
+             ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+        JOIN {prefix}columns c
+             ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+        JOIN {prefix}tables tb   ON i.object_id = tb.object_id
+        JOIN {prefix}schemas sch ON tb.schema_id = sch.schema_id
+        WHERE i.is_primary_key = 1
+          AND ic.is_included_column = 0
+          AND ic.key_ordinal > 0
+          AND ({pred})
+    ) q"""
+    return q
+
+
 # ----------------------------------------------------------------------- probes
 def build_top_n_probe(database: str, owner: str, table: str, n: int = 5) -> str:
     """A safe 'read only a few rows' probe using SQL Server ``TOP (n)``."""

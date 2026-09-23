@@ -85,6 +85,80 @@ def primary_key_query(owner: str, table: str) -> str:
     return q
 
 
+def _tables_predicate(tables: list, owner_col: str = "owner", table_col: str = "table_name") -> str:
+    parts = []
+    for item in tables:
+        if isinstance(item, (tuple, list)):
+            sch, tbl = item[0], item[1]
+        elif isinstance(item, dict):
+            sch = item.get("source_schema") or item.get("schema")
+            tbl = item.get("source_table") or item.get("table")
+        else:
+            sch, tbl = str(item).split(".", 1)
+        o = escape_string_literal(str(sch))
+        t = escape_string_literal(str(tbl))
+        parts.append(f"({owner_col} = {o} AND {table_col} = {t})")
+    return " OR ".join(parts)
+
+
+def batch_columns_metadata_query(tables: list) -> str:
+    """Return a subquery that yields target-neutral column metadata for multiple tables.
+
+    Output columns match columns_metadata_query plus table_schema and table_name:
+      table_schema, table_name, column_name, ordinal_position, is_nullable, data_type,
+      character_maximum_length, numeric_precision, numeric_scale, datetime_precision.
+    """
+    if not tables:
+        raise ValueError("tables list is required for batch column metadata query")
+    pred = _tables_predicate(tables, "owner", "table_name")
+    q = f"""(
+        SELECT
+            owner                                         AS table_schema,
+            table_name                                    AS table_name,
+            column_name                                   AS column_name,
+            column_id                                     AS ordinal_position,
+            CASE WHEN nullable = 'Y' THEN 'YES' ELSE 'NO' END AS is_nullable,
+            data_type                                     AS data_type,
+            CASE
+                WHEN data_type IN ('CHAR','VARCHAR2','NCHAR','NVARCHAR2')
+                    THEN char_length
+                ELSE data_length
+            END                                           AS character_maximum_length,
+            data_precision                                AS numeric_precision,
+            data_scale                                    AS numeric_scale,
+            CASE WHEN data_type LIKE 'TIMESTAMP%' THEN data_scale END
+                                                          AS datetime_precision
+        FROM all_tab_columns
+        WHERE ({pred})
+        ORDER BY owner, table_name, column_id
+    ) q"""
+    return q
+
+
+def batch_primary_key_query(tables: list) -> str:
+    """Return a subquery yielding ordered primary-key columns for multiple tables.
+
+    Output columns: table_schema, table_name, column_name, key_position.
+    """
+    if not tables:
+        raise ValueError("tables list is required for batch primary key query")
+    pred = _tables_predicate(tables, "cons.owner", "cons.table_name")
+    q = f"""(
+        SELECT cons.owner       AS table_schema,
+               cons.table_name  AS table_name,
+               cols.column_name AS column_name,
+               cols.position    AS key_position
+        FROM all_constraints cons
+        JOIN all_cons_columns cols
+             ON cons.owner = cols.owner
+            AND cons.constraint_name = cols.constraint_name
+        WHERE cons.constraint_type = 'P'
+          AND ({pred})
+        ORDER BY cons.owner, cons.table_name, cols.position
+    ) q"""
+    return q
+
+
 # ----------------------------------------------------------------------- probes
 def build_top_n_probe(owner: str, table: str, n: int = 5) -> str:
     """A safe 'read only a few rows' probe using Oracle FETCH FIRST."""
