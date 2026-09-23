@@ -50,7 +50,9 @@ for r in maps:
     requires_review = d.get("requires_review")
 
     def _add(severity, rule, message):
-        results.append((run_id, src_id, conn_id, src_system, schema, table, col,
+        results.append((run_id, src_id, conn_id, src_system,
+                        r["source_server"], r["source_database"],
+                        schema, table, col,
                         severity, rule, message))
 
     # Canonical policy outcomes decided by the source adapter. This notebook
@@ -94,6 +96,7 @@ spark.sql(f"""
 
 if results:
     cols = ["run_id", "source_table_id", "connection_id", "source_system",
+            "source_server", "source_database",
             "source_schema", "source_table", "column_name", "severity", "rule",
             "message"]
     df = spark.createDataFrame(results, cols).withColumn("captured_ts", F.current_timestamp())

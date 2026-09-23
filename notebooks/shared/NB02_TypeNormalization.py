@@ -66,7 +66,9 @@ for r in rows:
         f"{bool(r['is_computed'])}:{bool(r['is_hidden'])}:"
         f"{bool(r['is_rowversion'])}:{r['source_type_schema']}"
     ))
-    out.append((run_id, src_id, conn_id, src_system, r["source_schema"], r["source_table"],
+    out.append((run_id, src_id, conn_id, src_system,
+                r["source_server"], r["source_database"],
+                r["source_schema"], r["source_table"],
                 r["column_name"], int(r["ordinal_position"]), raw, normalized,
                 prec, scale, length, nullable, bool(r["is_identity"]),
                 bool(r["is_computed"]), bool(r["is_hidden"]),
@@ -106,6 +108,8 @@ if out:
         StructField("source_table_id", StringType(), True),
         StructField("connection_id", StringType(), True),
         StructField("source_system", StringType(), True),
+        StructField("source_server", StringType(), True),
+        StructField("source_database", StringType(), True),
         StructField("source_schema", StringType(), True),
         StructField("source_table", StringType(), True),
         StructField("column_name", StringType(), True),

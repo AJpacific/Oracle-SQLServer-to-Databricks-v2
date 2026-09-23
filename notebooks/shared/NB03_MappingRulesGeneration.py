@@ -62,6 +62,7 @@ for r in norm:
         policy = adapter.apply_column_policy(r.asDict(), res)
         mapped.append((
             run_id, r["source_table_id"], r["connection_id"], src_system,
+            r["source_server"], r["source_database"],
             r["source_schema"], r["source_table"], r["column_name"],
             int(r["ordinal_position"]), res.source_type, res.databricks_delta_type,
             policy.mapping_status, policy.mapping_fidelity, policy.notes,
@@ -75,6 +76,7 @@ for r in norm:
         safe_error = failcls.sanitize_message(exc)
         mapped.append((
             run_id, r["source_table_id"], r["connection_id"], src_system,
+            r["source_server"], r["source_database"],
             r["source_schema"], r["source_table"], r["column_name"],
             int(r["ordinal_position"]), r["raw_type"], None,
             "BLOCKED", "UNKNOWN",
@@ -118,6 +120,8 @@ if mapped:
         StructField("source_table_id", StringType(), True),
         StructField("connection_id", StringType(), True),
         StructField("source_system", StringType(), True),
+        StructField("source_server", StringType(), True),
+        StructField("source_database", StringType(), True),
         StructField("source_schema", StringType(), True),
         StructField("source_table", StringType(), True),
         StructField("column_name", StringType(), True),

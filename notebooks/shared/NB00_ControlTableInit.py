@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS {ctrl('source_inventory')} (
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {ctrl('normalized_source_inventory')} (
   run_id STRING, connection_id STRING, source_table_id STRING, source_system STRING,
+  source_server STRING, source_database STRING,
   source_schema STRING, source_table STRING, column_name STRING,
   ordinal_position INT, raw_type STRING, normalized_type STRING,
   precision INT, scale INT, length INT, is_nullable BOOLEAN,
@@ -117,6 +118,7 @@ CREATE TABLE IF NOT EXISTS {ctrl('normalized_source_inventory')} (
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {ctrl('resolved_column_mappings')} (
   run_id STRING, connection_id STRING, source_table_id STRING, source_system STRING,
+  source_server STRING, source_database STRING,
   source_schema STRING, source_table STRING, column_name STRING,
   ordinal_position INT, source_type STRING, databricks_delta_type STRING,
   mapping_status STRING, fidelity STRING, notes STRING, is_nullable BOOLEAN,
@@ -129,6 +131,7 @@ CREATE TABLE IF NOT EXISTS {ctrl('resolved_column_mappings')} (
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {ctrl('mapping_validation_results')} (
   run_id STRING, connection_id STRING, source_table_id STRING, source_system STRING,
+  source_server STRING, source_database STRING,
   source_schema STRING, source_table STRING, column_name STRING,
   severity STRING, rule STRING, message STRING, captured_ts TIMESTAMP
 ) USING DELTA
@@ -137,6 +140,7 @@ CREATE TABLE IF NOT EXISTS {ctrl('mapping_validation_results')} (
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {ctrl('table_load_decisions')} (
   run_id STRING, connection_id STRING, source_table_id STRING, source_system STRING,
+  source_server STRING, source_database STRING,
   source_schema STRING, source_table STRING,
   decision STRING, reason STRING, blocked_columns INT, review_columns INT,
   total_columns INT, captured_ts TIMESTAMP
@@ -146,6 +150,7 @@ CREATE TABLE IF NOT EXISTS {ctrl('table_load_decisions')} (
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {ctrl('review_queue')} (
   connection_id STRING, source_table_id STRING, source_system STRING,
+  source_server STRING, source_database STRING,
   source_schema STRING, source_table STRING, decision STRING, reason STRING,
   blocked_columns INT, review_columns INT, total_columns INT,
   review_status STRING, run_id STRING, captured_ts TIMESTAMP
@@ -337,12 +342,12 @@ _ensure_columns("source_inventory", _SOURCE_ID_FULL + [
     ("is_hidden", "BOOLEAN"), ("is_rowversion", "BOOLEAN"),
     ("source_type_schema", "STRING"),
 ])
-_ensure_columns("normalized_source_inventory", _SOURCE_ID_ONLY + [
+_ensure_columns("normalized_source_inventory", _SOURCE_ID_FULL + [
     ("is_identity", "BOOLEAN"), ("is_computed", "BOOLEAN"),
     ("is_hidden", "BOOLEAN"), ("is_rowversion", "BOOLEAN"),
     ("source_type_schema", "STRING"),
 ])
-_ensure_columns("resolved_column_mappings", _SOURCE_ID_ONLY + [
+_ensure_columns("resolved_column_mappings", _SOURCE_ID_FULL + [
     ("is_identity", "BOOLEAN"), ("is_computed", "BOOLEAN"),
     ("is_hidden", "BOOLEAN"), ("is_rowversion", "BOOLEAN"),
     ("source_type_schema", "STRING"),
@@ -350,9 +355,9 @@ _ensure_columns("resolved_column_mappings", _SOURCE_ID_ONLY + [
     ("include_column", "BOOLEAN"), ("is_writable", "BOOLEAN"),
     ("requires_review", "BOOLEAN"), ("policy_code", "STRING"),
 ])
-_ensure_columns("mapping_validation_results", _SOURCE_ID_ONLY)
-_ensure_columns("table_load_decisions", _SOURCE_ID_ONLY)
-_ensure_columns("review_queue", _SOURCE_ID_ONLY)
+_ensure_columns("mapping_validation_results", _SOURCE_ID_FULL)
+_ensure_columns("table_load_decisions", _SOURCE_ID_FULL)
+_ensure_columns("review_queue", _SOURCE_ID_FULL)
 _ensure_columns("table_run_log", _SOURCE_ID_FULL)
 _ensure_columns("reconciliation_results", _SOURCE_ID_ONLY)
 _ensure_columns(
@@ -988,14 +993,36 @@ if _noncanonical_source_systems_count:
     print(f"  UPDATE {ctrl('source_assessment')} SET source_system = 'sqlserver' WHERE lower(trim(source_system)) IN ('sql_server', 'sql-server', 'mssql', 'sql server', 'microsoft sql server', 'microsoft_sql_server');")
     print(f"  UPDATE {ctrl('source_table_control')} SET source_system = 'sqlserver' WHERE lower(trim(source_system)) IN ('sql_server', 'sql-server', 'mssql', 'sql server', 'microsoft sql server', 'microsoft_sql_server');")
 
+_downstream_missing_db_checks = (
+    ("MISSING_SQLSERVER_NORMALIZED_SOURCE_DATABASE", "normalized_source_inventory"),
+    ("MISSING_SQLSERVER_RESOLVED_MAPPING_SOURCE_DATABASE", "resolved_column_mappings"),
+    ("MISSING_SQLSERVER_MAPPING_VALIDATION_SOURCE_DATABASE", "mapping_validation_results"),
+    ("MISSING_SQLSERVER_TABLE_DECISION_SOURCE_DATABASE", "table_load_decisions"),
+    ("MISSING_SQLSERVER_REVIEW_QUEUE_SOURCE_DATABASE", "review_queue"),
+)
+_missing_sqlserver_database_downstream_count = 0
+for _code, _tbl in _downstream_missing_db_checks:
+    _cnt = spark.sql(f"""
+        SELECT count(*) AS c
+        FROM {ctrl(_tbl)}
+        WHERE lower(trim(coalesce(source_system, ''))) = 'sqlserver'
+          AND (source_database IS NULL OR trim(source_database) = '')
+    """).collect()[0]["c"]
+    if _cnt:
+        _missing_sqlserver_database_downstream_count += int(_cnt)
+        print(f"Notice: {_cnt} row(s) in {_tbl} missing SQL Server source_database [{_code}].")
+
 business_status = "MIGRATION_REQUIRED" if _legacy_identity_count else "READY"
 if business_status == "READY" and _noncanonical_source_systems_count:
     business_status = "SOURCE_SYSTEM_CANONICALIZATION_REQUIRED"
+if business_status == "READY" and _missing_sqlserver_database_downstream_count:
+    business_status = "REPAIR_REQUIRED"
 
 set_task_value("status", "SUCCEEDED")
 set_task_value("business_status", business_status)
 set_task_value("legacy_identity_count", int(_legacy_identity_count or 0))
 set_task_value("noncanonical_source_systems_count", int(_noncanonical_source_systems_count or 0))
+set_task_value("missing_sqlserver_database_downstream_count", int(_missing_sqlserver_database_downstream_count or 0))
 set_task_value("run_id", run_id)
 
 spark.sql(f"""
@@ -1005,12 +1032,14 @@ VALUES ({escape_string_literal(run_id)}, 'NB00_ControlTableInit', 'SUCCEEDED',
 """)
 print(f"NB00 complete: status=SUCCEEDED, business_status={business_status}, "
       f"legacy_identity_count={int(_legacy_identity_count or 0)}, "
-      f"noncanonical_source_systems_count={int(_noncanonical_source_systems_count or 0)}")
+      f"noncanonical_source_systems_count={int(_noncanonical_source_systems_count or 0)}, "
+      f"missing_sqlserver_database_downstream_count={int(_missing_sqlserver_database_downstream_count or 0)}")
 dbutils.notebook.exit(json.dumps({
     "status": "SUCCEEDED",
     "business_status": business_status,
     "legacy_identity_count": int(_legacy_identity_count or 0),
     "noncanonical_source_systems_count": int(_noncanonical_source_systems_count or 0),
+    "missing_sqlserver_database_downstream_count": int(_missing_sqlserver_database_downstream_count or 0),
     "fatal_validation_error_count": 0,
     "run_id": run_id,
 }))
