@@ -133,7 +133,7 @@ WITH ranked AS (
         source_schema, object_name, object_type, source_definition,
         captured_ts, updated_ts,
         ROW_NUMBER() OVER (
-            PARTITION BY connection_id, source_schema, object_type, object_name
+            PARTITION BY connection_id, source_database, source_schema, object_type, object_name
             ORDER BY captured_ts DESC NULLS LAST, updated_ts DESC NULLS LAST,
                      assessment_id DESC, run_id DESC
         ) AS rn
@@ -186,6 +186,7 @@ def _merge_manifest_rows(rows):
         MERGE INTO {manifest_fqn} t
         USING {view_name} s
            ON t.connection_id = s.connection_id
+          AND coalesce(t.source_database, '') = coalesce(s.source_database, '')
           AND t.source_schema = s.source_schema
           AND t.object_type = s.object_type
           AND t.object_name = s.object_name
@@ -228,6 +229,7 @@ def _merge_manifest_rows(rows):
         owner_rows = spark.sql(f"""
             SELECT * FROM {manifest_fqn}
             WHERE connection_id = {escape_string_literal(r.get("connection_id"))}
+              AND coalesce(source_database, '') = {escape_string_literal(r.get("source_database") or "")}
               AND source_schema = {escape_string_literal(r.get("source_schema"))}
               AND object_type = {escape_string_literal(r.get("object_type"))}
               AND object_name = {escape_string_literal(r.get("object_name"))}
@@ -289,6 +291,7 @@ def _claim_manifest_owner(
         MERGE INTO {manifest_fqn} t
         USING {view_name} s
            ON t.connection_id = s.connection_id
+          AND coalesce(t.source_database, '') = coalesce(s.source_database, '')
           AND t.source_schema = s.source_schema
           AND t.object_type = s.object_type
           AND t.object_name = s.object_name
@@ -328,6 +331,7 @@ def _claim_manifest_owner(
     owner_rows = spark.sql(f"""
         SELECT * FROM {manifest_fqn}
         WHERE connection_id = {escape_string_literal(row.get("connection_id"))}
+          AND coalesce(source_database, '') = {escape_string_literal(row.get("source_database") or "")}
           AND source_schema = {escape_string_literal(row.get("source_schema"))}
           AND object_type = {escape_string_literal(object_type)}
           AND object_name = {escape_string_literal(row.get("object_name"))}
@@ -352,6 +356,7 @@ def _finalize_claimed_owner(result_row):
         MERGE INTO {manifest_fqn} t
         USING {view_name} s
            ON t.connection_id = s.connection_id
+          AND coalesce(t.source_database, '') = coalesce(s.source_database, '')
           AND t.source_schema = s.source_schema
           AND t.object_type = s.object_type
           AND t.object_name = s.object_name
@@ -375,6 +380,7 @@ def _finalize_claimed_owner(result_row):
     owner_rows = spark.sql(f"""
         SELECT * FROM {manifest_fqn}
         WHERE connection_id = {escape_string_literal(result_row["connection_id"])}
+          AND coalesce(source_database, '') = {escape_string_literal(result_row.get("source_database") or "")}
           AND source_schema = {escape_string_literal(result_row["source_schema"])}
           AND object_type = {escape_string_literal(result_row["object_type"])}
           AND object_name = {escape_string_literal(result_row["object_name"])}
@@ -457,8 +463,9 @@ for row in candidates:
     assess_id = row.get("assessment_id")
     capt_ts = row.get("captured_ts")
 
-    owner = (conn_id, source_sch, norm_type, obj_name)
-    existing_rec = existing_manifest_by_owner.get(owner)
+    owner = sqlobj_art.artifact_owner_key(row)
+    legacy_owner = (conn_id, source_sch, norm_type, obj_name)
+    existing_rec = existing_manifest_by_owner.get(owner) or existing_manifest_by_owner.get(legacy_owner)
     prev_created_ts = existing_rec.get("created_ts") if existing_rec else None
 
     # Fail fast if another active run is currently materializing this owner:
@@ -541,7 +548,9 @@ for row in candidates:
         target_sch = source_sch.lower()
 
     try:
-        rel_path = sqlobj_art.build_artifact_relative_path(conn_id, source_sch, norm_type, obj_name)
+        rel_path = sqlobj_art.build_artifact_relative_path(
+            conn_id, source_sch, norm_type, obj_name, source_database=source_db
+        )
         vol_path = sqlobj_art.build_artifact_volume_path(target_cat, target_sch, volume_name, rel_path)
     except Exception as e:
         err_msg = failcls.sanitize_message(e)
@@ -560,7 +569,7 @@ for row in candidates:
         continue
 
     owners_with_path = existing_paths_to_owner.get(vol_path, set())
-    if any(o != owner for o in owners_with_path):
+    if any(o != owner and o != legacy_owner for o in owners_with_path):
         err_msg = f"ARTIFACT_PATH_COLLISION: path {vol_path} is already claimed by another owner"
         errors.append(failcls.sanitize_message(err_msg)[:500])
         failed_count += 1
@@ -623,6 +632,7 @@ for row in candidates:
         continue
 
     existing_manifest_by_owner[owner] = reread_rec
+    existing_manifest_by_owner[legacy_owner] = reread_rec
 
     try:
         spark.sql(ddl.build_create_schema(target_cat, target_sch))

@@ -277,10 +277,10 @@ class TestTypeRulesResolution(unittest.TestCase):
                 get_source_adapter(unknown)
 
     def test_sqlserver_requires_database_metadata(self):
+        # SQL Server permits blank database for multi-database discovery mode
         adapter = get_source_adapter("sqlserver", source_database="Db")
-        with self.assertRaises(ValueError):
-            adapter.validate_connection_metadata(
-                {"connection_id": "c1", "secret_scope": "s", "source_database": ""})
+        adapter.validate_connection_metadata(
+            {"connection_id": "c1", "secret_scope": "s", "source_database": ""})
 
     def test_blank_secret_scope_fails_without_leaking(self):
         adapter = get_source_adapter("oracle")
@@ -869,7 +869,7 @@ class TestSqlObjectCommonRules(unittest.TestCase):
     def test_merge_key_isolates_connections_and_assessments(self):
         self.assertEqual(
             sqlobj_common.SQL_OBJECT_MERGE_KEYS,
-            ("assessment_id", "connection_id", "source_schema",
+            ("assessment_id", "connection_id", "source_database", "source_schema",
              "object_type", "object_name"))
 
 

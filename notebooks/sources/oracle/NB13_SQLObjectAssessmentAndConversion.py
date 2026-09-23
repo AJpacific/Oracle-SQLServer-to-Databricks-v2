@@ -22,6 +22,7 @@ SOURCE_SYSTEM = "oracle"
 dbutils.widgets.text("connection_id", "")
 dbutils.widgets.text("assessment_id", "")
 dbutils.widgets.text("include_schemas", "")
+dbutils.widgets.text("exclude_schemas", "")
 dbutils.widgets.text("include_object_types",
                      "VIEW,PROCEDURE,FUNCTION,PACKAGE")
 
@@ -29,6 +30,8 @@ connection_id = dbutils.widgets.get("connection_id").strip() or CONNECTION_ID
 assessment_id = dbutils.widgets.get("assessment_id").strip() or _uuid.uuid4().hex
 include_schemas = [s.strip() for s in
                    dbutils.widgets.get("include_schemas").split(",") if s.strip()]
+exclude_schemas = [s.strip() for s in
+                   dbutils.widgets.get("exclude_schemas").split(",") if s.strip()]
 include_types = {t.strip().upper() for t in
                  dbutils.widgets.get("include_object_types").split(",") if t.strip()}
 run_id = get_run_id()
@@ -72,7 +75,7 @@ def _capture_discovery_error(stage, error, source_schema=None):
 
 schema_discovery_failed = False
 try:
-    schemas = resolve_assessment_schemas(adapter, src_db, include_schemas, [])
+    schemas = resolve_assessment_schemas(adapter, src_db, include_schemas, exclude_schemas)
 except Exception as e:
     schemas = []
     schema_discovery_failed = True

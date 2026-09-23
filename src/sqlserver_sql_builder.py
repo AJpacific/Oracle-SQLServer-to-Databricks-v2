@@ -472,3 +472,17 @@ def module_definition_query(
         + (f" AND o.name = {escape_string_literal(object_name)}" if object_name else "")
         + ") q"
     )
+
+
+def accessible_databases_query() -> str:
+    """SQL Server online, accessible, non-system databases as database_name."""
+    return (
+        "(SELECT TOP (100) PERCENT "
+        "name AS database_name "
+        "FROM sys.databases "
+        "WHERE HAS_DBACCESS(name) = 1 "
+        "AND state_desc = 'ONLINE' "
+        "AND name NOT IN ('master', 'model', 'msdb', 'tempdb') "
+        "ORDER BY name) q"
+    )
+

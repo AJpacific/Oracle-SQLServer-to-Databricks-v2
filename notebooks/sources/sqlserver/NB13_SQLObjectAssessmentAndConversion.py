@@ -20,14 +20,18 @@ import uuid as _uuid
 SOURCE_SYSTEM = "sqlserver"
 
 dbutils.widgets.text("connection_id", "")
+dbutils.widgets.text("source_database", "")
 dbutils.widgets.text("assessment_id", "")
 dbutils.widgets.text("include_schemas", "")
+dbutils.widgets.text("exclude_schemas", "")
 dbutils.widgets.text("include_object_types", "VIEW,PROCEDURE,FUNCTION")
 
 connection_id = dbutils.widgets.get("connection_id").strip() or CONNECTION_ID
 assessment_id = dbutils.widgets.get("assessment_id").strip() or _uuid.uuid4().hex
 include_schemas = [s.strip() for s in
                    dbutils.widgets.get("include_schemas").split(",") if s.strip()]
+exclude_schemas = [s.strip() for s in
+                   dbutils.widgets.get("exclude_schemas").split(",") if s.strip()]
 include_types = {t.strip().upper() for t in
                  dbutils.widgets.get("include_object_types").split(",") if t.strip()}
 run_id = get_run_id()
@@ -41,17 +45,32 @@ repo = control_repo()
 
 connection = require_valid_connection(connection_id, SOURCE_SYSTEM)
 cd = connection.asDict()
-src_server, src_db = cd.get("source_server"), cd.get("source_database")
-if not src_db:
-    raise ValueError("SQL Server connections require source_database")
-adapter = get_source_adapter_for_connection(connection)   # requires VALID
+src_server = cd.get("source_server")
+
+requested_database = (
+    dbutils.widgets.get("source_database").strip()
+)
+configured_database = str(
+    cd.get("source_database") or ""
+).strip()
+effective_database = (
+    requested_database or configured_database
+)
+if not effective_database:
+    raise ValueError(
+        "source_database must be supplied by the SQL Server "
+        "assessment database worklist"
+    )
+
+src_db = effective_database
+adapter = get_source_adapter_for_connection(connection, source_database=effective_database)   # requires VALID
 print(f"NB13 source SQL object inventory for SQL Server connection "
-      f"{connection_id} (database={src_db}); assessment_id={assessment_id}")
+      f"{connection_id} (database={effective_database}); assessment_id={assessment_id}")
 
 
 def _q(query):
     return read_source_jdbc(adapter, query, source_server=src_server,
-                            source_database=src_db).collect()
+                            source_database=effective_database).collect()
 
 
 discovery_errors = []
@@ -74,7 +93,8 @@ def _capture_discovery_error(stage, error, source_schema=None):
 
 schema_discovery_failed = False
 try:
-    schemas = resolve_assessment_schemas(adapter, src_db, include_schemas, [])
+    schemas = resolve_assessment_schemas(adapter, effective_database, include_schemas,
+                                         exclude_schemas)
 except Exception as e:
     schemas = []
     schema_discovery_failed = True

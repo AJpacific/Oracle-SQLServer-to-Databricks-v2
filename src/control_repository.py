@@ -1238,7 +1238,7 @@ class ControlRepository:
             )
 
         sql = (
-            f"SELECT sa.connection_id, sa.source_schema, sa.object_name, "
+            f"SELECT sa.connection_id, sa.source_database, sa.source_schema, sa.object_name, "
             f"count(DISTINCT sa.assessment_id) AS conflicting_assessment_count "
             f"FROM {sa} sa "
             f"JOIN {sc} sc ON sa.connection_id = sc.connection_id "
@@ -1264,9 +1264,9 @@ class ControlRepository:
             sql += f" AND sa.assessment_id IN ({in_list})"
 
         sql += (
-            f" GROUP BY sa.connection_id, sa.source_schema, sa.object_name "
+            f" GROUP BY sa.connection_id, sa.source_database, sa.source_schema, sa.object_name "
             f"HAVING count(DISTINCT sa.assessment_id) > 1 "
-            f"ORDER BY sa.connection_id, sa.source_schema, sa.object_name"
+            f"ORDER BY sa.connection_id, sa.source_database, sa.source_schema, sa.object_name"
         )
         rows = self.spark.sql(sql).collect()
         conflicts = []
@@ -1274,6 +1274,7 @@ class ControlRepository:
             rd = r.asDict() if hasattr(r, "asDict") else dict(r)
             conflicts.append({
                 "connection_id": rd["connection_id"],
+                "source_database": rd.get("source_database"),
                 "source_schema": rd["source_schema"],
                 "object_name": rd["object_name"],
                 "conflicting_assessment_count": int(rd["conflicting_assessment_count"]),
@@ -1286,6 +1287,7 @@ class ControlRepository:
         assessment_id: str,
         source_schema: str,
         object_name: str,
+        source_database: str | None = None,
     ) -> dict[str, Any] | None:
         """Query one exact TABLE assessment row.
 
@@ -1299,18 +1301,26 @@ class ControlRepository:
         source_schema = str(source_schema or "").strip()
         object_name = str(object_name or "").strip()
 
+        where_predicates = [
+            f"connection_id = {escape_string_literal(connection_id)}",
+            f"assessment_id = {escape_string_literal(assessment_id)}",
+            f"source_schema = {escape_string_literal(source_schema)}",
+            "object_type = 'TABLE'",
+            f"object_name = {escape_string_literal(object_name)}",
+        ]
+        if source_database is not None and str(source_database).strip():
+            where_predicates.append(
+                f"source_database = {escape_string_literal(str(source_database).strip())}"
+            )
+
         sql = (
-            f"SELECT connection_id, assessment_id, source_schema, object_type, "
+            f"SELECT connection_id, assessment_id, source_database, source_schema, object_type, "
             f"object_name, is_selected, compatibility_status, selection_status, "
             f"onboarding_run_id, onboarding_attempt_id, onboarding_started_ts, "
             f"registration_completed_ts, onboarding_completed_ts, "
             f"onboarding_failed_stage, onboarding_error_message "
             f"FROM {self.ctrl('source_assessment')} "
-            f"WHERE connection_id = {escape_string_literal(connection_id)} "
-            f"AND assessment_id = {escape_string_literal(assessment_id)} "
-            f"AND source_schema = {escape_string_literal(source_schema)} "
-            f"AND object_type = 'TABLE' "
-            f"AND object_name = {escape_string_literal(object_name)}"
+            f"WHERE {' AND '.join(where_predicates)}"
         )
         rows = self.spark.sql(sql).collect()
         if not rows:
@@ -1331,6 +1341,7 @@ class ControlRepository:
         selection_status: str,
         error_message: str | None = None,
         selected_by: str | None = None,
+        source_database: str | None = None,
     ):
         """Update the row-level selection state on source_assessment for operator actions.
 
@@ -1386,6 +1397,10 @@ class ControlRepository:
             "(onboarding_run_id IS NULL OR trim(onboarding_run_id) = '')",
             "(onboarding_attempt_id IS NULL OR trim(onboarding_attempt_id) = '')",
         ]
+        if source_database is not None and str(source_database).strip():
+            where_predicates.append(
+                f"source_database = {escape_string_literal(str(source_database).strip())}"
+            )
 
         sql = f"UPDATE {self.ctrl('source_assessment')} SET {', '.join(assignments)} WHERE {' AND '.join(where_predicates)}"
         self.spark.sql(sql)
@@ -1399,6 +1414,7 @@ class ControlRepository:
         run_id: str,
         attempt_id: str,
         allow_failed_retry: bool = False,
+        source_database: str | None = None,
     ) -> ClaimResult:
         """Atomically claim an eligible assessment table row for onboarding.
 
@@ -1439,6 +1455,10 @@ class ControlRepository:
             "upper(trim(coalesce(compatibility_status, ''))) IN ('COMPATIBLE', 'REVIEW')",
             prior_condition,
         ]
+        if source_database is not None and str(source_database).strip():
+            where_predicates.append(
+                f"source_database = {escape_string_literal(str(source_database).strip())}"
+            )
 
         set_clause = (
             f"`selection_status` = 'ONBOARDING', "
@@ -1467,6 +1487,7 @@ class ControlRepository:
             assessment_id=assessment_id,
             source_schema=source_schema,
             object_name=object_name,
+            source_database=source_database,
         )
         if not row:
             return ClaimResult(acquired=False, reason="CLAIM_NOT_ACQUIRED: row not found", row=None)
@@ -1492,6 +1513,7 @@ class ControlRepository:
         object_name: str,
         error: Exception | str | None,
         allow_existing_failed: bool = False,
+        source_database: str | None = None,
     ) -> bool:
         """Record pre-claim validation failure before any claim is acquired.
 
@@ -1532,6 +1554,10 @@ class ControlRepository:
             "(onboarding_run_id IS NULL OR trim(onboarding_run_id) = '')",
             "(onboarding_attempt_id IS NULL OR trim(onboarding_attempt_id) = '')",
         ]
+        if source_database is not None and str(source_database).strip():
+            where_predicates.append(
+                f"source_database = {escape_string_literal(str(source_database).strip())}"
+            )
 
         assignments = [
             "`selection_status` = 'FAILED'",
@@ -1559,6 +1585,7 @@ class ControlRepository:
             assessment_id=assessment_id,
             source_schema=source_schema,
             object_name=object_name,
+            source_database=source_database,
         )
         if not row:
             return False
@@ -1577,6 +1604,7 @@ class ControlRepository:
         object_name: str,
         run_id: str,
         attempt_id: str,
+        source_database: str | None = None,
     ) -> bool:
         """Perform or confirm an idempotently confirmed owned transition of an owned ONBOARDING assessment row to REGISTERED.
 
@@ -1600,6 +1628,10 @@ class ControlRepository:
             f"onboarding_run_id = {escape_string_literal(run_id)}",
             f"onboarding_attempt_id = {escape_string_literal(attempt_id)}",
         ]
+        if source_database is not None and str(source_database).strip():
+            where_predicates.append(
+                f"source_database = {escape_string_literal(str(source_database).strip())}"
+            )
 
         set_clause = (
             "`selection_status` = 'REGISTERED', "
@@ -1620,6 +1652,7 @@ class ControlRepository:
             assessment_id=assessment_id,
             source_schema=source_schema,
             object_name=object_name,
+            source_database=source_database,
         )
         if not row:
             return False
@@ -1640,6 +1673,7 @@ class ControlRepository:
         attempt_id: str | None,
         terminal_status: str,
         message: Exception | str | None = None,
+        source_database: str | None = None,
     ) -> bool:
         """Perform or confirm an idempotently confirmed owned transition of an owned REGISTERED row to terminal (REVIEW_REQUIRED or BLOCKED)."""
         connection_id = require_connection_id(connection_id, "mark_assessment_onboarding_terminal")
@@ -1670,6 +1704,10 @@ class ControlRepository:
         if attempt_id:
             valid_attempt = _validate_bounded_identifier(attempt_id, "attempt_id")
             where_predicates.append(f"onboarding_attempt_id = {escape_string_literal(valid_attempt)}")
+        if source_database is not None and str(source_database).strip():
+            where_predicates.append(
+                f"source_database = {escape_string_literal(str(source_database).strip())}"
+            )
 
         assignments = [
             f"`selection_status` = {escape_string_literal(term_status)}",
@@ -1693,6 +1731,7 @@ class ControlRepository:
             assessment_id=assessment_id,
             source_schema=source_schema,
             object_name=object_name,
+            source_database=source_database,
         )
         if not row:
             return False
@@ -1719,6 +1758,7 @@ class ControlRepository:
         object_name: str,
         run_id: str,
         attempt_id: str | None = None,
+        source_database: str | None = None,
     ) -> bool:
         """Perform or confirm an idempotently confirmed owned transition of an owned REGISTERED assessment row to ONBOARDED after target provisioning verification.
 
@@ -1742,6 +1782,10 @@ class ControlRepository:
         if attempt_id:
             valid_attempt = _validate_bounded_identifier(attempt_id, "attempt_id")
             where_predicates.append(f"onboarding_attempt_id = {escape_string_literal(valid_attempt)}")
+        if source_database is not None and str(source_database).strip():
+            where_predicates.append(
+                f"source_database = {escape_string_literal(str(source_database).strip())}"
+            )
 
         set_clause = (
             "`selection_status` = 'ONBOARDED', "
@@ -1762,6 +1806,7 @@ class ControlRepository:
             assessment_id=assessment_id,
             source_schema=source_schema,
             object_name=object_name,
+            source_database=source_database,
         )
         if not row:
             return False
@@ -1785,6 +1830,7 @@ class ControlRepository:
         attempt_id: str | None = None,
         failed_stage: str = "REGISTRATION",
         error: Exception | str | None = None,
+        source_database: str | None = None,
     ) -> bool:
         """Perform or confirm an idempotently confirmed owned transition of an owned ONBOARDING or REGISTERED assessment row to FAILED.
 
@@ -1819,6 +1865,10 @@ class ControlRepository:
         if attempt_id:
             valid_attempt = _validate_bounded_identifier(attempt_id, "attempt_id")
             where_predicates.append(f"onboarding_attempt_id = {escape_string_literal(valid_attempt)}")
+        if source_database is not None and str(source_database).strip():
+            where_predicates.append(
+                f"source_database = {escape_string_literal(str(source_database).strip())}"
+            )
 
         assignments = [
             "`selection_status` = 'FAILED'",
@@ -1841,6 +1891,7 @@ class ControlRepository:
             assessment_id=assessment_id,
             source_schema=source_schema,
             object_name=object_name,
+            source_database=source_database,
         )
         if not row:
             return False

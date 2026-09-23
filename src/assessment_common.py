@@ -41,8 +41,8 @@ ASSESSMENT_FIELDS = (
 )
 
 # Natural key used to MERGE an assessment record idempotently.
-ASSESSMENT_MERGE_KEYS = ("assessment_id", "connection_id", "source_schema",
-                         "object_type", "object_name")
+ASSESSMENT_MERGE_KEYS = ("assessment_id", "connection_id", "source_database",
+                         "source_schema", "object_type", "object_name")
 
 # Columns the MERGE refreshes on a matched row. is_selected is deliberately
 # excluded so a selection made by registration survives a re-assessment.

@@ -44,18 +44,20 @@ class TestConnectionInput(unittest.TestCase):
         self.assertEqual(out["source_system"], "oracle")
         self.assertFalse(out["trust_server_certificate"])
 
-    def test_sqlserver_requires_database(self):
-        with self.assertRaises(ValueError):
-            normalize_connection_input(self._base(
-                connection_id="ss_1", source_system="sqlserver",
-                secret_scope="ss-1"))
+    def test_sqlserver_connection_scope(self):
+        # Blank source_database is valid for multi-database discovery parent connection
+        out_blank = normalize_connection_input(self._base(
+            connection_id="ss_1", source_system="sqlserver",
+            secret_scope="ss-1"))
+        self.assertEqual(out_blank["source_system"], "sqlserver")
+        self.assertIsNone(out_blank.get("source_database"))
 
-    def test_sqlserver_with_database_ok(self):
-        out = normalize_connection_input(self._base(
+        # Populated source_database is valid for single-database connection scope
+        out_pop = normalize_connection_input(self._base(
             connection_id="ss_1", source_system="mssql", secret_scope="ss-1",
             source_database="SourceDb"))
-        self.assertEqual(out["source_system"], "sqlserver")
-        self.assertEqual(out["source_database"], "SourceDb")
+        self.assertEqual(out_pop["source_system"], "sqlserver")
+        self.assertEqual(out_pop["source_database"], "SourceDb")
 
     def test_invalid_source_system_fails(self):
         with self.assertRaises(ValueError):

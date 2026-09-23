@@ -320,6 +320,28 @@ def assert_table_connection_match(table_row, connection_id):
     return actual
 
 
+def resolve_effective_source_database(table_row, connection_row):
+    """Resolve and validate the effective database across table and connection rows.
+
+    For SQL Server:
+      - If connection database is blank (discovery parent): operational row requires
+        a nonblank database, which becomes the effective database.
+      - If connection database is populated: operational row must match it exactly.
+    For Oracle:
+      - Connection database/service is required and operational database must match it.
+    """
+    table = table_row.asDict() if hasattr(table_row, "asDict") else dict(table_row)
+    connection = (connection_row.asDict() if hasattr(connection_row, "asDict")
+                  else dict(connection_row))
+    sys_name = require_source_system(
+        connection.get("source_system") or table.get("source_system"),
+        "source database identity validation"
+    )
+    adapter = get_source_adapter(sys_name)
+    return adapter.resolve_operational_database(
+        connection.get("source_database"), table.get("source_database"))
+
+
 def assert_source_identity_match(table_row, connection_row):
     """Validate table ownership metadata against the authoritative connection."""
     table = table_row.asDict() if hasattr(table_row, "asDict") else dict(table_row)
@@ -328,13 +350,15 @@ def assert_source_identity_match(table_row, connection_row):
     assert_table_connection_match(table, connection.get("connection_id"))
     assert_source_system_match(
         table.get("source_system"), connection.get("source_system"))
-    for field in ("source_server", "source_database"):
-        table_value = str(table.get(field) or "").strip().casefold()
-        connection_value = str(connection.get(field) or "").strip().casefold()
-        if table_value and connection_value and table_value != connection_value:
-            raise ValueError(
-                f"source table {field} does not match registered connection "
-                f"{connection.get('connection_id')!r}")
+
+    table_server = str(table.get("source_server") or "").strip().casefold()
+    connection_server = str(connection.get("source_server") or "").strip().casefold()
+    if table_server and connection_server and table_server != connection_server:
+        raise ValueError(
+            f"source table source_server does not match registered connection "
+            f"{connection.get('connection_id')!r}")
+
+    resolve_effective_source_database(table, connection)
     return True
 
 
@@ -347,9 +371,10 @@ def assert_current_source_table_identity(table_row, connection_row):
     if table.get("source_identity_version") != SOURCE_IDENTITY_VERSION:
         raise ValueError(
             "source table registration requires identity-v2 migration")
+    effective_db = resolve_effective_source_database(table, connection)
     expected = compute_source_table_id(
         connection.get("connection_id"), connection.get("source_system"),
-        connection.get("source_server"), connection.get("source_database"),
+        connection.get("source_server"), effective_db,
         table.get("source_schema"), table.get("source_table"))
     if table.get("source_table_id") != expected:
         raise ValueError(
@@ -376,13 +401,13 @@ def get_source_adapter_for_connection(connection, source_database=None,
     source_system = require_source_system(
         c.get("source_system"), "registered connection")
     registered_database = c.get("source_database")
-    if (source_database is not None
+    if (registered_database and source_database is not None
             and str(source_database).strip().casefold()
             != str(registered_database or "").strip().casefold()):
         raise ValueError(
             f"source_database override does not match registered connection "
             f"{c.get('connection_id')!r}")
-    database = registered_database
+    database = registered_database or source_database
     secret_scope = (c.get("secret_scope") or "").strip()
     if not secret_scope:
         raise ValueError(
@@ -425,8 +450,9 @@ def get_source_adapter_routed(row, require_valid=True):
                 "not found in source_table_control")
         assert_current_source_table_identity(control_row, connection)
     assert_source_identity_match(d, connection)
+    op_db = resolve_effective_source_database(d, connection)
     return get_source_adapter_for_connection(
-        connection, require_valid=require_valid)
+        connection, source_database=op_db, require_valid=require_valid)
 
 
 def read_source_jdbc(adapter, dbtable, source_server=None, source_database=None,
@@ -656,7 +682,7 @@ def persist_assessment_records(records):
     )
 
     on_clause = " AND ".join(
-        f"t.{key} = s.{key}"
+        f"coalesce(t.{key}, '') = coalesce(s.{key}, '')" if key == "source_database" else f"t.{key} = s.{key}"
         for key in assess_common.ASSESSMENT_MERGE_KEYS
     )
 
@@ -830,7 +856,7 @@ def persist_sql_object_records(records):
     )
 
     on_clause = " AND ".join(
-        f"t.{key} = s.{key}"
+        f"coalesce(t.{key}, '') = coalesce(s.{key}, '')" if key == "source_database" else f"t.{key} = s.{key}"
         for key
         in sqlobj_common.SQL_OBJECT_MERGE_KEYS
     )

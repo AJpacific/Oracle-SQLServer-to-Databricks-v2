@@ -498,12 +498,22 @@ _validation_checks = (
         FROM {ctrl('source_table_control')} c
         JOIN {ctrl('source_connection')} sc
           ON c.connection_id = sc.connection_id
-        WHERE (c.source_server IS NOT NULL AND sc.source_server IS NOT NULL
+        WHERE (c.source_server IS NOT NULL AND trim(c.source_server) <> ''
+               AND sc.source_server IS NOT NULL AND trim(sc.source_server) <> ''
                AND lower(trim(c.source_server)) <>
                    lower(trim(sc.source_server)))
-           OR (c.source_database IS NOT NULL AND sc.source_database IS NOT NULL
-               AND lower(trim(c.source_database)) <>
-                   lower(trim(sc.source_database)))
+           OR (sc.source_database IS NOT NULL AND trim(sc.source_database) <> ''
+               AND (c.source_database IS NULL OR trim(c.source_database) = ''
+                    OR lower(trim(c.source_database)) <>
+                        lower(trim(sc.source_database))))
+    """),
+    ("MISSING_SQLSERVER_SOURCE_DATABASE", f"""
+        SELECT count(*) AS c
+        FROM {ctrl('source_table_control')} c
+        JOIN {ctrl('source_connection')} sc
+          ON c.connection_id = sc.connection_id
+        WHERE lower(trim(coalesce(c.source_system, sc.source_system, ''))) = 'sqlserver'
+          AND (c.source_database IS NULL OR trim(c.source_database) = '')
     """),
   ("ACTIVE_TABLE_INVALID_CONNECTION", f"""
     SELECT count(*) AS c
@@ -524,10 +534,10 @@ _validation_checks = (
   """),
     ("DUPLICATE_SOURCE_ASSESSMENT_KEY", f"""
         SELECT count(*) AS c FROM (
-          SELECT connection_id, assessment_id, source_schema,
+          SELECT connection_id, assessment_id, source_database, source_schema,
                  object_type, object_name
           FROM {ctrl('source_assessment')}
-          GROUP BY connection_id, assessment_id, source_schema,
+          GROUP BY connection_id, assessment_id, source_database, source_schema,
                    object_type, object_name
           HAVING count(*) > 1
         )
@@ -745,9 +755,9 @@ _validation_checks = (
     """),
     ("DUPLICATE_SQL_OBJECT_ARTIFACT_OWNER", f"""
         SELECT count(*) AS c FROM (
-          SELECT connection_id, source_schema, object_type, object_name
+          SELECT connection_id, source_database, source_schema, object_type, object_name
           FROM {ctrl('sql_object_artifact_manifest')}
-          GROUP BY connection_id, source_schema, object_type, object_name
+          GROUP BY connection_id, source_database, source_schema, object_type, object_name
           HAVING count(*) > 1
         )
     """),
@@ -797,9 +807,10 @@ if _legacy_identity_count:
         "NB00 will report business_status='MIGRATION_REQUIRED'.")
 
 _v2_rows = spark.sql(f"""
-  SELECT c.connection_id, c.source_table_id, c.source_system,
-       sc.source_server AS source_server,
-       sc.source_database AS source_database,
+  SELECT c.connection_id, c.source_table_id,
+       coalesce(sc.source_system, c.source_system) AS source_system,
+       coalesce(sc.source_server, c.source_server) AS source_server,
+       c.source_database AS source_database,
        c.source_schema, c.source_table
   FROM {ctrl('source_table_control')} c
   JOIN {ctrl('source_connection')} sc

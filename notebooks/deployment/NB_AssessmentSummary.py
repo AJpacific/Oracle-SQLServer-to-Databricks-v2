@@ -47,6 +47,7 @@ def _fqn(t):
 query = f"""
     SELECT
         sa.connection_id,
+        sa.source_database,
         sa.assessment_id,
         sa.object_type,
         sa.compatibility_status,
@@ -77,6 +78,7 @@ if not rows:
         "run_id": run_id,
         "source_system": source_system,
         "connections_assessed": 0,
+        "databases_assessed": 0,
         "assessments": 0,
         "objects_assessed": 0,
         "selected_table_count": 0,
@@ -84,6 +86,7 @@ if not rows:
     dbutils.jobs.taskValues.set(key="run_id", value=run_id)
     dbutils.jobs.taskValues.set(key="source_system", value=source_system)
     dbutils.jobs.taskValues.set(key="connections_assessed", value=0)
+    dbutils.jobs.taskValues.set(key="databases_assessed", value=0)
     dbutils.jobs.taskValues.set(key="assessments", value=0)
     dbutils.jobs.taskValues.set(key="objects_assessed", value=0)
     dbutils.jobs.taskValues.set(key="selected_table_count", value=0)
@@ -93,7 +96,8 @@ if not rows:
 
 # Compute aggregate metrics safely
 connections_assessed = len({r["connection_id"] for r in rows})
-assessments_set = {(r["connection_id"], r["assessment_id"]) for r in rows}
+databases_assessed = len({(r["connection_id"], str(r.get("source_database") or "")) for r in rows})
+assessments_set = {(r["connection_id"], str(r.get("source_database") or ""), r["assessment_id"]) for r in rows}
 assessments_count = len(assessments_set)
 objects_assessed = len(rows)
 
@@ -115,16 +119,19 @@ selected_table_count = sum(
 
 business_status = "PARTIAL" if (unable_count > 0 or manual_count > 0) else "COMPLETE"
 
-# Per-connection and per-assessment deterministic breakdown
+# Per-connection, per-database and per-assessment deterministic breakdown
 grouped = defaultdict(list)
 for r in rows:
-    grouped[(r["connection_id"], r["assessment_id"])].append(r)
+    grouped[(r["connection_id"], str(r.get("source_database") or ""), r["assessment_id"])].append(r)
 
 connection_summaries = []
-for (cid, aid) in sorted(grouped.keys()):
-    batch_rows = grouped[(cid, aid)]
+for (cid, sdb, aid) in sorted(grouped.keys()):
+    batch_rows = grouped[(cid, sdb, aid)]
     b_tables = sum(1 for r in batch_rows if str(r.get("object_type") or "").upper() == "TABLE")
     b_views = sum(1 for r in batch_rows if str(r.get("object_type") or "").upper() == "VIEW")
+    b_procedures = sum(1 for r in batch_rows if str(r.get("object_type") or "").upper() == "PROCEDURE")
+    b_functions = sum(1 for r in batch_rows if str(r.get("object_type") or "").upper() == "FUNCTION")
+    b_packages = sum(1 for r in batch_rows if str(r.get("object_type") or "").upper() in ("PACKAGE", "PACKAGE_BODY"))
     b_compat = sum(1 for r in batch_rows if str(r.get("compatibility_status") or "").upper() == "COMPATIBLE")
     b_review = sum(1 for r in batch_rows if str(r.get("compatibility_status") or "").upper() == "REVIEW")
     b_manual = sum(1 for r in batch_rows if str(r.get("compatibility_status") or "").upper() == "MANUAL")
@@ -136,10 +143,14 @@ for (cid, aid) in sorted(grouped.keys()):
     b_status = "PARTIAL" if (b_unable > 0 or b_manual > 0) else "COMPLETE"
     connection_summaries.append({
         "connection_id": cid,
+        "source_database": sdb or None,
         "assessment_id": aid,
         "objects_assessed": len(batch_rows),
         "table_count": b_tables,
         "view_count": b_views,
+        "procedure_count": b_procedures,
+        "function_count": b_functions,
+        "package_count": b_packages,
         "compatible_count": b_compat,
         "review_count": b_review,
         "manual_count": b_manual,
@@ -151,14 +162,16 @@ for (cid, aid) in sorted(grouped.keys()):
 dbutils.jobs.taskValues.set(key="run_id", value=run_id)
 dbutils.jobs.taskValues.set(key="source_system", value=source_system)
 dbutils.jobs.taskValues.set(key="connections_assessed", value=connections_assessed)
+dbutils.jobs.taskValues.set(key="databases_assessed", value=databases_assessed)
 dbutils.jobs.taskValues.set(key="assessments", value=assessments_count)
 dbutils.jobs.taskValues.set(key="objects_assessed", value=objects_assessed)
 dbutils.jobs.taskValues.set(key="selected_table_count", value=selected_table_count)
 dbutils.jobs.taskValues.set(key="business_status", value=business_status)
 
 print(
-    f"Assessment summary: connections={connections_assessed}, assessments={assessments_count}, "
-    f"objects={objects_assessed}, selected_tables={selected_table_count}, status={business_status}"
+    f"Assessment summary: connections={connections_assessed}, databases={databases_assessed}, "
+    f"assessments={assessments_count}, objects={objects_assessed}, selected_tables={selected_table_count}, "
+    f"status={business_status}"
 )
 
 exit_payload = {
@@ -167,6 +180,7 @@ exit_payload = {
     "run_id": run_id,
     "source_system": source_system,
     "connections_assessed": connections_assessed,
+    "databases_assessed": databases_assessed,
     "assessments": assessments_count,
     "objects_assessed": objects_assessed,
     "table_count": table_count,

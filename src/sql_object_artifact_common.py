@@ -88,44 +88,62 @@ def definition_sha256(source_definition: Any) -> str:
 def build_artifact_relative_path(*args: Any, **kwargs: Any) -> str:
     """Build deterministic connection-owned relative path.
 
-    Supports signatures:
-      (connection_id, object_type, object_name, source_schema=None)
-      (connection_id, source_schema, object_type, object_name)
-      or keyword arguments.
+    Supports path structure:
+      <connection_id>/<source_database>/<source_schema>/<object_type>/<object_name>.sql
+    or (when source_database is blank/omitted for backward compatibility):
+      <connection_id>/<source_schema>/<object_type>/<object_name>.sql
     """
     conn_id = kwargs.get("connection_id")
+    source_database = kwargs.get("source_database")
     schema = kwargs.get("source_schema")
     otype = kwargs.get("object_type")
     oname = kwargs.get("object_name")
 
     pargs = list(args)
-    if pargs:
-        conn_id = conn_id or pargs.pop(0)
-
-    if pargs:
-        candidate_type = (pargs[0] or "").strip().upper().replace(" ", "_")
-        if candidate_type in SUPPORTED_OBJECT_TYPES:
-            otype = otype or pargs.pop(0)
-            oname = oname or (pargs.pop(0) if pargs else None)
-            if pargs:
-                schema = schema or pargs.pop(0)
+    if len(pargs) == 5:
+        conn_id = conn_id or pargs[0]
+        source_database = source_database or pargs[1]
+        schema = schema or pargs[2]
+        otype = otype or pargs[3]
+        oname = oname or pargs[4]
+    elif len(pargs) == 4:
+        conn_id = conn_id or pargs[0]
+        candidate_type_1 = (pargs[1] or "").strip().upper().replace(" ", "_")
+        candidate_type_2 = (pargs[2] or "").strip().upper().replace(" ", "_")
+        if candidate_type_1 in SUPPORTED_OBJECT_TYPES:
+            otype = otype or pargs[1]
+            oname = oname or pargs[2]
+            schema = schema or pargs[3]
         else:
-            schema = schema or pargs.pop(0)
-            if pargs:
-                otype = otype or pargs.pop(0)
-            if pargs:
-                oname = oname or pargs.pop(0)
+            schema = schema or pargs[1]
+            otype = otype or pargs[2]
+            oname = oname or pargs[3]
+    elif len(pargs) == 3:
+        conn_id = conn_id or pargs[0]
+        candidate_type = (pargs[1] or "").strip().upper().replace(" ", "_")
+        if candidate_type in SUPPORTED_OBJECT_TYPES:
+            otype = otype or pargs[1]
+            oname = oname or pargs[2]
+        else:
+            schema = schema or pargs[1]
+            otype = otype or pargs[2]
+    elif len(pargs) > 0:
+        conn_id = conn_id or pargs[0]
 
     safe_conn = sanitize_path_component(conn_id, "connection_id")
     norm_type = normalize_object_type(otype)
     type_dir = OBJECT_TYPE_DIRECTORIES[norm_type]
     safe_obj = sanitize_path_component(oname, "object_name")
 
+    parts = [safe_conn]
+    if source_database and str(source_database).strip():
+        parts.append(sanitize_path_component(source_database, "source_database"))
     if schema and str(schema).strip():
-        safe_schema = sanitize_path_component(schema, "source_schema")
-        return f"{safe_conn}/{safe_schema}/{type_dir}/{safe_obj}.sql"
+        parts.append(sanitize_path_component(schema, "source_schema"))
+    parts.append(type_dir)
+    parts.append(f"{safe_obj}.sql")
 
-    return f"{safe_conn}/{type_dir}/{safe_obj}.sql"
+    return "/".join(parts)
 
 
 def build_artifact_volume_path(
@@ -149,14 +167,23 @@ def build_artifact_volume_path(
     return f"/Volumes/{safe_cat}/{safe_sch}/{safe_vol}/{rel_clean}"
 
 
-def artifact_owner_key(record: Any) -> Tuple[Any, Any, str, Any]:
-    """Return immutable (connection_id, source_schema, normalized_object_type, object_name) tuple."""
+def artifact_owner_key(record: Any) -> Tuple[Any, ...]:
+    """Return immutable artifact owner key tuple.
+
+    Includes source_database when present to distinguish objects across databases:
+    (connection_id, source_database, source_schema, normalized_object_type, object_name)
+    or for legacy/unqualified records:
+    (connection_id, source_schema, normalized_object_type, object_name).
+    """
     rec = record.asDict() if hasattr(record, "asDict") else dict(record)
     conn_id = rec.get("connection_id")
+    db = rec.get("source_database")
     schema = rec.get("source_schema")
     otype = rec.get("object_type")
     oname = rec.get("object_name")
     norm_type = normalize_object_type(otype)
+    if db is not None and str(db).strip() != "":
+        return (conn_id, str(db).strip(), schema, norm_type, oname)
     return (conn_id, schema, norm_type, oname)
 
 

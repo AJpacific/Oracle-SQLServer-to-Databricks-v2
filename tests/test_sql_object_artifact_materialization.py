@@ -961,8 +961,8 @@ class TestSqlObjectArtifactMaterialization(unittest.TestCase):
     # F. Artifact path collision
     def test_f27_to_f30_artifact_path_collision(self):
         manifest_row_a = FakeRow(
-            connection_id="c1", source_schema="s1", object_type="VIEW", object_name="v_other",
-            artifact_path="/Volumes/da_accelerators/s1/_source_artifacts/c1/s1/views/v1.sql",
+            connection_id="c1", source_database="db1", source_schema="s1", object_type="VIEW", object_name="v_other",
+            artifact_path="/Volumes/da_accelerators/s1/_source_artifacts/c1/db1/s1/views/v1.sql",
             source_definition_hash="hash1", materialization_status="SUCCEEDED"
         )
         cand_b = FakeRow(connection_id="c1", source_system="oracle", source_database="db1", source_schema="s1", object_name="v1", object_type="VIEW", source_definition="SELECT 1")
@@ -1002,7 +1002,7 @@ class TestSqlObjectArtifactMaterialization(unittest.TestCase):
     def test_i40_unchanged_definition(self):
         source_def = "SELECT 1 FROM dual;"
         def_hash = sqlobj_art.definition_sha256(source_def)
-        vol_path = sqlobj_art.build_artifact_volume_path("da_accelerators", "s1", "_source_artifacts", sqlobj_art.build_artifact_relative_path("c1", "s1", "VIEW", "v1"))
+        vol_path = sqlobj_art.build_artifact_volume_path("da_accelerators", "s1", "_source_artifacts", sqlobj_art.build_artifact_relative_path("c1", "s1", "VIEW", "v1", source_database="db1"))
         upd_ts = datetime(2026, 9, 20, 10, 0, 0, tzinfo=timezone.utc)
         crt_ts = datetime(2026, 9, 19, 10, 0, 0, tzinfo=timezone.utc)
         manifest_row = FakeRow(
@@ -1038,9 +1038,9 @@ class TestSqlObjectArtifactMaterialization(unittest.TestCase):
 
     # J. Changed definition
     def test_j41_changed_definition(self):
-        vol_path = sqlobj_art.build_artifact_volume_path("da_accelerators", "s1", "_source_artifacts", sqlobj_art.build_artifact_relative_path("c1", "s1", "VIEW", "v1"))
+        vol_path = sqlobj_art.build_artifact_volume_path("da_accelerators", "s1", "_source_artifacts", sqlobj_art.build_artifact_relative_path("c1", "s1", "VIEW", "v1", source_database="db1"))
         manifest_row = FakeRow(
-            connection_id="c1", source_schema="s1", object_type="VIEW", object_name="v1",
+            connection_id="c1", source_database="db1", source_schema="s1", object_type="VIEW", object_name="v1",
             artifact_path=vol_path, source_definition_hash="old_hash", materialization_status="SUCCEEDED"
         )
         cand = FakeRow(connection_id="c1", source_system="oracle", source_database="db1", source_schema="s1", object_name="v1", object_type="VIEW", source_definition="SELECT 2 FROM dual;")
@@ -1155,11 +1155,11 @@ class TestSqlObjectArtifactMaterialization(unittest.TestCase):
     # D. Stale takeover
     def test_concurrency_05_stale_takeover(self):
         manifest_row = FakeRow(
-            connection_id="c1", source_schema="s1", object_type="VIEW", object_name="v1",
+            connection_id="c1", source_database="db1", source_schema="s1", object_type="VIEW", object_name="v1",
             materialization_status="IN_PROGRESS", last_materialized_run_id="run-a",
             updated_ts=datetime(2026, 9, 21, 9, 0, 0, tzinfo=timezone.utc),
             created_ts=datetime(2026, 9, 21, 8, 0, 0, tzinfo=timezone.utc),
-            artifact_path="/Volumes/da_accelerators/s1/_source_artifacts/c1/s1/views/v1.sql"
+            artifact_path="/Volumes/da_accelerators/s1/_source_artifacts/c1/db1/s1/views/v1.sql"
         )
         cand = FakeRow(connection_id="c1", source_system="oracle", source_database="db1", source_schema="s1", object_name="v1", object_type="VIEW", source_definition="SELECT 1")
         res = run_nb18_harness(candidates=[cand], manifest_rows=[manifest_row], widget_values={"run_id": "run-b"})
@@ -1168,7 +1168,7 @@ class TestSqlObjectArtifactMaterialization(unittest.TestCase):
         self.assertEqual(stored["materialization_status"], "SUCCEEDED")
         self.assertEqual(stored["last_materialized_run_id"], "run-b")
         self.assertEqual(stored["created_ts"], datetime(2026, 9, 21, 8, 0, 0, tzinfo=timezone.utc))
-        self.assertEqual(stored["artifact_path"], "/Volumes/da_accelerators/s1/_source_artifacts/c1/s1/views/v1.sql")
+        self.assertEqual(stored["artifact_path"], "/Volumes/da_accelerators/s1/_source_artifacts/c1/db1/s1/views/v1.sql")
 
     # F. Race after initial read
     def test_concurrency_06_race_after_initial_read(self):
@@ -1302,9 +1302,9 @@ class TestSqlObjectArtifactMaterialization(unittest.TestCase):
     def test_concurrency_15_unchanged_result_cannot_overwrite_active_claim(self):
         source_def = "SELECT 1 FROM dual;"
         def_hash = sqlobj_art.definition_sha256(source_def)
-        vol_path = sqlobj_art.build_artifact_volume_path("da_accelerators", "s1", "_source_artifacts", sqlobj_art.build_artifact_relative_path("c1", "s1", "VIEW", "v1"))
+        vol_path = sqlobj_art.build_artifact_volume_path("da_accelerators", "s1", "_source_artifacts", sqlobj_art.build_artifact_relative_path("c1", "s1", "VIEW", "v1", source_database="db1"))
         manifest_row = FakeRow(
-            connection_id="c1", source_schema="s1", object_type="VIEW", object_name="v1",
+            connection_id="c1", source_database="db1", source_schema="s1", object_type="VIEW", object_name="v1",
             artifact_path=vol_path, source_definition_hash=def_hash, materialization_status="SUCCEEDED",
             last_materialized_run_id="run-prior", updated_ts=datetime(2026, 9, 21, 10, 0, 0, tzinfo=timezone.utc),
         )
@@ -1320,7 +1320,7 @@ class TestSqlObjectArtifactMaterialization(unittest.TestCase):
         def pre_general_merge_hook(spark_sess):
             # Another run takes active IN_PROGRESS on v1 before general merge
             spark_sess.manifest_table[("c1", "s1", "VIEW", "v1")] = {
-                "connection_id": "c1", "source_schema": "s1", "object_type": "VIEW", "object_name": "v1",
+                "connection_id": "c1", "source_database": "db1", "source_schema": "s1", "object_type": "VIEW", "object_name": "v1",
                 "materialization_status": "IN_PROGRESS", "last_materialized_run_id": "run-winner",
                 "updated_ts": datetime(2026, 9, 21, 11, 59, 0, tzinfo=timezone.utc),
                 "created_ts": datetime(2026, 9, 21, 11, 59, 0, tzinfo=timezone.utc),
@@ -1542,7 +1542,7 @@ class TestSqlObjectArtifactMaterialization(unittest.TestCase):
             ("UNABLE_TO_MATERIALIZE", {"source_definition": ""}, {}),
             ("TARGET_CONFIG_ERROR", {"source_definition": "SELECT 1"}, {"target_configs": {"c1": Exception("err")}}),
             ("TARGET_CONFIG_CHANGED", {"source_definition": "SELECT 1"}, {"manifest_rows": [FakeRow(connection_id="c1", source_schema="s1", object_type="VIEW", object_name="v1", artifact_path="/other/path.sql", materialization_status="SUCCEEDED", source_definition_hash="h1")]}),
-            ("ARTIFACT_PATH_COLLISION", {"source_definition": "SELECT 1"}, {"manifest_rows": [FakeRow(connection_id="c1", source_schema="s1", object_type="VIEW", object_name="v_other", artifact_path="/Volumes/da_accelerators/s1/_source_artifacts/c1/s1/views/v1.sql", materialization_status="SUCCEEDED", source_definition_hash="h1")]}),
+            ("ARTIFACT_PATH_COLLISION", {"source_definition": "SELECT 1"}, {"manifest_rows": [FakeRow(connection_id="c1", source_database="db1", source_schema="s1", object_type="VIEW", object_name="v_other", artifact_path="/Volumes/da_accelerators/s1/_source_artifacts/c1/db1/s1/views/v1.sql", materialization_status="SUCCEEDED", source_definition_hash="h1")]}),
             ("FAILED", {"source_definition": "SELECT 1"}, {"manifest_rows": [
                 FakeRow(connection_id="c1", source_schema="s1", object_type="VIEW", object_name="v1", artifact_path="/Volumes/da_accelerators/s1/_source_artifacts/c1/s1/views/v1.sql", materialization_status="SUCCEEDED", source_definition_hash="h1"),
                 FakeRow(connection_id="c1", source_schema="s1", object_type="VIEW", object_name="v1", artifact_path="/Volumes/da_accelerators/s1/_source_artifacts/c1/s1/views/v1.sql", materialization_status="SUCCEEDED", source_definition_hash="h1"),

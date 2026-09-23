@@ -151,7 +151,7 @@ for row in control_rows:
             data.get("source_system"), "source identity migration row")
         mapped_source_system = source_system
         mapped_server = connection_data.get("source_server")
-        mapped_database = connection_data.get("source_database")
+        mapped_database = resolve_effective_source_database(data, connection)
         new_source_table_id = compute_source_table_id(
             connection_id, source_system, mapped_server, mapped_database,
             data["source_schema"], data["source_table"])

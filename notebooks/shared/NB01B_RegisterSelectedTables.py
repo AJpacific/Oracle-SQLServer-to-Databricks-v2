@@ -127,8 +127,9 @@ if selection_mode == "ASSESSMENT_FLAGS":
     )
     if overlaps:
         sample = overlaps[0]
+        db_part = f"{sample['source_database']}." if sample.get("source_database") else ""
         conflict_msg = (
-            f"AMBIGUOUS_SELECTED_ASSESSMENT: Table {sample['source_schema']}.{sample['object_name']} "
+            f"AMBIGUOUS_SELECTED_ASSESSMENT: Table {db_part}{sample['source_schema']}.{sample['object_name']} "
             f"in connection {connection_id!r} is selected in {sample['conflicting_assessment_count']} "
             f"assessment IDs. Operator must deselect obsolete rows before onboarding."
         )
@@ -151,10 +152,10 @@ for r in assessed:
     if comp not in ("COMPATIBLE", "REVIEW"):
         skipped.append((schema, obj, f"not registerable ({comp})"))
         continue
-    src_server = connection_data.get("source_server")
-    src_db = connection_data.get("source_database")
     src_system = require_source_system(
         connection_data.get("source_system"), "registered connection")
+    src_server = connection_data.get("source_server")
+    src_db = resolve_effective_source_database(row_dict, connection_data)
     sid = compute_source_table_id(
         connection_id, src_system, src_server,
         src_db, schema, obj)
@@ -168,6 +169,15 @@ for r in assessed:
         "target_table": t_table, "mapping_status": comp,
         "target_fqn": f"{normalize_target_component(target_catalog)}.{normalize_target_component(t_schema)}.{normalize_target_component(t_table)}",
     })
+
+candidate_databases = {c["source_database"] for c in candidates if c.get("source_database")}
+conn_db = str(connection_data.get("source_database") or "").strip()
+if not conn_db and len(candidate_databases) > 1 and target_schema_mode == "SOURCE_SCHEMA":
+    raise ValueError(
+        "MULTI_DATABASE_TARGET_MODE_REQUIRED: "
+        "PREFIX_WITH_DATABASE or an explicit collision-free target strategy is "
+        "required when one connection assesses multiple databases."
+    )
 
 print(f"Selected {len(candidates)} table(s); skipped {len(skipped)}.")
 
@@ -238,6 +248,7 @@ for c in candidates:
                 object_name=table,
                 error=msg,
                 allow_existing_failed=include_failed_retries,
+                source_database=c["source_database"],
             )
             if not succ:
                 print(f"[info] Pre-claim failure state not recorded for {schema}.{table} (already claimed, completed, terminal, or missing)")
@@ -258,6 +269,7 @@ for c in candidates:
                 object_name=table,
                 error=msg,
                 allow_existing_failed=include_failed_retries,
+                source_database=c["source_database"],
             )
             if not succ:
                 print(f"[info] Pre-claim failure state not recorded for {schema}.{table} (already claimed, completed, terminal, or missing)")
@@ -293,6 +305,7 @@ for c in candidates:
                     object_name=table,
                     error=msg,
                     allow_existing_failed=include_failed_retries,
+                    source_database=c["source_database"],
                 )
                 if not succ:
                     print(f"[info] Pre-claim failure state not recorded for {schema}.{table} (already claimed, completed, terminal, or missing)")
@@ -321,6 +334,7 @@ def _verify_exact_registration(candidate):
     sid = candidate["source_table_id"]
     v_rows = spark.sql(f"""
         SELECT connection_id, source_table_id, source_identity_version,
+               source_database,
                target_catalog, target_schema, target_table
         FROM {ctrl('source_table_control')}
         WHERE connection_id = {escape_string_literal(cid)}
@@ -340,6 +354,14 @@ def _verify_exact_registration(candidate):
         raise RuntimeError(
             f"Registration identity version mismatch for {cid}.{sid}: "
             f"expected {SOURCE_IDENTITY_VERSION}, got {reg.get('source_identity_version')}"
+        )
+
+    exp_db = str(candidate.get("source_database") or "").strip()
+    act_db = str(reg.get("source_database") or "").strip()
+    if exp_db.casefold() != act_db.casefold():
+        raise RuntimeError(
+            f"Registration source_database mismatch for {cid}.{sid}: "
+            f"expected {exp_db!r}, got {act_db!r}"
         )
 
     exp_cat = normalize_target_component(candidate.get("target_catalog"))
@@ -367,7 +389,8 @@ if selection_mode == "ASSESSMENT_FLAGS":
         try:
             claim_res = repo.claim_assessment_selection_row(
                 connection_id, assessment_id, schema, table, run_id, attempt_id,
-                allow_failed_retry=include_failed_retries
+                allow_failed_retry=include_failed_retries,
+                source_database=c["source_database"]
             )
             if not claim_res.acquired:
                 claim_conflict_count += 1
@@ -429,7 +452,8 @@ if selection_mode == "ASSESSMENT_FLAGS":
 
             # Transition exact assessment row to REGISTERED (never ONBOARDED in NB01B)
             succ = repo.mark_assessment_registration_succeeded(
-                connection_id, assessment_id, schema, table, run_id, attempt_id
+                connection_id, assessment_id, schema, table, run_id, attempt_id,
+                source_database=c["source_database"]
             )
             if not succ:
                 raise RuntimeError(f"Failed to mark assessment row REGISTERED for {schema}.{table}")
@@ -445,7 +469,8 @@ if selection_mode == "ASSESSMENT_FLAGS":
                 try:
                     repo.mark_assessment_onboarding_failed(
                         connection_id, assessment_id, schema, table,
-                        run_id, attempt_id, failed_stage="REGISTRATION", error=safe_err
+                        run_id, attempt_id, failed_stage="REGISTRATION", error=safe_err,
+                        source_database=c["source_database"]
                     )
                 except Exception as state_exc:
                     print(f"[warn] Failed to set FAILED state on {schema}.{table}: {failcls.sanitize_message(state_exc)}")
@@ -460,7 +485,8 @@ if selection_mode == "ASSESSMENT_FLAGS":
         try:
             claim_res = repo.claim_assessment_selection_row(
                 connection_id, assessment_id, schema, table, run_id, attempt_id,
-                allow_failed_retry=include_failed_retries
+                allow_failed_retry=include_failed_retries,
+                source_database=c["source_database"]
             )
             if not claim_res.acquired:
                 claim_conflict_count += 1
@@ -476,7 +502,8 @@ if selection_mode == "ASSESSMENT_FLAGS":
             _verify_exact_registration(c)
 
             succ = repo.mark_assessment_registration_succeeded(
-                connection_id, assessment_id, schema, table, run_id, attempt_id
+                connection_id, assessment_id, schema, table, run_id, attempt_id,
+                source_database=c["source_database"]
             )
             if not succ:
                 raise RuntimeError(f"Failed to mark assessment row REGISTERED for {schema}.{table}")
@@ -492,7 +519,8 @@ if selection_mode == "ASSESSMENT_FLAGS":
                 try:
                     repo.mark_assessment_onboarding_failed(
                         connection_id, assessment_id, schema, table,
-                        run_id, attempt_id, failed_stage="REGISTRATION", error=safe_err
+                        run_id, attempt_id, failed_stage="REGISTRATION", error=safe_err,
+                        source_database=c["source_database"]
                     )
                 except Exception as state_exc:
                     print(f"[warn] Failed to set FAILED state on {schema}.{table}: {failcls.sanitize_message(state_exc)}")
@@ -544,6 +572,7 @@ else:
     all_registered = valid + already_registered
     if all_registered:
         sel_rows = [Row(assessment_id=assessment_id, connection_id=connection_id,
+                        source_database=c["source_database"],
                         source_schema=c["source_schema"], object_name=c["source_table"])
                     for c in all_registered]
         spark.createDataFrame(sel_rows).createOrReplaceTempView("_selected_objects")
@@ -552,6 +581,7 @@ else:
             USING _selected_objects s
               ON t.assessment_id = s.assessment_id
              AND t.connection_id = s.connection_id
+             AND t.source_database = s.source_database
              AND t.source_schema = s.source_schema
              AND t.object_name  = s.object_name
              AND t.object_type  = 'TABLE'

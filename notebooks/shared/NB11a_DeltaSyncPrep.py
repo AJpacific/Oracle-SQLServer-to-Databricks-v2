@@ -164,7 +164,7 @@ for r in eligible:
     assert_current_source_table_identity(r, connection)
     connection_data = connection.asDict()
     src_server = connection_data.get("source_server")
-    src_db = connection_data.get("source_database")
+    src_db = resolve_effective_source_database(d, connection_data)
     s_schema, s_table = r["source_schema"], r["source_table"]
     t_catalog = r["target_catalog"] or CATALOG
     t_schema = r["target_schema"] or s_schema.lower()

@@ -109,7 +109,7 @@ for r in auto:
         d.get("source_system"), "source_table_control row")
     connection_data = connection.asDict()
     src_server = connection_data.get("source_server")
-    src_db = connection_data.get("source_database")
+    src_db = resolve_effective_source_database(d, connection_data)
     s_schema, s_table = r["source_schema"], r["source_table"]
     ident = {"source_table_id": src_id, "source_system": src_system,
              "connection_id": conn_id,

@@ -866,7 +866,7 @@ class TestConnectionDiscovery(unittest.TestCase):
         repo.configured_connections_for_source("sqlserver")
         sql = repo.spark.last_sql()
         self.assertIn("lower(trim(source_system)) = 'sqlserver'", sql)
-        self.assertIn("source_database IS NOT NULL", sql)
+        self.assertNotIn("source_database IS NOT NULL", sql)
         self.assertNotIn("is_active = true", sql)
 
     def test_configured_discovery_filters_and_precedence(self):
@@ -1133,14 +1133,12 @@ def _run_nb00a(source_token, widgets_dict, connection_row=None, probe_side_effec
         def sanitize_message(exc):
             return sanitize_message(str(exc))
 
-    def fake_get_source_adapter(conn, require_valid=False):
+    def fake_get_source_adapter(conn, require_valid=False, **kwargs):
         c = conn.asDict() if hasattr(conn, "asDict") else dict(conn)
         scope = (c.get("secret_scope") or "").strip()
         if not scope:
             raise ValueError(f"registered connection {c.get('connection_id')!r} has a blank secret_scope")
         sys_token = require_source_system(c.get("source_system"), "test adapter")
-        if sys_token == "sqlserver" and not (c.get("source_database") or "").strip():
-            raise ValueError(f"connection {c.get('connection_id')!r} has no source_database; SQL Server connections require one")
         class FakeAdapter:
             source_system = sys_token
         return FakeAdapter()
@@ -1276,9 +1274,9 @@ class TestConnectionValidationNotebookContract(unittest.TestCase):
             "connection_status": "REGISTERED",
             "is_active": False,
         }
-        with self.assertRaises(ValueError) as ctx:
-            _run_nb00a("sqlserver", {"connection_id": "conn_sql_nodb"}, connection_row=row)
-        self.assertIn("source_database", str(ctx.exception).lower())
+        res = _run_nb00a("sqlserver", {"connection_id": "conn_sql_nodb"}, connection_row=row)
+        self.assertEqual(res["task_values"]["status"], "VALID")
+        self.assertEqual(row.get("source_database"), "")
 
     def test_12_blank_secret_scope_fails_before_probe(self):
         for token in ("oracle", "sqlserver"):

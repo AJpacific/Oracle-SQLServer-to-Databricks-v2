@@ -74,15 +74,15 @@ class TestSqlServerDiscovery(unittest.TestCase):
         self.assertIn("allocation_units", q)
 
     def test_row_count_not_multiplied_by_allocation_join(self):
-        # Row count and size are aggregated in independent CTEs and joined by
+        # Row count and size are aggregated in independent subqueries and joined by
         # object_id, so the allocation join cannot duplicate row counts.
         q = ss.table_statistics_query("SourceDb")
-        self.assertIn("WITH row_counts AS", q)
-        self.assertIn("allocation_pages AS", q)
-        self.assertIn("size_pages AS", q)
+        self.assertIn("row_counts", q)
+        self.assertIn("allocation_pages", q)
+        self.assertIn("size_pages", q)
         self.assertIn("index_id IN (0,1)", q)
-        row_cte = q.split("), allocation_pages AS")[0]
-        self.assertNotIn("allocation_units", row_cte)
+        row_subquery = q.split(") row_counts")[0]
+        self.assertNotIn("allocation_units", row_subquery)
 
     def test_allocation_units_use_correct_containers(self):
         q = ss.table_statistics_query("SourceDb")
@@ -94,13 +94,13 @@ class TestSqlServerDiscovery(unittest.TestCase):
     def test_allocation_branches_use_union_all_not_or_join(self):
         q = ss.table_statistics_query("SourceDb")
         self.assertIn("UNION ALL", q)
-        allocation = q.split("allocation_pages AS")[1].split("size_pages AS")[0]
+        allocation = q.split("UNION ALL")[0]
         self.assertNotIn(" OR ", allocation)
 
     def test_sizes_aggregated_once_before_join(self):
         q = ss.table_statistics_query("SourceDb")
-        self.assertIn("SELECT object_id, SUM(total_pages) AS total_pages "
-                      "FROM allocation_pages GROUP BY object_id", q)
+        self.assertIn("SUM(allocation_pages.total_pages) AS total_pages", q)
+        self.assertIn("GROUP BY allocation_pages.object_id", q)
 
     def test_zero_allocation_tables_are_not_null(self):
         q = ss.table_statistics_query("SourceDb")

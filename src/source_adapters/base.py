@@ -275,6 +275,30 @@ class SourceAdapter(ABC):
         """
         return None
 
+    def resolve_effective_database(self, configured_database: str, requested_database: str = None) -> str:
+        """Resolve effective database for source operation."""
+        cfg = str(configured_database or "").strip()
+        req = str(requested_database or "").strip() if requested_database is not None else ""
+        if req and cfg and req.casefold() != cfg.casefold():
+            raise ValueError(
+                f"source_database override {req!r} does not match registered database {cfg!r}"
+            )
+        return req or cfg
+
+    def resolve_operational_database(self, configured_database: str, operational_database: str) -> str:
+        """Resolve and validate operational row database against configured database."""
+        cfg = str(configured_database or "").strip()
+        op = str(operational_database or "").strip()
+        if not cfg:
+            raise ValueError(f"{self.source_system or 'Source'} requires configured connection database")
+        if not op:
+            raise ValueError(f"{self.source_system or 'Source'} operational row requires nonblank database")
+        if cfg.casefold() != op.casefold():
+            raise ValueError(
+                f"operational database {op!r} does not match configured connection database {cfg!r}"
+            )
+        return cfg
+
     def validate_connection_metadata(self, connection) -> None:
         """Raise ValueError when non-secret connection metadata is unusable.
 

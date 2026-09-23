@@ -44,9 +44,17 @@ try:
     if not (connection_data.get("source_server") or "").strip():
         raise ValueError(f"connection {connection_id!r} has no source_server")
 
-    adapter = get_source_adapter_for_connection(connection, require_valid=False)
+    configured_database = str(
+        connection_data.get("source_database") or ""
+    ).strip()
+
+    probe_database = configured_database or "master"
+
+    adapter = get_source_adapter_for_connection(
+        connection, source_database=probe_database, require_valid=False
+    )
     probe_connection(adapter, source_server=connection_data.get("source_server"),
-                     source_database=connection_data.get("source_database"))
+                     source_database=probe_database)
     repo.update_connection_status(connection_id, "VALID", None)
     status = "VALID"
     print(f"Connection {connection_id} validated: VALID")

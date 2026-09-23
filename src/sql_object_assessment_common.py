@@ -23,8 +23,8 @@ SQL_OBJECT_FIELDS = (
     "source_definition", "error_message",
 )
 
-SQL_OBJECT_MERGE_KEYS = ("assessment_id", "connection_id", "source_schema",
-                         "object_type", "object_name")
+SQL_OBJECT_MERGE_KEYS = ("assessment_id", "connection_id", "source_database",
+                         "source_schema", "object_type", "object_name")
 
 SQL_OBJECT_UPDATE_FIELDS = (
     "run_id", "source_system", "source_database", "source_definition",

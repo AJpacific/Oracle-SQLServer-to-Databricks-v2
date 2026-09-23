@@ -27,6 +27,7 @@ def ctrl(t):
 
 # Onboarding is scoped to exactly one connection. Collision detection remains
 # global across all active registrations.
+# Equivalent to: repo.active_tables_for_connection(connection_id, decision="AUTO_MIGRATE", include_onboarding=True)
 auto = spark.sql(f"""
     SELECT *
     FROM {ctrl('source_table_control')}

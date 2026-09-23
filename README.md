@@ -214,13 +214,33 @@ reads a source secret scope.
   Newly registered rows are never auto-activated.
 
 ### Control-table-driven assessment and selected-table onboarding
+- **Job 1A Operator Contract:**
+  - **SQL Server:**
+    - `source_database` populated: assess only the configured database.
+    - `source_database` blank (NULL, empty, or whitespace): discover and assess all accessible online non-system databases using the registered SQL Server server and credentials.
+  - **Oracle:**
+    - Database/service behavior remains unchanged. Oracle still requires its configured database/service value; multi-database discovery is not supported.
+  - **Both Oracle and SQL Server:**
+    - `include_schemas` (optional Job 1A parameter, default `""`): blank means all accessible schemas; populated limits assessment to those schemas.
+    - `exclude_schemas` (optional Job 1A parameter, default `""`): populated removes those schemas from the discovered or included set.
+    - Neither include nor exclude schema columns are added to `source_connection`.
+  - **Operational Guarantees:**
+    - System SQL Server databases (`master`, `model`, `msdb`, `tempdb`) are strictly excluded.
+    - Credentials and TLS settings are reused through the same secret-scope reference for every discovered database.
+    - Discovered databases are **never** written back into the parent `source_connection.source_database` row; the registered connection row remains blank.
+    - `source_database` remains part of object identity across assessment, SQL-object inventories, Delta MERGE keys, and artifact volume paths.
+    - Database discovery applies only to Job 1A assessment. Downstream onboarding (Job 1B, Full Load, Delta Sync) still requires database-qualified assessment and registration identities.
 - **Connection worklist discovery (`NB_GetConnectionWorklist.ipynb`):** Future Job 1A
   discovers all active `VALID` connections for an internally supplied `source_system`
   (`oracle` or `sqlserver`) without user-entered parameters. Worklist items contain
   strictly `{"connection_id": "..."}`. Secret scopes, JDBC URLs, and endpoints are never exposed.
-- **Connection-scoped assessment inside For Each:** Future Job 1A executes source
-  assessment per connection, followed by `NB_AssessmentSummary.py` to aggregate
-  run metrics without leaking credentials or table data.
+- **Database assessment worklist (`NB_GetAssessmentDatabaseWorklist.py`):** For SQL Server,
+  consumes validated connections and produces one work item per effective database. Populated
+  `source_database` emits 1 item; blank discovers accessible online non-system databases via temporary
+  `master` bootstrap.
+- **Connection-scoped assessment inside For Each:** Job 1A executes source
+  assessment per connection (Oracle) or per database work item (SQL Server), followed by
+  `NB_AssessmentSummary.py` to aggregate run metrics without leaking credentials or table data.
 - **Target routing configuration (`accelerator_target_config`):** Target catalog and
   schema routing are resolved automatically by 3-tier precedence:
   1. Connection-specific override (`connection_id = '...'`)
@@ -426,7 +446,7 @@ sqlserver-host
 sqlserver-port
 ```
 
-`source_database` is required for SQL Server control rows. Credentials must remain in secret scopes and must not be committed to Git.
+`source_database` is required for SQL Server `source_table_control` onboarding rows and optional for `source_connection` rows (where a blank value triggers multi-database discovery in Job 1A). Credentials must remain in secret scopes and must not be committed to Git.
 
 ## Connection validation
 

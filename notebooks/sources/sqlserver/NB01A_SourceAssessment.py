@@ -22,6 +22,7 @@ SOURCE_SYSTEM = "sqlserver"
 ROW_COUNT_METHOD = assess_common.CATALOG
 
 dbutils.widgets.text("connection_id", "")
+dbutils.widgets.text("source_database", "")
 dbutils.widgets.text("assessment_id", "")
 dbutils.widgets.text("include_schemas", "")
 dbutils.widgets.text("exclude_schemas", "")
@@ -45,25 +46,40 @@ repo = control_repo()
 
 connection = require_valid_connection(connection_id, SOURCE_SYSTEM)
 cd = connection.asDict()
-src_server, src_db = cd.get("source_server"), cd.get("source_database")
-if not src_db:
-    raise ValueError("SQL Server connections require source_database")
-adapter = get_source_adapter_for_connection(connection)   # requires VALID
+src_server = cd.get("source_server")
+
+requested_database = (
+    dbutils.widgets.get("source_database").strip()
+)
+configured_database = str(
+    cd.get("source_database") or ""
+).strip()
+effective_database = (
+    requested_database or configured_database
+)
+if not effective_database:
+    raise ValueError(
+        "source_database must be supplied by the SQL Server "
+        "assessment database worklist"
+    )
+
+src_db = effective_database
+adapter = get_source_adapter_for_connection(connection, source_database=effective_database)   # requires VALID
 mapper = load_type_mapper(SOURCE_SYSTEM)
-print(f"Assessing SQL Server connection {connection_id} (database={src_db}); "
+print(f"Assessing SQL Server connection {connection_id} (database={effective_database}); "
       f"assessment_id={assessment_id}")
 
 
 def _q(query):
     return read_source_jdbc(adapter, query, source_server=src_server,
-                            source_database=src_db).collect()
+                            source_database=effective_database).collect()
 
 
 def _record(**kwargs):
     return assess_common.build_assessment_record(
         assessment_id=assessment_id, run_id=run_id, connection_id=connection_id,
         source_system=SOURCE_SYSTEM, source_server=src_server,
-        source_database=src_db, **kwargs)
+        source_database=effective_database, **kwargs)
 
 
 assessment_errors = []

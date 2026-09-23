@@ -66,11 +66,45 @@ class SqlServerSourceAdapter(SourceAdapter):
     def connection_probe_query(self):
         return "(SELECT 1 AS CONNECTION_OK) q"
 
+    def clone(self, source_database=None, source_server=None):
+        """Clone this adapter with optional source_database and source_server overrides."""
+        return SqlServerSourceAdapter(
+            secret_provider=self._secret_provider,
+            secret_scope=self.secret_scope,
+            source_server=source_server if source_server is not None else self.source_server,
+            source_database=source_database if source_database is not None else self.source_database,
+            config=dict(self.config),
+        )
+
+    def with_database(self, source_database: str):
+        """Return a cloned adapter configured for an effective database override."""
+        return self.clone(source_database=source_database)
+
+    def resolve_effective_database(self, configured_database: str, requested_database: str = None) -> str:
+        """Resolve effective database: task override takes precedence, then configured database, or blank."""
+        cfg = str(configured_database or "").strip()
+        req = str(requested_database or "").strip() if requested_database is not None else ""
+        return req or cfg
+
+    def resolve_operational_database(self, configured_database: str, operational_database: str) -> str:
+        """Resolve operational database for SQL Server: permits blank configured database for discovery."""
+        cfg = str(configured_database or "").strip()
+        op = str(operational_database or "").strip()
+        if not op:
+            raise ValueError("SQL Server operational row requires nonblank source_database")
+        if not cfg:
+            return op
+        if cfg.casefold() != op.casefold():
+            raise ValueError(
+                f"operational database {op!r} does not match configured connection database {cfg!r}"
+            )
+        return cfg
+
     def get_jdbc_url_and_props(self, source_server=None, source_database=None):
         """Build the SQL Server JDBC url + props from the secret scope.
 
-        The ``source_database`` MUST come from the control row (validated). The
-        server is taken from the row, else a documented ``sqlserver-host``
+        The ``source_database`` is taken from the effective override or the control row.
+        The server is taken from the row, else a documented ``sqlserver-host``
         secret. Connections always use encrypt=true; the server certificate is
         trusted only when the registered connection sets
         ``trust_server_certificate=true`` (default false). Production
@@ -80,10 +114,10 @@ class SqlServerSourceAdapter(SourceAdapter):
         password = self._get_secret("sqlserver-password")
 
         database = source_database if source_database is not None else self.source_database
-        if not database:
+        if not database or not str(database).strip():
             raise ValueError(
-                "SQL Server source_database is required (from the control row)")
-        database = validate_database(database)
+                "SQL Server source_database is required (control row or override)")
+        database = validate_database(str(database).strip())
 
         url_template = self._get_secret("sqlserver-jdbc-url", required=False)
         if url_template:
@@ -182,6 +216,10 @@ class SqlServerSourceAdapter(SourceAdapter):
             lower_watermark, upper_watermark, columns)
 
     # ------------------------------------------------------- discovery SQL
+    def accessible_databases_query(self) -> str:
+        """SQL Server online, accessible, non-system databases as database_name."""
+        return ssb.accessible_databases_query()
+
     def list_schemas_query(self, source_database=None):
         db = validate_database(source_database) if source_database else None
         return ssb.list_schemas_query(db)
@@ -242,11 +280,7 @@ class SqlServerSourceAdapter(SourceAdapter):
 
     def validate_connection_metadata(self, connection) -> None:
         super().validate_connection_metadata(connection)
-        c = dict(connection or {})
-        if not (c.get("source_database") or "").strip():
-            raise ValueError(
-                f"connection {c.get('connection_id')!r} has no source_database; "
-                "SQL Server connections require one")
+        # SQL Server permits a blank source_database for multi-database discovery mode.
 
     # ---------------------------------------------------------- column policy
     def apply_column_policy(self, column_metadata, proposed_mapping):

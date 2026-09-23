@@ -44,9 +44,8 @@ ORACLE = "oracle"
 SQLSERVER = "sqlserver"
 
 # Sources whose connection identity is incomplete without an explicit database.
-# Declared here so connection validation stays declarative: a future source
-# opts in by adding its token rather than by adding another branch.
-SOURCES_REQUIRING_DATABASE = frozenset({SQLSERVER})
+# SQL Server permits blank source_database for database-discovery parent connections.
+SOURCES_REQUIRING_DATABASE = frozenset()
 
 LEGACY_SOURCE_IDENTITY_VERSION = 1
 SOURCE_IDENTITY_VERSION = 2
