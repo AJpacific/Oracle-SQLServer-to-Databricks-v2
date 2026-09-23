@@ -320,6 +320,32 @@ print(f"Registerable after collision check: {len(valid)}; already registered: {l
 
 from pyspark.sql import Row
 from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    StructType,
+    StructField,
+    StringType,
+    BooleanType,
+    IntegerType,
+)
+registration_schema = StructType([
+    StructField("source_table_id", StringType(), False),
+    StructField("connection_id", StringType(), False),
+    StructField("source_system", StringType(), False),
+    StructField("source_server", StringType(), True),
+    StructField("source_database", StringType(), True),
+    StructField("source_schema", StringType(), False),
+    StructField("source_table", StringType(), False),
+    StructField("target_catalog", StringType(), False),
+    StructField("target_schema", StringType(), False),
+    StructField("target_table", StringType(), False),
+    StructField("mapping_status", StringType(), True),
+    StructField("is_active", BooleanType(), False),
+    StructField("current_status", StringType(), False),
+    StructField("initial_load_completed", BooleanType(), False),
+    StructField("delete_policy", StringType(), False),
+    StructField("source_identity_version", IntegerType(), False),
+    StructField("legacy_source_table_id", StringType(), True),
+])
 
 validated_count = len(valid) + len(already_registered)
 claim_acquired_count = 0
@@ -452,9 +478,14 @@ if selection_mode == "ASSESSMENT_FLAGS":
             source_identity_version=SOURCE_IDENTITY_VERSION,
             legacy_source_table_id=None
         ) for c, _ in claimed_valid]
-        src_df = (spark.createDataFrame(reg_rows)
-                  .withColumn("created_ts", F.current_timestamp())
-                  .withColumn("updated_ts", F.current_timestamp()))
+        src_df = (
+            spark.createDataFrame(
+                reg_rows,
+                schema=registration_schema,
+            )
+            .withColumn("created_ts", F.current_timestamp())
+            .withColumn("updated_ts", F.current_timestamp())
+        )
         src_df.createOrReplaceTempView("_batch_register_rows")
         spark.sql(f"""
             MERGE INTO {ctrl('source_table_control')} t
@@ -565,21 +596,33 @@ else:
     # Legacy WIDGETS mode: preserves existing batch registration and selection marking
     if valid:
         reg_rows = [Row(
-            source_table_id=c["source_table_id"], connection_id=c["connection_id"],
-            source_system=c["source_system"], source_server=c["source_server"],
-            source_database=c["source_database"], source_schema=c["source_schema"],
-            source_table=c["source_table"], target_catalog=c["target_catalog"],
-            target_schema=c["target_schema"], target_table=c["target_table"],
+            source_table_id=c["source_table_id"],
+            connection_id=c["connection_id"],
+            source_system=c["source_system"],
+            source_server=c["source_server"],
+            source_database=c["source_database"],
+            source_schema=c["source_schema"],
+            source_table=c["source_table"],
+            target_catalog=c["target_catalog"],
+            target_schema=c["target_schema"],
+            target_table=c["target_table"],
             mapping_status=c["mapping_status"],
+            is_active=False,
+            current_status="REGISTERED",
+            initial_load_completed=False,
+            delete_policy="IGNORE_DELETES",
             source_identity_version=SOURCE_IDENTITY_VERSION,
-            legacy_source_table_id=None) for c in valid]
-        src_df = (spark.createDataFrame(reg_rows)
-                  .withColumn("is_active", F.lit(False))
-                  .withColumn("current_status", F.lit("REGISTERED"))
-                  .withColumn("initial_load_completed", F.lit(False))
-                  .withColumn("delete_policy", F.lit("IGNORE_DELETES"))
-                  .withColumn("created_ts", F.current_timestamp())
-                  .withColumn("updated_ts", F.current_timestamp()))
+            legacy_source_table_id=None,
+        ) for c in valid]
+
+        src_df = (
+            spark.createDataFrame(
+                reg_rows,
+                schema=registration_schema,
+            )
+            .withColumn("created_ts", F.current_timestamp())
+            .withColumn("updated_ts", F.current_timestamp())
+        )
         src_df.createOrReplaceTempView("_register_rows")
         spark.sql(f"""
             MERGE INTO {ctrl('source_table_control')} t

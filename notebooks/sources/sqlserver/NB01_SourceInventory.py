@@ -63,7 +63,14 @@ for db_name, db_candidates in tables_by_db.items():
             cd = c.asDict(recursive=True)
             sch = cd.get("TABLE_SCHEMA") or cd.get("table_schema")
             tbl = cd.get("TABLE_NAME") or cd.get("table_name")
-            batch_col_cache.setdefault((str(sch).casefold(), str(tbl).casefold()), []).append(cd)
+            batch_col_cache.setdefault(
+                (
+                    str(db_name).casefold(),
+                    str(sch).casefold(),
+                    str(tbl).casefold(),
+                ),
+                [],
+            ).append(cd)
 
         batch_pks = read_source_jdbc(
             sample_adapter,
@@ -76,7 +83,14 @@ for db_name, db_candidates in tables_by_db.items():
             sch = pkd.get("TABLE_SCHEMA") or pkd.get("table_schema")
             tbl = pkd.get("TABLE_NAME") or pkd.get("table_name")
             col = pkd.get("COLUMN_NAME") or pkd.get("column_name")
-            batch_pk_cache.setdefault((str(sch).casefold(), str(tbl).casefold()), []).append(col)
+            batch_pk_cache.setdefault(
+                (
+                    str(db_name).casefold(),
+                    str(sch).casefold(),
+                    str(tbl).casefold(),
+                ),
+                [],
+            ).append(col)
     except Exception as batch_exc:
         print(f"  [info] Database {db_name!r} batch metadata fallback to per-table: {failcls.sanitize_message(batch_exc)[:200]}")
 
@@ -117,7 +131,11 @@ for r in active:
 
     try:
         # ---- SQL Server metadata (batched with per-table fallback) ----
-        cache_key = (str(src_schema).casefold(), str(src_table).casefold())
+        cache_key = (
+            str(src_db).casefold(),
+            str(src_schema).casefold(),
+            str(src_table).casefold(),
+        )
         col_dicts = batch_col_cache.get(cache_key)
         if not col_dicts:
             cols = read_source_jdbc(
@@ -224,4 +242,4 @@ if failed:
         f"Source inventory failed: tables_succeeded={succeeded}, "
         f"tables_failed={failed}")
 
-dbutils.notebook.exit(json.dumps(inventory_result))
+dbutils.notebook.exit(json.dumps(inventory_result))
