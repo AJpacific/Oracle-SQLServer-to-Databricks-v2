@@ -547,8 +547,14 @@ class TestMixedSourceOwnership(unittest.TestCase):
         reg_code = shared_nb("NB01B_RegisterSelectedTables.py")
         prov_code = shared_nb("NB08_TargetProvisioning.py")
         load_code = shared_nb("NB09_FullLoad.py")
-        self.assertIn('.withColumn("is_active", F.lit(False))', reg_code)
-        self.assertIn('.withColumn("current_status", F.lit("REGISTERED"))', reg_code)
+        self.assertTrue(
+            '.withColumn("is_active", F.lit(False))' in reg_code
+            or "is_active=False" in reg_code
+        )
+        self.assertTrue(
+            '.withColumn("current_status", F.lit("REGISTERED"))' in reg_code
+            or 'current_status="REGISTERED"' in reg_code
+        )
         for src in ("oracle", "sqlserver"):
             inv_code = source_nb(src, "NB01_SourceInventory.py")
             self.assertIn("include_onboarding=True", inv_code, src)
