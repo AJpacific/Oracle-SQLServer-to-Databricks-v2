@@ -2,7 +2,9 @@
 # MAGIC %md
 # MAGIC # NB_GetAssessmentDatabaseWorklist
 # MAGIC Post-validation SQL Server database worklist generator for Job 1A.
-# MAGIC For each validated SQL Server connection:
+# MAGIC Strictly enforces coalesce(is_active, false) = true AND connection_status = 'VALID'.
+# MAGIC Inactive (is_active = false or NULL) and non-VALID connections are ignored.
+# MAGIC For each active validated SQL Server connection:
 # MAGIC - If source_database is populated: emits one work item for that configured database.
 # MAGIC - If source_database is blank: connects via master temporarily, discovers all
 # MAGIC   online accessible non-system databases, and emits one work item per database.
@@ -82,8 +84,8 @@ eligible = (
     .filter(F.col("sc.source_server").isNotNull() & (F.trim(F.col("sc.source_server")) != ""))
     .filter(F.col("sc.secret_scope").isNotNull() & (F.trim(F.col("sc.secret_scope")) != ""))
     .filter(F.expr(f"{canonical_source_system_sql('sc.source_system')} = {escape_string_literal(SOURCE_SYSTEM)}"))
-    .filter(F.col("sc.is_active") == F.lit(True))
-    .filter(F.upper(F.col("sc.connection_status")) == F.lit("VALID"))
+    .filter(F.coalesce(F.col("sc.is_active"), F.lit(False)) == F.lit(True))
+    .filter(F.upper(F.trim(F.col("sc.connection_status"))) == F.lit("VALID"))
 )
 
 if raw_only and not clean_only:
@@ -122,6 +124,12 @@ failed_connections = 0
 errors = []
 
 for conn in conn_rows:
+    # Defensive check: strictly enforce active and VALID connection
+    conn_active = conn["is_active"] if hasattr(conn, "__getitem__") else getattr(conn, "is_active", None)
+    conn_status = str((conn["connection_status"] if hasattr(conn, "__getitem__") else getattr(conn, "connection_status", None)) or "").strip().upper()
+    if conn_active is not True or conn_status != "VALID":
+        continue
+
     connections_processed += 1
     conn_id = conn["connection_id"]
     configured_db = str(conn["source_database"] or "").strip()

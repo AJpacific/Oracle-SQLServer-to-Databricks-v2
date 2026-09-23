@@ -285,8 +285,8 @@ class TestUpsertConnectionSQL(unittest.TestCase):
         repo = self._repo(results=[[]])
         repo.valid_active_connections(["c1", "c2"])
         sql = repo.spark.last_sql()
-        self.assertIn("is_active = true", sql)
-        self.assertIn("connection_status = 'VALID'", sql)
+        self.assertIn("coalesce(is_active, false) = true", sql)
+        self.assertIn("upper(trim(connection_status)) = 'VALID'", sql)
         self.assertIn("trim(secret_scope) <> ''", sql)
 
     def test_get_source_table_uses_composite_key_and_rejects_duplicates(self):

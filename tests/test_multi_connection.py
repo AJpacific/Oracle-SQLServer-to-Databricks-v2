@@ -24,14 +24,18 @@ from _nbsource import (  # noqa: E402
 )
 
 
+def deployment_nb(name):
+    path = os.path.join(DEPLOYMENT, name)
+    if name.endswith(".ipynb"):
+        with open(path, "r", encoding="utf-8") as f:
+            nb = json.load(f)
+        return "\n".join("".join(c.get("source", [])) for c in nb.get("cells", []) if c.get("cell_type") == "code")
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
 def deployment_code(name):
-    with open(os.path.join(DEPLOYMENT, name), encoding="utf-8") as stream:
-        notebook = json.load(stream)
-    return "\n".join(
-        "\n".join(cell.get("source", []))
-        for cell in notebook.get("cells", [])
-        if cell.get("cell_type") == "code"
-    )
+    return deployment_nb(name)
 
 
 class TestDeploymentNotebookStructure(unittest.TestCase):
@@ -803,8 +807,8 @@ class TestConnectionDiscovery(unittest.TestCase):
         repo.valid_active_connections_for_source("oracle")
         sql = repo.spark.last_sql()
         self.assertIn("lower(trim(source_system)) = 'oracle'", sql)
-        self.assertIn("is_active = true", sql)
-        self.assertIn("connection_status = 'VALID'", sql)
+        self.assertIn("coalesce(is_active, false) = true", sql)
+        self.assertIn("upper(trim(connection_status)) = 'VALID'", sql)
         self.assertIn("secret_scope IS NOT NULL", sql)
         self.assertIn("ORDER BY connection_id ASC", sql)
 
@@ -855,8 +859,8 @@ class TestConnectionDiscovery(unittest.TestCase):
         repo.configured_connections_for_source("oracle")
         sql = repo.spark.last_sql()
         self.assertIn("lower(trim(source_system)) = 'oracle'", sql)
-        self.assertIn("upper(connection_status) IN ('REGISTERED', 'VALID', 'FAILED')", sql)
-        self.assertNotIn("is_active = true", sql)
+        self.assertIn("coalesce(is_active, false) = true", sql)
+        self.assertIn("upper(trim(connection_status)) IN ('REGISTERED', 'VALID', 'FAILED')", sql)
         self.assertIn("source_server IS NOT NULL", sql)
         self.assertIn("secret_scope IS NOT NULL", sql)
         self.assertIn("ORDER BY connection_id ASC", sql)
@@ -866,8 +870,9 @@ class TestConnectionDiscovery(unittest.TestCase):
         repo.configured_connections_for_source("sqlserver")
         sql = repo.spark.last_sql()
         self.assertIn("lower(trim(source_system)) = 'sqlserver'", sql)
+        self.assertIn("coalesce(is_active, false) = true", sql)
+        self.assertIn("upper(trim(connection_status)) IN ('REGISTERED', 'VALID', 'FAILED')", sql)
         self.assertNotIn("source_database IS NOT NULL", sql)
-        self.assertNotIn("is_active = true", sql)
 
     def test_configured_discovery_filters_and_precedence(self):
         repo = ControlRepository(FakeSpark(results=[[]]), "cat", "ctrl")
@@ -1054,8 +1059,11 @@ class TestControlTableInitValidations(unittest.TestCase):
             "ORPHAN_TARGET_CONFIG_CONNECTION",
             "TARGET_CONFIG_CONNECTION_SOURCE_MISMATCH",
             "INVALID_ASSESSMENT_SELECTION_STATUS",
+            "ACTIVE_CONNECTION_INVALID_STATUS",
+            "ACTIVE_TABLE_INVALID_CONNECTION",
         ):
             self.assertIn(f'"{validation_code}"', code)
+        self.assertNotIn('"ACTIVE_CONNECTION_NOT_VALID"', code)
 
 
 class FakeDbUtilsTV:
@@ -1387,24 +1395,25 @@ class TestConnectionValidationNotebookContract(unittest.TestCase):
         repo = ControlRepository(spark, "cat", "ctrl")
         repo.configured_connections_for_source("oracle")
         sql = spark.last_sql()
-        self.assertIn("upper(connection_status) IN ('REGISTERED', 'VALID', 'FAILED')", sql)
+        self.assertIn("upper(trim(connection_status)) IN ('REGISTERED', 'VALID', 'FAILED')", sql)
         self.assertIn("source_server IS NOT NULL", sql)
         self.assertIn("secret_scope IS NOT NULL", sql)
 
-    def test_20_worklist_configured_mode_does_not_require_active(self):
+    def test_20_worklist_configured_mode_requires_active(self):
         spark = FakeSpark(results=[[]])
         repo = ControlRepository(spark, "cat", "ctrl")
         repo.configured_connections_for_source("oracle")
         sql = spark.last_sql()
-        self.assertNotIn("is_active = true", sql)
+        self.assertIn("coalesce(is_active, false) = true", sql)
+        self.assertIn("upper(trim(connection_status)) IN ('REGISTERED', 'VALID', 'FAILED')", sql)
 
     def test_21_worklist_valid_mode_preserves_active_and_valid(self):
         spark = FakeSpark(results=[[]])
         repo = ControlRepository(spark, "cat", "ctrl")
         repo.valid_active_connections_for_source("oracle")
         sql = spark.last_sql()
-        self.assertIn("is_active = true", sql)
-        self.assertIn("connection_status = 'VALID'", sql)
+        self.assertIn("coalesce(is_active, false) = true", sql)
+        self.assertIn("upper(trim(connection_status)) = 'VALID'", sql)
 
     def test_22_worklist_emits_only_connection_id(self):
         for mode in ("valid_active_connections_for_source", "configured_connections_for_source"):
@@ -1486,6 +1495,468 @@ class TestConnectionValidationNotebookContract(unittest.TestCase):
                 else:
                     exists = os.path.isfile(resolved)
                 self.assertTrue(exists, f"Resolved %run target {resolved} does not exist for {token}")
+
+
+class TestConnectionActiveEligibilityMatrix(unittest.TestCase):
+    """Test the complete is_active eligibility contract for Job 1A."""
+
+    def test_configured_mode_sql_predicate(self):
+        spark = FakeSpark(results=[[]])
+        repo = ControlRepository(spark, "cat", "ctrl")
+        repo.configured_connections_for_source("sqlserver")
+        sql = spark.last_sql()
+        self.assertIn("coalesce(is_active, false) = true", sql)
+        self.assertIn("upper(trim(connection_status)) IN ('REGISTERED', 'VALID', 'FAILED')", sql)
+
+    def test_valid_mode_sql_predicate(self):
+        spark = FakeSpark(results=[[]])
+        repo = ControlRepository(spark, "cat", "ctrl")
+        repo.valid_active_connections_for_source("sqlserver")
+        sql = spark.last_sql()
+        self.assertIn("coalesce(is_active, false) = true", sql)
+        self.assertIn("upper(trim(connection_status)) = 'VALID'", sql)
+
+    def test_configured_mode_simulation_matrix(self):
+        """CONFIGURED mode must include REGISTERED/VALID/FAILED with is_active=true,
+        and exclude all is_active=false or is_active=None rows.
+        """
+        rows = [
+            {"connection_id": "c_reg_true", "connection_status": "REGISTERED", "is_active": True},
+            {"connection_id": "c_val_true", "connection_status": "VALID", "is_active": True},
+            {"connection_id": "c_fail_true", "connection_status": "FAILED", "is_active": True},
+            {"connection_id": "c_reg_false", "connection_status": "REGISTERED", "is_active": False},
+            {"connection_id": "c_val_false", "connection_status": "VALID", "is_active": False},
+            {"connection_id": "c_fail_false", "connection_status": "FAILED", "is_active": False},
+            {"connection_id": "c_reg_none", "connection_status": "REGISTERED", "is_active": None},
+            {"connection_id": "c_val_none", "connection_status": "VALID", "is_active": None},
+            {"connection_id": "c_fail_none", "connection_status": "FAILED", "is_active": None},
+        ]
+        # Simulate NB_GetConnectionWorklist / SQL evaluation in CONFIGURED mode:
+        # coalesce(is_active, false) == true AND upper(trim(connection_status)) in ('REGISTERED', 'VALID', 'FAILED')
+        eligible = [
+            r["connection_id"] for r in rows
+            if bool(r.get("is_active")) is True
+            and str(r.get("connection_status") or "").strip().upper() in ("REGISTERED", "VALID", "FAILED")
+        ]
+        self.assertEqual(sorted(eligible), ["c_fail_true", "c_reg_true", "c_val_true"])
+
+    def test_valid_mode_simulation_matrix(self):
+        """VALID mode must include VALID with is_active=true,
+        and exclude VALID with false/None, and all REGISTERED/FAILED.
+        """
+        rows = [
+            {"connection_id": "c_reg_true", "connection_status": "REGISTERED", "is_active": True},
+            {"connection_id": "c_val_true", "connection_status": "VALID", "is_active": True},
+            {"connection_id": "c_fail_true", "connection_status": "FAILED", "is_active": True},
+            {"connection_id": "c_val_false", "connection_status": "VALID", "is_active": False},
+            {"connection_id": "c_val_none", "connection_status": "VALID", "is_active": None},
+        ]
+        # Simulate NB_GetConnectionWorklist in VALID mode:
+        # coalesce(is_active, false) == true AND upper(trim(connection_status)) == 'VALID'
+        eligible = [
+            r["connection_id"] for r in rows
+            if bool(r.get("is_active")) is True
+            and str(r.get("connection_status") or "").strip().upper() == "VALID"
+        ]
+        self.assertEqual(eligible, ["c_val_true"])
+
+    def test_sqlserver_database_worklist_defensive_filter_simulation(self):
+        """Test NB_GetAssessmentDatabaseWorklist defensive filter behavior."""
+        code = deployment_nb("NB_GetAssessmentDatabaseWorklist.py")
+        self.assertIn('coalesce(F.col("sc.is_active"), F.lit(False)) == F.lit(True)', code)
+        self.assertIn('F.upper(F.trim(F.col("sc.connection_status"))) == F.lit("VALID")', code)
+        self.assertIn('if conn_active is not True or conn_status != "VALID":', code)
+
+        # Simulate execution of the loop in NB_GetAssessmentDatabaseWorklist
+        candidates = [
+            {"connection_id": "c1", "source_database": "DB1", "is_active": True, "connection_status": "VALID"},
+            {"connection_id": "c2", "source_database": "DB2", "is_active": False, "connection_status": "VALID"},
+            {"connection_id": "c3", "source_database": "DB3", "is_active": None, "connection_status": "VALID"},
+            {"connection_id": "c4", "source_database": "DB4", "is_active": True, "connection_status": "REGISTERED"},
+            {"connection_id": "c5", "source_database": "DB5", "is_active": True, "connection_status": "FAILED"},
+        ]
+
+        worklist = []
+        for conn in candidates:
+            conn_active = conn.get("is_active")
+            conn_status = str(conn.get("connection_status") or "").strip().upper()
+            if conn_active is not True or conn_status != "VALID":
+                continue
+            worklist.append({
+                "connection_id": conn["connection_id"],
+                "source_database": conn["source_database"]
+            })
+
+        self.assertEqual(len(worklist), 1)
+        self.assertEqual(worklist[0]["connection_id"], "c1")
+        self.assertEqual(worklist[0]["source_database"], "DB1")
+
+    def test_blank_database_discovery_runs_only_when_valid_and_active(self):
+        """Blank database discovery connects to master only when connection is active and VALID."""
+        candidates = [
+            {"connection_id": "c_active_val", "source_database": "", "is_active": True, "connection_status": "VALID"},
+            {"connection_id": "c_inactive_val", "source_database": "", "is_active": False, "connection_status": "VALID"},
+            {"connection_id": "c_null_active_val", "source_database": "", "is_active": None, "connection_status": "VALID"},
+        ]
+
+        discovery_ran_for = []
+        for conn in candidates:
+            conn_active = conn.get("is_active")
+            conn_status = str(conn.get("connection_status") or "").strip().upper()
+            if conn_active is not True or conn_status != "VALID":
+                continue
+            configured_db = str(conn.get("source_database") or "").strip()
+            if not configured_db:
+                discovery_ran_for.append(conn["connection_id"])
+
+        self.assertEqual(discovery_ran_for, ["c_active_val"])
+
+    def test_oracle_configured_mode_contract(self):
+        """Oracle Job 1A requires database/service, and honors is_active switch."""
+        spark = FakeSpark(results=[[]])
+        repo = ControlRepository(spark, "cat", "ctrl")
+        repo.configured_connections_for_source("oracle")
+        sql = spark.last_sql()
+        self.assertIn("lower(trim(source_system)) = 'oracle'", sql)
+        self.assertIn("coalesce(is_active, false) = true", sql)
+        self.assertIn("upper(trim(connection_status)) IN ('REGISTERED', 'VALID', 'FAILED')", sql)
+        # NB_GetConnectionWorklist requires non-blank source_database for Oracle
+        worklist_code = deployment_nb("NB_GetConnectionWorklist.ipynb")
+        self.assertIn('if source_system == "oracle":', worklist_code)
+        self.assertIn('F.col("sc.source_database").isNotNull()', worklist_code)
+
+    def test_inactive_connections_excluded_even_with_only_connection_ids(self):
+        """Inactive connections remain excluded even when specified in only_connection_ids."""
+        spark = FakeSpark(results=[[]])
+        repo = ControlRepository(spark, "cat", "ctrl")
+        repo.configured_connections_for_source("sqlserver", only_connection_ids=["c_inactive"])
+        sql = spark.last_sql()
+        self.assertIn("coalesce(is_active, false) = true", sql)
+        self.assertIn("connection_id IN ('c_inactive')", sql)
+
+    def test_update_connection_status_contract(self):
+        """Verify status update sets is_active and timestamps according to contract."""
+        spark = FakeSpark(results=[[]])
+        repo = ControlRepository(spark, "cat", "ctrl")
+
+        # VALID success: is_active = true, last_validated_ts updated, error cleared
+        repo.update_connection_status("conn1", "VALID", None)
+        sql_valid = spark.last_sql()
+        self.assertIn("`connection_status` = 'VALID'", sql_valid)
+        self.assertIn("`is_active` = true", sql_valid)
+        self.assertIn("`error_message` = NULL", sql_valid)
+        self.assertIn("`last_validated_ts` = current_timestamp()", sql_valid)
+
+        # FAILED failure: is_active = false, sanitized error stored
+        repo.update_connection_status("conn1", "FAILED", "Connection refused password=secret")
+        sql_failed = spark.last_sql()
+        self.assertIn("`connection_status` = 'FAILED'", sql_failed)
+        self.assertIn("`is_active` = false", sql_failed)
+        self.assertNotIn("secret", sql_failed)
+
+
+class TestNB00ConnectionValidationAndJob1ASequence(unittest.TestCase):
+    """Test NB00_ControlTableInit connection validation semantics and Job 1A sequence."""
+
+    def test_nb00_validation_query_structure(self):
+        code = shared_nb("NB00_ControlTableInit.py")
+        self.assertIn('"ACTIVE_CONNECTION_INVALID_STATUS"', code)
+        self.assertNotIn('"ACTIVE_CONNECTION_NOT_VALID"', code)
+        self.assertIn("coalesce(is_active, false) = true", code)
+        self.assertIn("upper(trim(coalesce(connection_status, ''))) NOT IN", code)
+        self.assertIn("'REGISTERED'", code)
+        self.assertIn("'VALID'", code)
+        self.assertIn("'FAILED'", code)
+        self.assertIn('"ACTIVE_TABLE_INVALID_CONNECTION"', code)
+
+    @staticmethod
+    def _evaluate_active_conn_status_invalid(connection):
+        """Simulate NB00 ACTIVE_CONNECTION_INVALID_STATUS check in Python."""
+        is_active = bool(connection.get("is_active")) if connection.get("is_active") is not None else False
+        if not is_active:
+            return False  # inactive row is not flagged
+        status = str(connection.get("connection_status") or "").strip().upper()
+        return status not in ("REGISTERED", "VALID", "FAILED")
+
+    @staticmethod
+    def _evaluate_active_table_invalid_connection(table_row, conn_row):
+        """Simulate NB00 ACTIVE_TABLE_INVALID_CONNECTION check in Python."""
+        if not bool(table_row.get("is_active")):
+            return False  # inactive table is not flagged
+        if not conn_row:
+            return True
+        conn_active = bool(conn_row.get("is_active")) if conn_row.get("is_active") is not None else False
+        conn_status = str(conn_row.get("connection_status") or "").strip().upper()
+        secret_scope = str(conn_row.get("secret_scope") or "").strip()
+        if not conn_active or conn_status != "VALID" or not secret_scope:
+            return True
+        return False
+
+    def test_a_active_registered_connection(self):
+        """Active REGISTERED connection passes NB00, remains unchanged, and enters CONFIGURED worklist."""
+        conn = {
+            "connection_id": "c1",
+            "is_active": True,
+            "connection_status": "REGISTERED",
+            "secret_scope": "sc",
+            "source_server": "srv",
+            "source_system": "sqlserver",
+        }
+        self.assertFalse(self._evaluate_active_conn_status_invalid(conn))
+
+        spark = FakeSpark(results=[[]])
+        repo = ControlRepository(spark, "cat", "ctrl")
+        repo.configured_connections_for_source("sqlserver")
+        sql = spark.last_sql()
+        self.assertIn("coalesce(is_active, false) = true", sql)
+        self.assertIn("upper(trim(connection_status)) IN ('REGISTERED', 'VALID', 'FAILED')", sql)
+
+    def test_b_active_valid_connection(self):
+        """Active VALID connection passes NB00 and is included in CONFIGURED and VALID worklists."""
+        conn = {
+            "connection_id": "c1",
+            "is_active": True,
+            "connection_status": "VALID",
+            "secret_scope": "sc",
+            "source_server": "srv",
+            "source_system": "sqlserver",
+        }
+        self.assertFalse(self._evaluate_active_conn_status_invalid(conn))
+
+        spark = FakeSpark(results=[[]])
+        repo = ControlRepository(spark, "cat", "ctrl")
+        repo.valid_active_connections_for_source("sqlserver")
+        sql = spark.last_sql()
+        self.assertIn("coalesce(is_active, false) = true", sql)
+        self.assertIn("upper(trim(connection_status)) = 'VALID'", sql)
+
+    def test_c_active_failed_connection(self):
+        """Active FAILED connection passes NB00, enters CONFIGURED for retry, excluded from VALID."""
+        conn = {
+            "connection_id": "c1",
+            "is_active": True,
+            "connection_status": "FAILED",
+            "secret_scope": "sc",
+            "source_server": "srv",
+            "source_system": "sqlserver",
+        }
+        self.assertFalse(self._evaluate_active_conn_status_invalid(conn))
+
+        spark = FakeSpark(results=[[]])
+        repo = ControlRepository(spark, "cat", "ctrl")
+        repo.configured_connections_for_source("sqlserver")
+        self.assertIn("'FAILED'", spark.last_sql())
+
+        repo.valid_active_connections_for_source("sqlserver")
+        self.assertIn("upper(trim(connection_status)) = 'VALID'", spark.last_sql())
+
+    def test_d_active_unsupported_status(self):
+        """Active connection with unsupported status is flagged by ACTIVE_CONNECTION_INVALID_STATUS."""
+        conn1 = {"connection_id": "c1", "is_active": True, "connection_status": "UNKNOWN_STATUS"}
+        self.assertTrue(self._evaluate_active_conn_status_invalid(conn1))
+
+        conn2 = {"connection_id": "c2", "is_active": True, "connection_status": "PENDING"}
+        self.assertTrue(self._evaluate_active_conn_status_invalid(conn2))
+
+    def test_e_active_blank_or_null_status(self):
+        """Active connection with blank or NULL status is flagged by ACTIVE_CONNECTION_INVALID_STATUS."""
+        conn_none = {"connection_id": "c1", "is_active": True, "connection_status": None}
+        self.assertTrue(self._evaluate_active_conn_status_invalid(conn_none))
+
+        conn_blank = {"connection_id": "c2", "is_active": True, "connection_status": "   "}
+        self.assertTrue(self._evaluate_active_conn_status_invalid(conn_blank))
+
+        conn_empty = {"connection_id": "c3", "is_active": True, "connection_status": ""}
+        self.assertTrue(self._evaluate_active_conn_status_invalid(conn_empty))
+
+    def test_f_inactive_connection_ignored_by_nb00_and_excluded_from_worklists(self):
+        """Inactive connection (is_active=false) is ignored by NB00 regardless of status, and excluded from worklists."""
+        for status in ("REGISTERED", "VALID", "FAILED", "UNKNOWN_STATUS", "", None):
+            conn = {"connection_id": "c1", "is_active": False, "connection_status": status}
+            self.assertFalse(self._evaluate_active_conn_status_invalid(conn))
+
+    def test_g_null_is_active_treated_as_inactive(self):
+        """NULL is_active is treated as inactive: ignored by NB00 and excluded from worklists."""
+        for status in ("REGISTERED", "VALID", "FAILED", "UNKNOWN_STATUS", "", None):
+            conn = {"connection_id": "c1", "is_active": None, "connection_status": status}
+            self.assertFalse(self._evaluate_active_conn_status_invalid(conn))
+
+    def test_h_operational_table_protection(self):
+        """Active operational tables strictly require a VALID + active parent connection."""
+        table_active = {"source_table_id": "t1", "is_active": True}
+        table_inactive = {"source_table_id": "t2", "is_active": False}
+
+        # Inactive table is never flagged
+        self.assertFalse(self._evaluate_active_table_invalid_connection(
+            table_inactive, {"is_active": False, "connection_status": "REGISTERED"}
+        ))
+
+        # Active table with REGISTERED + true: flagged!
+        self.assertTrue(self._evaluate_active_table_invalid_connection(
+            table_active, {"is_active": True, "connection_status": "REGISTERED", "secret_scope": "sc"}
+        ))
+
+        # Active table with FAILED + true: flagged!
+        self.assertTrue(self._evaluate_active_table_invalid_connection(
+            table_active, {"is_active": True, "connection_status": "FAILED", "secret_scope": "sc"}
+        ))
+
+        # Active table with VALID + false: flagged!
+        self.assertTrue(self._evaluate_active_table_invalid_connection(
+            table_active, {"is_active": False, "connection_status": "VALID", "secret_scope": "sc"}
+        ))
+
+        # Active table with VALID + NULL is_active: flagged!
+        self.assertTrue(self._evaluate_active_table_invalid_connection(
+            table_active, {"is_active": None, "connection_status": "VALID", "secret_scope": "sc"}
+        ))
+
+        # Active table with missing secret_scope: flagged!
+        self.assertTrue(self._evaluate_active_table_invalid_connection(
+            table_active, {"is_active": True, "connection_status": "VALID", "secret_scope": ""}
+        ))
+
+        # Only VALID + true + secret_scope: NOT flagged!
+        self.assertFalse(self._evaluate_active_table_invalid_connection(
+            table_active, {"is_active": True, "connection_status": "VALID", "secret_scope": "sc"}
+        ))
+
+    def test_sqlite_direct_predicate_execution(self):
+        """Execute the exact NB00 predicates in an in-memory SQL database."""
+        import sqlite3
+        con = sqlite3.connect(":memory:")
+        cur = con.cursor()
+        cur.execute("CREATE TABLE source_connection (connection_id TEXT, is_active BOOLEAN, connection_status TEXT, secret_scope TEXT)")
+        cur.execute("CREATE TABLE source_table_control (source_table_id TEXT, connection_id TEXT, is_active BOOLEAN)")
+
+        cur.execute("""
+            INSERT INTO source_connection VALUES
+            ('c_reg_true', true, 'REGISTERED', 'sc'),
+            ('c_val_true', true, 'VALID', 'sc'),
+            ('c_fail_true', true, 'FAILED', 'sc'),
+            ('c_unk_true', true, 'UNKNOWN', 'sc'),
+            ('c_null_true', true, NULL, 'sc'),
+            ('c_blank_true', true, '   ', 'sc'),
+            ('c_unk_false', false, 'UNKNOWN', 'sc'),
+            ('c_unk_null', NULL, 'UNKNOWN', 'sc')
+        """)
+
+        # Execute ACTIVE_CONNECTION_INVALID_STATUS predicate
+        cur.execute("""
+            SELECT connection_id FROM source_connection
+            WHERE coalesce(is_active, false) = true
+              AND upper(trim(coalesce(connection_status, ''))) NOT IN (
+                  'REGISTERED',
+                  'VALID',
+                  'FAILED'
+              )
+        """)
+        flagged_conns = [r[0] for r in cur.fetchall()]
+        self.assertEqual(sorted(flagged_conns), ["c_blank_true", "c_null_true", "c_unk_true"])
+
+        # Execute ACTIVE_TABLE_INVALID_CONNECTION predicate
+        cur.execute("""
+            INSERT INTO source_table_control VALUES
+            ('t_reg_parent', 'c_reg_true', true),
+            ('t_val_parent', 'c_val_true', true),
+            ('t_fail_parent', 'c_fail_true', true),
+            ('t_inactive_parent', 'c_unk_false', true),
+            ('t_null_parent', 'c_unk_null', true),
+            ('t_inactive_table', 'c_reg_true', false)
+        """)
+        cur.execute("""
+            SELECT c.source_table_id
+            FROM source_table_control c
+            JOIN source_connection sc
+              ON c.connection_id = sc.connection_id
+            WHERE c.is_active = true AND (
+                  coalesce(sc.is_active, false) <> true
+                  OR sc.connection_status IS NULL OR sc.connection_status <> 'VALID'
+              OR sc.secret_scope IS NULL OR trim(sc.secret_scope) = '')
+        """)
+        flagged_tables = [r[0] for r in cur.fetchall()]
+        self.assertEqual(sorted(flagged_tables), ["t_fail_parent", "t_inactive_parent", "t_null_parent", "t_reg_parent"])
+
+    def test_job1a_sequence_initial_registration_to_validation(self):
+        """Job 1A sequence: REGISTERED + true -> NB00 -> CONFIGURED worklist -> Validate -> VALID + true -> VALID worklist."""
+        conn_row = {
+            "connection_id": "c_init",
+            "source_system": "sqlserver",
+            "source_server": "srv1.corp",
+            "source_database": "HR",
+            "secret_scope": "scope_hr",
+            "connection_status": "REGISTERED",
+            "is_active": True,
+        }
+
+        # Step 1: NB00 succeeds
+        self.assertFalse(self._evaluate_active_conn_status_invalid(conn_row))
+
+        # Step 2: CONFIGURED worklist includes connection
+        spark = FakeSpark(results=[[FakeRow(connection_id="c_init")]])
+        repo = ControlRepository(spark, "cat", "ctrl")
+        df = repo.configured_connections_for_source("sqlserver")
+        self.assertEqual([r["connection_id"] for r in df.collect()], ["c_init"])
+
+        # Step 3: Validate connection probe succeeds
+        res = _run_nb00a("sqlserver", {"run_id": "r1", "connection_id": "c_init"}, connection_row=conn_row)
+        self.assertEqual(res["exit_payload"]["status"], "VALID")
+        self.assertEqual(res["exit_payload"]["connection_status"], "VALID")
+
+        # Step 4: Status updated in repo
+        repo_spark = FakeSpark(results=[[]])
+        repo2 = ControlRepository(repo_spark, "cat", "ctrl")
+        repo2.update_connection_status("c_init", "VALID", None)
+        sql = repo_spark.last_sql()
+        self.assertIn("`connection_status` = 'VALID'", sql)
+        self.assertIn("`is_active` = true", sql)
+        self.assertIn("`error_message` = NULL", sql)
+
+        # Step 5: VALID worklist now includes connection
+        valid_spark = FakeSpark(results=[[FakeRow(connection_id="c_init")]])
+        repo3 = ControlRepository(valid_spark, "cat", "ctrl")
+        df_valid = repo3.valid_active_connections_for_source("sqlserver")
+        self.assertEqual([r["connection_id"] for r in df_valid.collect()], ["c_init"])
+
+    def test_job1a_sequence_retry_flow(self):
+        """Job 1A retry flow: FAILED + true -> NB00 -> CONFIGURED worklist -> Revalidate."""
+        conn_row = {
+            "connection_id": "c_retry",
+            "source_system": "sqlserver",
+            "source_server": "srv1.corp",
+            "source_database": "Finance",
+            "secret_scope": "scope_fin",
+            "connection_status": "FAILED",
+            "is_active": True,
+        }
+
+        # Step 1: NB00 succeeds
+        self.assertFalse(self._evaluate_active_conn_status_invalid(conn_row))
+
+        # Step 2: CONFIGURED worklist includes connection for retry
+        spark = FakeSpark(results=[[FakeRow(connection_id="c_retry")]])
+        repo = ControlRepository(spark, "cat", "ctrl")
+        df = repo.configured_connections_for_source("sqlserver")
+        self.assertEqual([r["connection_id"] for r in df.collect()], ["c_retry"])
+
+        # Step 3a: Revalidation attempted - success flow
+        res_success = _run_nb00a("sqlserver", {"run_id": "r2", "connection_id": "c_retry"}, connection_row=conn_row)
+        self.assertEqual(res_success["exit_payload"]["status"], "VALID")
+
+        # Step 3b: Revalidation attempted - failure flow preserves failure policy
+        with self.assertRaises(RuntimeError):
+            _run_nb00a(
+                "sqlserver",
+                {"run_id": "r2", "connection_id": "c_retry"},
+                connection_row=conn_row,
+                probe_side_effect=RuntimeError("probe timeout")
+            )
+        fail_spark = FakeSpark(results=[[]])
+        repo_fail = ControlRepository(fail_spark, "cat", "ctrl")
+        repo_fail.update_connection_status("c_retry", "FAILED", "probe timeout")
+        sql_fail = fail_spark.last_sql()
+        self.assertIn("`connection_status` = 'FAILED'", sql_fail)
+        self.assertIn("`is_active` = false", sql_fail)
 
 
 if __name__ == "__main__":

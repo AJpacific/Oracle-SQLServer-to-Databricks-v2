@@ -459,10 +459,16 @@ _validation_checks = (
     SELECT count(*) AS c FROM {ctrl('source_connection')}
     WHERE secret_scope IS NULL OR trim(secret_scope) = ''
   """),
-  ("ACTIVE_CONNECTION_NOT_VALID", f"""
+  ("ACTIVE_CONNECTION_INVALID_STATUS", f"""
+    -- Active connection has a missing or unsupported connection_status.
+    -- Expected REGISTERED, VALID, or FAILED.
     SELECT count(*) AS c FROM {ctrl('source_connection')}
-        WHERE is_active = true
-          AND (connection_status IS NULL OR connection_status <> 'VALID')
+    WHERE coalesce(is_active, false) = true
+      AND upper(trim(coalesce(connection_status, ''))) NOT IN (
+          'REGISTERED',
+          'VALID',
+          'FAILED'
+      )
   """),
   ("BLANK_TABLE_CONNECTION_ID", f"""
     SELECT count(*) AS c FROM {ctrl('source_table_control')}

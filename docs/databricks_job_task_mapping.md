@@ -142,12 +142,34 @@ T05 ForEach Assessment (NB01A)        T06 ForEach SQL Object (NB13)
 | `T07_Assessment_Summary` | `deployment/NB_AssessmentSummary` (run_if: ALL_DONE, depends_on: `T05_ForEach_Connection_Assessment`, `T06_ForEach_Source_SQL_Object_Inventory`) | `run_id`, `source_system: sqlserver` | `connections_assessed`, `databases_assessed`, `assessments`, `objects_assessed`, `selected_table_count`, `business_status` |
 
 *Note on orchestration:*
+- `source_connection.is_active` is the authoritative operator-controlled switch for Job 1A consideration:
+  - `is_active = true`: Connection is considered for validation and processing across all statuses (`REGISTERED`, `VALID`, `FAILED`).
+  - `is_active = false` or `is_active IS NULL`: Job 1A completely ignores the connection. It does not appear in CONFIGURED or VALID connection worklists, is not validated, does not enter SQL Server database discovery, and does not enter assessment or SQL-object extraction.
+- Connection registry validation vs. operational table validation:
+  - In `NB00_ControlTableInit` (`ACTIVE_CONNECTION_INVALID_STATUS`): Active connection registry rows may have `REGISTERED`, `VALID`, or `FAILED` status so Job 1A can perform initial validation and retries. An active connection with a NULL, blank, or unsupported status fails initialization. Inactive connections (`is_active = false` or `NULL`) are ignored by this check.
+  - In operational table validation (`ACTIVE_TABLE_INVALID_CONNECTION`): Active operational `source_table_control` rows strictly require a `VALID` and active parent connection (`is_active = true AND connection_status = 'VALID'`).
+- `connection_status` records the result of the latest validation attempt (`REGISTERED`, `VALID`, `FAILED`), while `is_active` controls operator eligibility.
+- Validation outcome transitions:
+  - Validation success: `connection_status = 'VALID'`, `is_active = true`, `error_message = NULL`, `last_validated_ts = current_timestamp()`, `updated_ts = current_timestamp()`.
+  - Validation failure: `connection_status = 'FAILED'`, `is_active = false`, `error_message = <sanitized failure reason>`, `updated_ts = current_timestamp()`.
+- Operator retry procedure after validation failure:
+  Because validation failure sets `is_active = false`, Job 1A does not automatically retry failed inactive connections. An operator must explicitly re-enable the connection after correcting metadata, network, TLS, or secret settings:
+  ```sql
+  UPDATE <catalog>.<control_schema>.source_connection
+  SET
+      is_active = true,
+      connection_status = 'REGISTERED',
+      error_message = NULL,
+      last_validated_ts = NULL,
+      updated_ts = current_timestamp()
+  WHERE connection_id = '<connection_id>';
+  ```
 - `source_connection` is pre-populated by an operator or trusted configuration process; NB00A validates an existing row and never inserts or updates connection configuration metadata.
 - For SQL Server connections with a blank `source_database`, NB00A connects through `master` temporarily for credential and connectivity validation, but never stores `master` in `source_connection.source_database`.
 - Job 1A passes only `connection_id` to NB00A; no metadata or secrets are passed through Job parameters.
 - `source_system` is an internal fixed task parameter in Job YAML (`oracle` or `sqlserver`), not a user-entered runtime parameter.
 - Configured and valid connection worklists emit strictly `[{"connection_id": "..."}]`.
-- For SQL Server, `T04a_Get_Assessment_Database_Worklist` consumes valid connections and produces `[{"connection_id": "...", "source_database": "..."}]`. When `source_database` is populated, it emits 1 work item without querying sys.databases. When blank, it discovers all accessible online non-system databases via a temporary `master` bootstrap connection and emits one item per database.
+- For SQL Server, `T04a_Get_Assessment_Database_Worklist` defensively requires `coalesce(is_active, false) = true AND connection_status = 'VALID'`. When `source_database` is populated, it emits 1 work item without querying sys.databases. When blank, it discovers all accessible online non-system databases via a temporary `master` bootstrap connection and emits one item per database.
 - Assessment (`T05`) and SQL Object extraction (`T06`) run concurrently for each database work item and pass `source_database` explicitly.
 - Original non-table SQL object definitions (Views, Procedures, Functions, Packages, Package Bodies) extracted by `NB13` are stored in `da_accelerators.control.sql_object_assessment`.
 - `NB18_MaterializeSourceArtifacts` materializes these exact raw source definitions into governed Unity Catalog Volumes (`_source_artifacts`) under `/Volumes/<target_catalog>/<target_schema>/_source_artifacts/<safe_connection_id>/<safe_source_database>/<safe_source_schema>/<type_directory>/<safe_object_name>.sql`.

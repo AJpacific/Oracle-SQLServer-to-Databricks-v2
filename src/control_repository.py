@@ -469,8 +469,8 @@ class ControlRepository:
         """Return operational connections with VALID status and a scope."""
         sql = (
             f"SELECT * FROM {self.ctrl('source_connection')} "
-            "WHERE is_active = true "
-            "AND connection_status = 'VALID' "
+            "WHERE coalesce(is_active, false) = true "
+            "AND upper(trim(connection_status)) = 'VALID' "
             "AND secret_scope IS NOT NULL AND trim(secret_scope) <> ''"
         )
         if connection_ids:
@@ -497,8 +497,8 @@ class ControlRepository:
         norm_system = require_source_system(source_system, "connection discovery")
         sql = (
             f"SELECT connection_id FROM {self.ctrl('source_connection')} "
-            f"WHERE is_active = true "
-            f"AND connection_status = 'VALID' "
+            f"WHERE coalesce(is_active, false) = true "
+            f"AND upper(trim(connection_status)) = 'VALID' "
             f"AND secret_scope IS NOT NULL AND trim(secret_scope) <> '' "
             f"AND connection_id IS NOT NULL AND trim(connection_id) <> '' "
             f"AND lower(trim(source_system)) = {escape_string_literal(norm_system)}"
@@ -539,9 +539,10 @@ class ControlRepository:
     ):
         """Return lazy DataFrame of candidate configured connection IDs for validation.
 
-        Includes REGISTERED, VALID, and FAILED status rows without requiring is_active=true.
+        Includes REGISTERED, VALID, and FAILED status rows requiring is_active=true.
+        Rows with is_active = false or is_active IS NULL are ignored completely.
         Requires nonblank connection_id, matching source_system, nonblank source_server,
-        nonblank secret_scope, and nonblank source_database for SQL Server.
+        nonblank secret_scope, and nonblank source_database for Oracle.
         Projects ONLY connection_id, ordered deterministically by connection_id.
         Exclusion wins over inclusion. Never returns secret_scope or endpoints.
         """
@@ -552,7 +553,8 @@ class ControlRepository:
         )
         sql = (
             f"SELECT connection_id FROM {self.ctrl('source_connection')} "
-            f"WHERE upper(connection_status) IN ('REGISTERED', 'VALID', 'FAILED') "
+            f"WHERE coalesce(is_active, false) = true "
+            f"AND upper(trim(connection_status)) IN ('REGISTERED', 'VALID', 'FAILED') "
             f"AND source_server IS NOT NULL AND trim(source_server) <> '' "
             f"AND secret_scope IS NOT NULL AND trim(secret_scope) <> '' "
             f"AND connection_id IS NOT NULL AND trim(connection_id) <> '' "
