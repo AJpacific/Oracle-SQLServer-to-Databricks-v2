@@ -73,12 +73,23 @@ for r in loaded:
             # Seed from the target snapshot that NB09 actually loaded. A live
             # source MAX here creates a race: a row inserted after NB09 reads but
             # before NB10 runs could advance the checkpoint without being loaded.
-            t_catalog = r["target_catalog"] or CATALOG
-            t_schema = r["target_schema"] or s_schema.lower()
-            t_table = r["target_table"] or s_table.lower()
+            t_catalog, t_schema, t_table = validate_target_identity(
+                r["target_catalog"], r["target_schema"], r["target_table"]
+            )
             target_fqn = f"{t_catalog}.{t_schema}.{t_table}"
+
+            selected_run_id, mappings = get_complete_mapping_snapshot(conn_id, src_id)
+            target_wm_col = resolve_target_column_name(wm_col, mappings)
+
+            target_cols = spark.table(target_fqn).columns
+            if target_wm_col not in target_cols:
+                raise ValueError(
+                    f"Mapped target watermark column {target_wm_col!r} (source {wm_col!r}) "
+                    f"is absent from target table {target_fqn}; available columns: {target_cols}"
+                )
+
             val = (spark.table(target_fqn)
-                   .agg(F.max(F.col(f"`{wm_col}`")).alias("mx"))
+                   .agg(F.max(F.col(f"`{target_wm_col}`")).alias("mx"))
                    .collect()[0]["mx"])
             if val is None:
                 if conn_id not in adapter_cache:

@@ -61,9 +61,7 @@ print("AUTO_MIGRATE tables to provision:", len(auto))
 # avoids executing N separate Spark queries for N tables.
 _all_target_rows = spark.sql(f"""
     SELECT connection_id, source_table_id,
-           lower(concat_ws('.', coalesce(target_catalog, '{CATALOG}'),
-                 coalesce(target_schema, lower(source_schema)),
-                 coalesce(target_table, lower(source_table)))) AS target_fqn
+           lower(concat_ws('.', target_catalog, target_schema, target_table)) AS target_fqn
     FROM {ctrl('source_table_control')}
     WHERE target_catalog IS NOT NULL AND trim(target_catalog) <> ''
       AND target_schema IS NOT NULL AND trim(target_schema) <> ''
@@ -86,9 +84,9 @@ for r in auto:
     src_id = r["source_table_id"]
     require_source_system(r["source_system"], "source_table_control row")
     s_schema, s_table = r["source_schema"], r["source_table"]
-    t_catalog = r["target_catalog"] or CATALOG
-    t_schema = r["target_schema"] or s_schema.lower()
-    t_table = r["target_table"] or s_table.lower()
+    t_catalog, t_schema, t_table = validate_target_identity(
+        r["target_catalog"], r["target_schema"], r["target_table"]
+    )
     target_fqn = f"{t_catalog}.{t_schema}.{t_table}"
 
     target_owners = _fqn_to_ids.get(normalize_target_component(target_fqn), set())
@@ -104,54 +102,10 @@ for r in auto:
         continue
 
     try:
-        # Use the latest available approved mapping run for this source table.
-        mapping_run_rows = spark.sql(f"""
-            SELECT run_id
-            FROM {ctrl('resolved_column_mappings')}
-            WHERE connection_id = {escape_string_literal(conn_id)}
-              AND source_table_id = {escape_string_literal(src_id)}
-            GROUP BY run_id
-            ORDER BY run_id DESC
-            LIMIT 1
-        """).collect()
-
-        if not mapping_run_rows:
-            raise Exception(
-                "no resolved mappings found for this source table"
-            )
-
-        mapping_run_id = mapping_run_rows[0]["run_id"]
-
-        cols = spark.sql(f"""
-            SELECT column_name, databricks_delta_type, mapping_status,
-                   is_nullable, ordinal_position, include_column, is_writable
-            FROM {ctrl('resolved_column_mappings')}
-            WHERE run_id = {escape_string_literal(mapping_run_id)}
-              AND connection_id = {escape_string_literal(conn_id)}
-              AND source_table_id = {escape_string_literal(src_id)}
-            ORDER BY ordinal_position
-        """).collect()
-
-        if not cols:
-            raise Exception(
-                f"no resolved mappings found for mapping run {mapping_run_id}"
-            )
-        # A column the source policy excluded is simply not provisioned; any
-        # other non-AUTO or untyped column is a hard configuration error.
-        cols = [c for c in cols if c["include_column"] is not False]
-        if not cols:
-            raise Exception("source column policy excluded every column")
-        unsafe = [
-            c["column_name"]
-            for c in cols
-            if (c["mapping_status"] or "").upper() != "AUTO"
-            or not c["databricks_delta_type"]
-        ]
-        if unsafe:
-            raise Exception(
-                "unsafe or incomplete mappings: " + ", ".join(unsafe))
-
-        col_specs = [(c["column_name"], c["databricks_delta_type"], bool(c["is_nullable"]))
+        # Use one complete mapping run snapshot for this source table.
+        mapping_run_id, mapping_rows = get_complete_mapping_snapshot(conn_id, src_id)
+        cols = [c for c in mapping_rows if c["include_column"] is not False]
+        col_specs = [(c["target_column_name"], c["databricks_delta_type"], bool(c["is_nullable"]))
                      for c in cols]
 
         spark.sql(ddl.build_create_schema(t_catalog, t_schema, "migrated data"))

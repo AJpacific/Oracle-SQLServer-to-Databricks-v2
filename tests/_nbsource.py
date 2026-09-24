@@ -12,6 +12,7 @@ ROOT = os.path.dirname(HERE)
 NOTEBOOKS = os.path.join(ROOT, "notebooks")
 SHARED = os.path.join(NOTEBOOKS, "shared")
 SOURCES = os.path.join(NOTEBOOKS, "sources")
+DEPLOYMENT = os.path.join(NOTEBOOKS, "deployment")
 
 SOURCE_TOKENS = ("oracle", "sqlserver")
 
@@ -60,6 +61,10 @@ def source_nb(source, name):
 
 def source_nb_path(source, name):
     return os.path.join(SOURCES, source, name)
+
+
+def deployment_nb(name):
+    return _read(os.path.join(DEPLOYMENT, name))
 
 
 def all_shared_notebooks():

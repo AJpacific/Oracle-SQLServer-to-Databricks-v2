@@ -27,6 +27,7 @@ from typing import List
 try:
     from src.identifiers import (
         quote_sqlserver,
+        quote_sqlserver_column,
         sqlserver_fqn,
         escape_string_literal,
     )
@@ -34,6 +35,7 @@ try:
 except ModuleNotFoundError:
     from identifiers import (
         quote_sqlserver,
+        quote_sqlserver_column,
         sqlserver_fqn,
         escape_string_literal,
     )
@@ -279,7 +281,7 @@ def build_count_query(database: str, owner: str, table: str) -> str:
 def build_upper_watermark_query(database: str, owner: str, table: str,
                                 watermark_col: str, watermark_family: str) -> str:
     """Return a datatype-aware frozen upper watermark."""
-    wm = quote_sqlserver(watermark_col)
+    wm = quote_sqlserver_column(watermark_col)
     fam = normalize_watermark_type(watermark_family)
     if fam not in SQLSERVER_WATERMARK_CANDIDATE_TYPES:
         raise ValueError(f"Unsupported non-temporal watermark type: {watermark_family!r}")
@@ -289,7 +291,7 @@ def build_upper_watermark_query(database: str, owner: str, table: str,
 
 def build_min_max_query(database: str, owner: str, table: str, column: str) -> str:
     """MIN/MAX of a column, used to compute JDBC read partition bounds."""
-    c = quote_sqlserver(column)
+    c = quote_sqlserver_column(column)
     return (f"(SELECT MIN({c}) AS MIN_VAL, MAX({c}) AS MAX_VAL "
             f"FROM {sqlserver_fqn(owner, table, database)}) q")
 
@@ -345,7 +347,7 @@ def build_full_extract_query(database: str, owner: str, table: str,
     if columns:
         projected = []
         for c in columns:
-            qc = quote_sqlserver(c)
+            qc = quote_sqlserver_column(c)
             if (fam == "DATETIME2" and watermark_column and
                     c.strip().lower() == watermark_column.strip().lower()):
                 projected.append(f"CAST({qc} AS datetime2(6)) AS {qc}")
@@ -373,12 +375,12 @@ def build_incremental_extract_query(database, owner, table, watermark_col,
     """
     if last_watermark_value is None or upper_watermark_value is None:
         raise ValueError("Incremental extraction requires lower and upper watermarks")
-    wm = quote_sqlserver(watermark_col)
+    wm = quote_sqlserver_column(watermark_col)
     fam = normalize_watermark_type(watermark_family)
     if columns:
         projected = []
         for c in columns:
-            qc = quote_sqlserver(c)
+            qc = quote_sqlserver_column(c)
             if fam == "DATETIME2" and c.strip().lower() == watermark_col.strip().lower():
                 projected.append(f"CAST({qc} AS datetime2(6)) AS {qc}")
             else:

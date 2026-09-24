@@ -166,10 +166,10 @@ for r in eligible:
     src_server = connection_data.get("source_server")
     src_db = resolve_effective_source_database(d, connection_data)
     s_schema, s_table = r["source_schema"], r["source_table"]
-    t_catalog = r["target_catalog"] or CATALOG
-    t_schema = r["target_schema"] or s_schema.lower()
-    t_table = r["target_table"] or s_table.lower()
-    stage_table = f"{t_table}_stage"
+    t_catalog, t_schema, t_table = validate_target_identity(
+        r["target_catalog"], r["target_schema"], r["target_table"]
+    )
+    stage_table = normalize_target_identifier(f"{t_table}_stage", identifier_type="stage")
     strategy = r["load_strategy"]
     pk = list(r["primary_key_columns"]) if r["primary_key_columns"] else []
     wm_col = r["watermark_column"]
@@ -182,41 +182,31 @@ for r in eligible:
             adapter_cache[conn_id] = get_source_adapter_for_connection(connection)
         adapter = adapter_cache[conn_id]
 
-        # Use only the latest approved AUTO target columns. The adapter projects
-        # source values according to its approved target and watermark policy.
+        # Use only the latest approved AUTO target columns from one complete snapshot.
         latest_mapping_rows = spark.sql(f"""
-            SELECT column_name, ordinal_position, mapping_status,
-                   databricks_delta_type, include_column
+            SELECT run_id
             FROM (
-              SELECT column_name, ordinal_position, mapping_status,
-                     databricks_delta_type, include_column,
+              SELECT run_id,
                      ROW_NUMBER() OVER (
-                       PARTITION BY column_name
-                       ORDER BY captured_ts DESC NULLS LAST, run_id DESC
+                       ORDER BY max(captured_ts) DESC NULLS LAST, run_id DESC
                      ) AS rn
               FROM {ctrl('resolved_column_mappings')}
               WHERE connection_id = {escape_string_literal(conn_id)}
                 AND source_table_id = {escape_string_literal(src_id)}
+              GROUP BY run_id
             )
             WHERE rn = 1
-            ORDER BY ordinal_position
         """).collect()
-        included_mappings = [
-            row for row in latest_mapping_rows
-            if row["include_column"] is not False
-        ]
-        unsafe_mappings = [
-            row["column_name"] for row in included_mappings
-            if (row["mapping_status"] or "").upper() != "AUTO"
-            or not row["databricks_delta_type"]
-        ]
-        if unsafe_mappings:
+        if not latest_mapping_rows:
             raise ValueError(
-                "latest mappings are not safe for delta extraction: "
-                + ", ".join(unsafe_mappings))
+                f"No mapping run found in resolved_column_mappings for "
+                f"connection_id={conn_id!r}, source_table_id={src_id!r}"
+            )
+        selected_run_id = latest_mapping_rows[0]["run_id"]
+        selected_run_id, included_mappings = get_complete_mapping_snapshot(
+            conn_id, src_id, run_id=selected_run_id
+        )
         approved_columns = [row["column_name"] for row in included_mappings]
-        if not approved_columns:
-            raise ValueError("no approved AUTO columns found for delta extraction")
 
         if strategy in ("PRIMARY_KEY", "HYBRID") and not pk:
             message = f"{strategy} strategy requires primary_key_columns"

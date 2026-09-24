@@ -121,7 +121,8 @@ print(f"[_common] src location: {_SRC_LOCATION}")
 try:
     from src.identifiers import (
         quote_databricks, quote_oracle, oracle_fqn, databricks_fqn,
-        escape_string_literal,
+        escape_string_literal, validate_identifier, normalize_target_identifier,
+        IdentifierError,
     )
     from src.type_mappers.base import (
         ColumnMappingResult, classify_table_compatibility,
@@ -167,7 +168,8 @@ try:
 except ModuleNotFoundError:
     from identifiers import (
         quote_databricks, quote_oracle, oracle_fqn, databricks_fqn,
-        escape_string_literal,
+        escape_string_literal, validate_identifier, normalize_target_identifier,
+        IdentifierError,
     )
     from type_mappers.base import (
         ColumnMappingResult, classify_table_compatibility,
@@ -504,6 +506,307 @@ def conform_to_table(df, target_fqn):
         else:
             exprs.append(F.lit(None).cast(fld.dataType).alias(fld.name))
     return df.select(*exprs)
+
+
+def resolve_target_column_name(source_col: str, mappings: list) -> str:
+    """Resolve a source column name to its approved Databricks target column name.
+
+    mappings is an iterable of dicts or Rows with 'column_name' and 'target_column_name'.
+    Fails clearly if:
+    - No included approved target mapping matches.
+    - More than one mapping matches due to case ambiguity.
+    - The mapped target identifier is invalid or blank.
+    """
+    if not source_col or not str(source_col).strip():
+        raise ValueError("Source column name cannot be blank")
+
+    raw_s = str(source_col).strip()
+
+    def _get(obj, key):
+        if hasattr(obj, "asDict"):
+            return obj.asDict().get(key)
+        if isinstance(obj, dict):
+            return obj.get(key)
+        return getattr(obj, key, None) or obj[key]
+
+    # Exact match first
+    exact_matches = [m for m in mappings if _get(m, "column_name") == raw_s]
+    if len(exact_matches) == 1:
+        target_name = _get(exact_matches[0], "target_column_name")
+    elif len(exact_matches) > 1:
+        raise ValueError(f"Ambiguous mapping: multiple mappings for source column {raw_s!r}")
+    else:
+        # Case-insensitive match
+        ci_matches = [
+            m for m in mappings
+            if str(_get(m, "column_name") or "").strip().casefold() == raw_s.casefold()
+        ]
+        if len(ci_matches) == 1:
+            target_name = _get(ci_matches[0], "target_column_name")
+        elif len(ci_matches) > 1:
+            raise ValueError(
+                f"Ambiguous mapping: multiple case-insensitive mappings for source column {raw_s!r}"
+            )
+        else:
+            raise ValueError(f"No included approved target mapping found for column {raw_s!r}")
+
+    if not target_name or not str(target_name).strip():
+        raise ValueError(f"Mapped target identifier for column {raw_s!r} is invalid or blank")
+
+    return validate_identifier(str(target_name).strip())
+
+
+def safe_source_column(col_name: str):
+    """Return a safe Spark Column reference for source column names.
+
+    Handles spaces, periods, slashes, hyphens, brackets, backticks,
+    preventing dots from being parsed as nested struct field access.
+    """
+    if col_name is None:
+        raise ValueError("Source column name cannot be None")
+    escaped = str(col_name).replace("`", "``")
+    try:
+        from pyspark.sql import functions as F
+        return F.col(f"`{escaped}`")
+    except Exception:
+        class MockCol:
+            def __init__(self, name):
+                self._name = name
+            def alias(self, target):
+                return MockAliasedCol(self._name, target)
+            def __repr__(self):
+                return f"col('{self._name}')"
+        class MockAliasedCol:
+            def __init__(self, src, tgt):
+                self.src = src
+                self.tgt = tgt
+            def __repr__(self):
+                return f"col('{self.src}').alias('{self.tgt}')"
+        return MockCol(f"`{escaped}`")
+
+
+def validate_target_identity(target_catalog: str, target_schema: str, target_table: str):
+    """Validate authoritative target identity components fail-closed without fallbacks."""
+    if not target_catalog or not str(target_catalog).strip():
+        raise ValueError("target_catalog is missing; repair registration metadata")
+    if not target_schema or not str(target_schema).strip():
+        raise ValueError("target_schema is missing; repair registration metadata")
+    if not target_table or not str(target_table).strip():
+        raise ValueError("target_table is missing; repair registration metadata")
+
+    t_cat = validate_identifier(str(target_catalog).strip())
+    t_sch = validate_identifier(str(target_schema).strip())
+    t_tbl = validate_identifier(str(target_table).strip())
+    return t_cat, t_sch, t_tbl
+
+
+def get_complete_mapping_snapshot(
+    connection_id: str,
+    source_table_id: str,
+    run_id: str = None,
+    spark_session=None,
+    catalog: str = None,
+    control_schema: str = None,
+):
+    """Resolve exactly one complete mapping run for a table registration.
+
+    Algorithm:
+    1. Query resolved_column_mappings using exact connection_id and source_table_id.
+    2. Group by run_id.
+    3. Select one complete mapping run using deterministic ordering:
+       max(captured_ts) DESC NULLS LAST, run_id DESC (or use explicit run_id if provided).
+    4. Retrieve all rows only from the selected run_id.
+    5. Order rows by ordinal_position.
+    6. Return: (selected_mapping_run_id, complete_ordered_mapping_rows)
+    7. Fail clearly when:
+       - there is no mapping run
+       - the selected run has no rows
+       - included mappings have blank target_column_name
+       - included mappings have duplicate target_column_name values
+       - included mappings are not AUTO
+       - included mappings have no databricks_delta_type
+    """
+    sp = spark_session or spark
+    cat = catalog or CATALOG
+    csch = control_schema or CONTROL_SCHEMA
+    tbl = f"{quote_databricks(cat)}.{quote_databricks(csch)}.{quote_databricks('resolved_column_mappings')}"
+
+    if not connection_id or not str(connection_id).strip():
+        raise ValueError("connection_id cannot be blank when retrieving mapping snapshot")
+    if not source_table_id or not str(source_table_id).strip():
+        raise ValueError("source_table_id cannot be blank when retrieving mapping snapshot")
+
+    conn_id = str(connection_id).strip()
+    src_id = str(source_table_id).strip()
+
+    if run_id and str(run_id).strip():
+        selected_run_id = str(run_id).strip()
+    else:
+        run_query = f"""
+            SELECT run_id
+            FROM (
+              SELECT run_id,
+                     ROW_NUMBER() OVER (
+                       ORDER BY max(captured_ts) DESC NULLS LAST, run_id DESC
+                     ) AS rn
+              FROM {tbl}
+              WHERE connection_id = {escape_string_literal(conn_id)}
+                AND source_table_id = {escape_string_literal(src_id)}
+              GROUP BY run_id
+            )
+            WHERE rn = 1
+        """
+        run_rows = sp.sql(run_query).collect()
+        if not run_rows:
+            raise ValueError(
+                f"No mapping run found in resolved_column_mappings for "
+                f"connection_id={conn_id!r}, source_table_id={src_id!r}"
+            )
+        selected_run_id = run_rows[0]["run_id"]
+
+    data_query = f"""
+        SELECT *
+        FROM {tbl}
+        WHERE connection_id = {escape_string_literal(conn_id)}
+          AND source_table_id = {escape_string_literal(src_id)}
+          AND run_id = {escape_string_literal(selected_run_id)}
+        ORDER BY ordinal_position
+    """
+    rows = sp.sql(data_query).collect()
+    if not rows:
+        raise ValueError(
+            f"Selected mapping run {selected_run_id!r} has no rows for "
+            f"connection_id={conn_id!r}, source_table_id={src_id!r}"
+        )
+
+    def _get(obj, key):
+        if hasattr(obj, "asDict"):
+            return obj.asDict().get(key)
+        if isinstance(obj, dict):
+            return obj.get(key)
+        return getattr(obj, key, None) or obj[key]
+
+    included = [r for r in rows if _get(r, "include_column") is not False]
+    if not included:
+        raise ValueError(
+            f"Selected mapping run {selected_run_id!r} has no included columns for "
+            f"connection_id={conn_id!r}, source_table_id={src_id!r}"
+        )
+
+    seen_target_names = set()
+    for r in included:
+        col = _get(r, "column_name")
+        t_col = _get(r, "target_column_name")
+        if not t_col or not str(t_col).strip():
+            raise ValueError(
+                f"Included column {col!r} in mapping run {selected_run_id!r} "
+                f"has blank target_column_name; regenerate mappings"
+            )
+        t_col_str = str(t_col).strip()
+        validate_identifier(t_col_str)
+
+        t_col_lower = t_col_str.lower()
+        if t_col_lower in seen_target_names:
+            raise ValueError(
+                f"Duplicate target_column_name {t_col_str!r} detected in mapping run "
+                f"{selected_run_id!r} for source column {col!r}"
+            )
+        seen_target_names.add(t_col_lower)
+
+        status = (_get(r, "mapping_status") or "").strip().upper()
+        if status != "AUTO":
+            raise ValueError(
+                f"Included column {col!r} in mapping run {selected_run_id!r} "
+                f"has non-AUTO mapping_status: {status}"
+            )
+
+        dtype = _get(r, "databricks_delta_type")
+        if not dtype or not str(dtype).strip():
+            raise ValueError(
+                f"Included column {col!r} in mapping run {selected_run_id!r} "
+                f"has empty databricks_delta_type"
+            )
+
+    return selected_run_id, rows
+
+
+def project_and_validate_dataframe(src_df, approved_mappings):
+    """Strictly project and validate source DataFrame to target columns.
+
+    Checks:
+    - Every included approved source column appears exactly once in src_df.columns.
+    - No duplicate mapping exists for an approved source column.
+    - Every target_column_name is nonblank and valid.
+    - Every target_column_name is unique case-insensitively.
+    - The projected DataFrame contains exactly the expected target columns in ordinal order.
+    """
+    from collections import Counter
+
+    def _get(obj, key):
+        if hasattr(obj, "asDict"):
+            return obj.asDict().get(key)
+        if isinstance(obj, dict):
+            return obj.get(key)
+        return getattr(obj, key, None) or obj[key]
+
+    mappings = [m for m in approved_mappings if _get(m, "include_column") is not False]
+    expected_source_columns = [_get(m, "column_name") for m in mappings]
+    actual_source_columns = list(src_df.columns)
+
+    # Check for duplicate source column mappings
+    src_counts = Counter(expected_source_columns)
+    dup_src = [c for c, count in src_counts.items() if count > 1]
+    if dup_src:
+        raise ValueError(
+            f"Duplicate mappings found for source columns: {', '.join(repr(c) for c in dup_src)}"
+        )
+
+    # Strict check: missing approved columns
+    missing_source_columns = [
+        name for name in expected_source_columns
+        if name not in actual_source_columns
+    ]
+    if missing_source_columns:
+        raise ValueError(
+            "Extracted source DataFrame is missing approved columns: "
+            + ", ".join(missing_source_columns)
+        )
+
+    # Strict check: duplicate column in src_df
+    actual_counts = Counter(actual_source_columns)
+    dup_actual = [c for c in expected_source_columns if actual_counts[c] > 1]
+    if dup_actual:
+        raise ValueError(
+            f"Extracted source DataFrame has duplicate column instances for: {', '.join(repr(c) for c in dup_actual)}"
+        )
+
+    # Validate target columns and build projection expressions
+    expected_target_columns = []
+    seen_targets = set()
+    proj_exprs = []
+    for m in mappings:
+        src_c = _get(m, "column_name")
+        t_c = _get(m, "target_column_name")
+        if not t_c or not str(t_c).strip():
+            raise ValueError(f"Target column name is blank for source column {src_c!r}")
+        t_c_str = str(t_c).strip()
+        validate_identifier(t_c_str)
+        t_c_lower = t_c_str.lower()
+        if t_c_lower in seen_targets:
+            raise ValueError(f"Duplicate target column name {t_c_str!r} in approved mappings")
+        seen_targets.add(t_c_lower)
+        expected_target_columns.append(t_c_str)
+        proj_exprs.append(safe_source_column(src_c).alias(t_c_str))
+
+    projected_df = src_df.select(*proj_exprs)
+    if hasattr(projected_df, "columns") and isinstance(projected_df.columns, (list, tuple)):
+        actual_target_columns = list(projected_df.columns)
+        if actual_target_columns != expected_target_columns:
+            raise ValueError(
+                f"Projected DataFrame columns mismatch: expected {expected_target_columns}, got {actual_target_columns}"
+            )
+
+    return projected_df
 
 # COMMAND ----------
 

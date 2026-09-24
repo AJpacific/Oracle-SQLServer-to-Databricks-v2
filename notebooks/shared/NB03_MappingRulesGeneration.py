@@ -48,6 +48,34 @@ mapped = []
 for r in norm:
     src_system = require_source_system(
         r["source_system"], "normalized inventory row")
+    target_col = None
+    target_col_error = None
+    try:
+        target_col = normalize_target_identifier(r["column_name"], identifier_type="column")
+    except Exception as exc:
+        target_col_error = failcls.sanitize_message(exc)
+
+    if target_col is None:
+        mapped.append((
+            run_id, r["source_table_id"], r["connection_id"], src_system,
+            r["source_server"], r["source_database"],
+            r["source_schema"], r["source_table"], r["column_name"],
+            None,
+            int(r["ordinal_position"]), r["raw_type"], None,
+            "BLOCKED", "UNKNOWN",
+            f"Invalid target column name: {target_col_error[:500]}",
+            bool(r["is_nullable"]), bool(r["is_identity"]),
+            bool(r["is_computed"]), bool(r["is_hidden"]),
+            bool(r["is_rowversion"]), r["source_type_schema"],
+            False, False, True, "INVALID_TARGET_COLUMN_NAME",
+        ))
+        print(
+            "BLOCKED mapping (invalid target column name):",
+            f"[{src_system}] {r['source_schema']}.{r['source_table']}.{r['column_name']}",
+            target_col_error[:500],
+        )
+        continue
+
     try:
         adapter = adapter_for(r)
         res = adapter.load_type_mapper().map_column(
@@ -64,6 +92,7 @@ for r in norm:
             run_id, r["source_table_id"], r["connection_id"], src_system,
             r["source_server"], r["source_database"],
             r["source_schema"], r["source_table"], r["column_name"],
+            target_col,
             int(r["ordinal_position"]), res.source_type, res.databricks_delta_type,
             policy.mapping_status, policy.mapping_fidelity, policy.notes,
             bool(r["is_nullable"]),
@@ -78,6 +107,7 @@ for r in norm:
             run_id, r["source_table_id"], r["connection_id"], src_system,
             r["source_server"], r["source_database"],
             r["source_schema"], r["source_table"], r["column_name"],
+            target_col,
             int(r["ordinal_position"]), r["raw_type"], None,
             "BLOCKED", "UNKNOWN",
             f"Mapping failed with {type(exc).__name__}: "
@@ -91,6 +121,36 @@ for r in norm:
             "BLOCKED mapping:",
             f"[{src_system}] {r['source_schema']}.{r['source_table']}.{r['column_name']}",
             type(exc).__name__, safe_error[:500],
+        )
+
+# Target column collision detection within (run_id, connection_id, source_table_id, target_column_name)
+from collections import defaultdict
+col_groups = defaultdict(list)
+for idx, m in enumerate(mapped):
+    t_col = m[9]
+    if t_col:
+        key = (m[0], m[2], m[1], t_col)
+        col_groups[key].append(idx)
+
+for key, indices in col_groups.items():
+    if len(indices) > 1:
+        colliding_names = [mapped[i][8] for i in indices]
+        colliding_names_str = ", ".join(repr(c) for c in sorted(colliding_names))
+        for idx in indices:
+            row = list(mapped[idx])
+            row[13] = "BLOCKED"
+            row[15] = (
+                f"Target column name collision on '{row[9]}': "
+                f"colliding source columns [{colliding_names_str}]"
+            )
+            row[22] = False
+            row[23] = False
+            row[24] = True
+            row[25] = "TARGET_COLUMN_NAME_COLLISION"
+            mapped[idx] = tuple(row)
+        print(
+            f"TARGET_COLUMN_NAME_COLLISION: table {key[2]} target '{key[3]}' "
+            f"colliding columns: [{colliding_names_str}]"
         )
 
 if norm and not mapped:
@@ -125,6 +185,7 @@ if mapped:
         StructField("source_schema", StringType(), True),
         StructField("source_table", StringType(), True),
         StructField("column_name", StringType(), True),
+        StructField("target_column_name", StringType(), True),
         StructField("ordinal_position", IntegerType(), True),
         StructField("source_type", StringType(), True),
         StructField("databricks_delta_type", StringType(), True),

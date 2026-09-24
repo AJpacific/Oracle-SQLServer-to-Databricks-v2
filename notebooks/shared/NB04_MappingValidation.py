@@ -32,6 +32,13 @@ print("Mappings to validate:", len(maps))
 # COMMAND ----------
 
 results = []
+from collections import Counter
+target_col_counts = Counter(
+    (r["connection_id"], r["source_table_id"], str(r.asDict().get("target_column_name") or "").strip().lower())
+    for r in maps
+    if r.asDict().get("include_column") is not False and r.asDict().get("target_column_name")
+)
+
 for r in maps:
     assert_table_connection_match(r, connection_id)
     assert_source_identity_match(r, connection)
@@ -41,6 +48,7 @@ for r in maps:
         r["source_system"], "resolved mapping row")
     conn_id = r["connection_id"]
     schema, table, col = r["source_schema"], r["source_table"], r["column_name"]
+    target_col = d.get("target_column_name")
     status = (r["mapping_status"] or "").upper()
     fidelity = (r["fidelity"] or "").upper()
     dtype = r["databricks_delta_type"] or ""
@@ -55,11 +63,36 @@ for r in maps:
                         schema, table, col,
                         severity, rule, message))
 
+    # Target column name validation
+    if not target_col or not str(target_col).strip():
+        _add("ERROR", "BLANK_TARGET_COLUMN_NAME",
+             f"target_column_name is blank or missing for source column '{col}'")
+    else:
+        norm_t_col = str(target_col).strip()
+        try:
+            validate_identifier(norm_t_col)
+        except Exception as exc:
+            _add("ERROR", "INVALID_TARGET_COLUMN_NAME",
+                 f"target_column_name '{norm_t_col}' is invalid: {exc}")
+
+        if include_column is not False:
+            if target_col_counts.get((conn_id, src_id, norm_t_col.lower()), 0) > 1:
+                _add("ERROR", "DUPLICATE_TARGET_COLUMN_NAME",
+                     f"duplicate target_column_name '{norm_t_col}' in table '{table}'")
+
+    if policy_code == "INVALID_TARGET_COLUMN_NAME":
+        _add("ERROR", "INVALID_TARGET_COLUMN_NAME",
+             f"target_column_name generation failed for '{col}'")
+    elif policy_code == "TARGET_COLUMN_NAME_COLLISION":
+        _add("ERROR", "TARGET_COLUMN_NAME_COLLISION",
+             f"target_column_name '{target_col}' collision for '{col}'")
+
     # Canonical policy outcomes decided by the source adapter. This notebook
     # reports them without interpreting any dialect metadata concept.
     if include_column is False:
-        _add("ERROR", policy_code or "SOURCE_NON_WRITABLE_COLUMN",
-             "source column policy excludes this column from automatic migration")
+        if policy_code not in ("INVALID_TARGET_COLUMN_NAME", "TARGET_COLUMN_NAME_COLLISION"):
+            _add("ERROR", policy_code or "SOURCE_NON_WRITABLE_COLUMN",
+                 "source column policy excludes this column from automatic migration")
     elif is_writable is False:
         severity = "WARNING" if requires_review else "INFO"
         _add(severity, policy_code or "SOURCE_NON_WRITABLE_COLUMN",

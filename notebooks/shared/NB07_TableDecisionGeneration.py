@@ -26,7 +26,7 @@ def ctrl(t):
 
 maps = spark.sql(
     f"SELECT source_table_id, connection_id, source_system, source_server, source_database, "
-    f"source_schema, source_table, mapping_status FROM {ctrl('resolved_column_mappings')} "
+    f"source_schema, source_table, mapping_status, target_column_name, policy_code FROM {ctrl('resolved_column_mappings')} "
     f"WHERE run_id = {escape_string_literal(run_id)} "
     f"AND connection_id = {escape_string_literal(connection_id)}"
 ).collect()
@@ -51,7 +51,22 @@ for r in maps:
     agg[key]["table"] = r["source_table"]
     agg[key]["connection_id"] = r["connection_id"]
     st = (r["mapping_status"] or "").upper()
-    if st == "BLOCKED":
+    policy = (r["policy_code"] or "").upper()
+    target_col = str(r["target_column_name"] or "").strip()
+    is_target_invalid = False
+    if not target_col:
+        is_target_invalid = True
+    else:
+        try:
+            validate_identifier(target_col)
+        except Exception:
+            is_target_invalid = True
+
+    if (
+        st == "BLOCKED"
+        or policy in ("INVALID_TARGET_COLUMN_NAME", "TARGET_COLUMN_NAME_COLLISION", "BLANK_TARGET_COLUMN_NAME")
+        or is_target_invalid
+    ):
         agg[key]["blocked"] += 1
     elif st == "REVIEW":
         agg[key]["review"] += 1

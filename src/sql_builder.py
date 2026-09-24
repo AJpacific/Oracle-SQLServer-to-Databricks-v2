@@ -19,6 +19,7 @@ from typing import List
 try:
     from src.identifiers import (
         quote_oracle,
+        quote_oracle_column,
         escape_string_literal,
         oracle_fqn
     )
@@ -26,6 +27,7 @@ try:
 except ModuleNotFoundError:
     from identifiers import (
         quote_oracle,
+        quote_oracle_column,
         escape_string_literal,
         oracle_fqn
     )
@@ -175,7 +177,7 @@ def build_count_query(owner: str, table: str) -> str:
 
 def build_max_watermark_select(owner: str, table: str, watermark_col: str) -> str:
     """SELECT MAX(watermark) so incremental prep can advance the high-water mark."""
-    return (f"(SELECT MAX({quote_oracle(watermark_col)}) AS max_wm "
+    return (f"(SELECT MAX({quote_oracle_column(watermark_col)}) AS max_wm "
             f"FROM {oracle_fqn(owner, table)}) q")
 
 
@@ -187,13 +189,13 @@ def build_upper_watermark_query(owner: str, table: str, watermark_col: str) -> s
     recomputed downstream. Structurally:
         SELECT MAX("wm") AS UPPER_WATERMARK FROM "OWNER"."TABLE"
     """
-    return (f"(SELECT MAX({quote_oracle(watermark_col)}) AS UPPER_WATERMARK "
+    return (f"(SELECT MAX({quote_oracle_column(watermark_col)}) AS UPPER_WATERMARK "
             f"FROM {oracle_fqn(owner, table)}) q")
 
 
 def build_min_max_query(owner: str, table: str, column: str) -> str:
     """MIN/MAX of a column, used to compute JDBC read partition bounds."""
-    c = quote_oracle(column)
+    c = quote_oracle_column(column)
     return (f"(SELECT MIN({c}) AS min_val, MAX({c}) AS max_val "
             f"FROM {oracle_fqn(owner, table)}) q")
 
@@ -280,7 +282,7 @@ def _format_watermark_literal(value, family: str) -> str:
 def build_full_extract_query(owner: str, table: str, columns: List[str] = None) -> str:
     """SELECT the whole table (optionally an explicit column list) for a full load."""
     if columns:
-        col_list = ", ".join(quote_oracle(c) for c in columns)
+        col_list = ", ".join(quote_oracle_column(c) for c in columns)
     else:
         col_list = "*"
     return f"(SELECT {col_list} FROM {oracle_fqn(owner, table)}) q"
@@ -303,10 +305,10 @@ def build_incremental_extract_query(owner, table, watermark_col, watermark_famil
     if last_watermark_value is None or upper_watermark_value is None:
         raise ValueError("Incremental extraction requires lower and upper watermarks")
     if columns:
-        col_list = ", ".join(quote_oracle(c) for c in columns)
+        col_list = ", ".join(quote_oracle_column(c) for c in columns)
     else:
         col_list = "*"
-    wm = quote_oracle(watermark_col)
+    wm = quote_oracle_column(watermark_col)
     lower_lit = _format_watermark_literal(last_watermark_value, watermark_family)
     upper_lit = _format_watermark_literal(upper_watermark_value, watermark_family)
     where = f"{wm} > {lower_lit} AND {wm} <= {upper_lit}"

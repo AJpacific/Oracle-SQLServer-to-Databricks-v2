@@ -58,9 +58,9 @@ for r in loaded:
     src_server = r["source_server"]
     src_db = r["source_database"]
     s_schema, s_table = r["source_schema"], r["source_table"]
-    t_catalog = r["target_catalog"] or CATALOG
-    t_schema = r["target_schema"] or s_schema.lower()
-    t_table = r["target_table"] or s_table.lower()
+    t_catalog, t_schema, t_table = validate_target_identity(
+        r["target_catalog"], r["target_schema"], r["target_table"]
+    )
     target_fqn = f"{t_catalog}.{t_schema}.{t_table}"
 
     try:

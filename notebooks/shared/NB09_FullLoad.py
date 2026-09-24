@@ -115,9 +115,9 @@ for r in auto:
              "connection_id": conn_id,
              "source_server": src_server, "source_database": src_db,
              "source_schema": s_schema, "source_table": s_table}
-    t_catalog = r["target_catalog"] or CATALOG
-    t_schema = r["target_schema"] or s_schema.lower()
-    t_table = r["target_table"] or s_table.lower()
+    t_catalog, t_schema, t_table = validate_target_identity(
+        r["target_catalog"], r["target_schema"], r["target_table"]
+    )
     target_fqn = f"{t_catalog}.{t_schema}.{t_table}"
     started = now_utc()
     src_df = None
@@ -131,8 +131,8 @@ for r in auto:
             FROM {ctrl('source_table_control')}
             WHERE is_active = true
               AND lower(concat_ws('.', coalesce(target_catalog, '{CATALOG}'),
-                                  coalesce(target_schema, lower(source_schema)),
-                                  coalesce(target_table, lower(source_table)))) =
+                                  coalesce(target_schema, ''),
+                                  coalesce(target_table, ''))) =
                   {escape_string_literal(target_fqn.lower())}
         """).collect()
         if (len(target_owners) != 1
@@ -148,39 +148,32 @@ for r in auto:
 
         # Approved mappings define the target's typed schema (built by NB08).
         latest_mappings = spark.sql(f"""
-            SELECT column_name, databricks_delta_type, is_nullable,
-                   ordinal_position, mapping_status, include_column
+            SELECT run_id
             FROM (
-              SELECT column_name, databricks_delta_type, is_nullable,
-                     ordinal_position, mapping_status, include_column,
+              SELECT run_id,
                      ROW_NUMBER() OVER (
-                       PARTITION BY column_name
-                       ORDER BY captured_ts DESC NULLS LAST, run_id DESC
+                       ORDER BY max(captured_ts) DESC NULLS LAST, run_id DESC
                      ) AS rn
               FROM {ctrl('resolved_column_mappings')}
               WHERE connection_id = {escape_string_literal(conn_id)}
                 AND source_table_id = {escape_string_literal(src_id)}
+              GROUP BY run_id
             )
             WHERE rn = 1
-            ORDER BY ordinal_position
         """).collect()
-        mrows = [row for row in latest_mappings
-                 if row["include_column"] is not False]
-        if not mrows:
-            raise Exception("no included resolved mappings found")
-        unsafe_mappings = [
-            row["column_name"] for row in mrows
-            if (row["mapping_status"] or "").upper() != "AUTO"
-            or not row["databricks_delta_type"]
-        ]
-        if unsafe_mappings:
+        if not latest_mappings:
             raise ValueError(
-                "latest mappings are not safe for Full Load: "
-                + ", ".join(unsafe_mappings))
+                f"No mapping run found in resolved_column_mappings for "
+                f"connection_id={conn_id!r}, source_table_id={src_id!r}"
+            )
+        selected_run_id = latest_mappings[0]["run_id"]
+        selected_run_id, mrows = get_complete_mapping_snapshot(
+            conn_id, src_id, run_id=selected_run_id
+        )
 
         # Ensure the typed empty table exists even if NB08 wasn't run this session.
         if not spark.catalog.tableExists(target_fqn):
-            col_specs = [(m["column_name"], m["databricks_delta_type"], bool(m["is_nullable"]))
+            col_specs = [(m["target_column_name"], m["databricks_delta_type"], bool(m["is_nullable"]))
                          for m in mrows]
             spark.sql(ddl.build_create_schema(t_catalog, t_schema, "migrated data"))
             spark.sql(ddl.build_create_table(t_catalog, t_schema, t_table, col_specs))
@@ -234,13 +227,16 @@ for r in auto:
             src_df = read_source_jdbc(
                 adapter, extract, source_server=src_server, source_database=src_db,
                 partition_column=part_col, lower_bound=normalized_min,
-                upper_bound=normalized_max, num_partitions=effective_partitions).cache()
+                upper_bound=normalized_max, num_partitions=effective_partitions)
         else:
             print(f"  JDBC partitioning disabled for [{src_system}] {s_schema}.{s_table}: "
                   f"{part_reason}; using correctness-safe unpartitioned read.")
             src_df = read_source_jdbc(
                 adapter, extract, source_server=src_server,
-                source_database=src_db).cache()
+                source_database=src_db)
+
+        # Project and alias every included source column: source column_name -> target_column_name
+        src_df = project_and_validate_dataframe(src_df, mrows).cache()
 
         # Count and write the same cached JDBC snapshot.
         s_count = src_df.count()

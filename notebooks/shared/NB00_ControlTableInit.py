@@ -120,6 +120,7 @@ CREATE TABLE IF NOT EXISTS {ctrl('resolved_column_mappings')} (
   run_id STRING, connection_id STRING, source_table_id STRING, source_system STRING,
   source_server STRING, source_database STRING,
   source_schema STRING, source_table STRING, column_name STRING,
+  target_column_name STRING,
   ordinal_position INT, source_type STRING, databricks_delta_type STRING,
   mapping_status STRING, fidelity STRING, notes STRING, is_nullable BOOLEAN,
   is_identity BOOLEAN, is_computed BOOLEAN, is_hidden BOOLEAN,
@@ -348,6 +349,7 @@ _ensure_columns("normalized_source_inventory", _SOURCE_ID_FULL + [
     ("source_type_schema", "STRING"),
 ])
 _ensure_columns("resolved_column_mappings", _SOURCE_ID_FULL + [
+    ("target_column_name", "STRING"),
     ("is_identity", "BOOLEAN"), ("is_computed", "BOOLEAN"),
     ("is_hidden", "BOOLEAN"), ("is_rowversion", "BOOLEAN"),
     ("source_type_schema", "STRING"),
@@ -1012,10 +1014,18 @@ for _code, _tbl in _downstream_missing_db_checks:
         _missing_sqlserver_database_downstream_count += int(_cnt)
         print(f"Notice: {_cnt} row(s) in {_tbl} missing SQL Server source_database [{_code}].")
 
+_missing_target_col_count = spark.sql(f"""
+    SELECT count(*) AS c
+    FROM {ctrl('resolved_column_mappings')}
+    WHERE target_column_name IS NULL OR trim(target_column_name) = ''
+""").collect()[0]["c"]
+if _missing_target_col_count:
+    print(f"Notice: {_missing_target_col_count} row(s) in resolved_column_mappings missing target_column_name [MISSING_TARGET_COLUMN_NAME_RESOLVED_MAPPING].")
+
 business_status = "MIGRATION_REQUIRED" if _legacy_identity_count else "READY"
 if business_status == "READY" and _noncanonical_source_systems_count:
     business_status = "SOURCE_SYSTEM_CANONICALIZATION_REQUIRED"
-if business_status == "READY" and _missing_sqlserver_database_downstream_count:
+if business_status == "READY" and (_missing_sqlserver_database_downstream_count or _missing_target_col_count):
     business_status = "REPAIR_REQUIRED"
 
 set_task_value("status", "SUCCEEDED")
@@ -1023,6 +1033,7 @@ set_task_value("business_status", business_status)
 set_task_value("legacy_identity_count", int(_legacy_identity_count or 0))
 set_task_value("noncanonical_source_systems_count", int(_noncanonical_source_systems_count or 0))
 set_task_value("missing_sqlserver_database_downstream_count", int(_missing_sqlserver_database_downstream_count or 0))
+set_task_value("missing_target_column_name_count", int(_missing_target_col_count or 0))
 set_task_value("run_id", run_id)
 
 spark.sql(f"""
@@ -1033,13 +1044,15 @@ VALUES ({escape_string_literal(run_id)}, 'NB00_ControlTableInit', 'SUCCEEDED',
 print(f"NB00 complete: status=SUCCEEDED, business_status={business_status}, "
       f"legacy_identity_count={int(_legacy_identity_count or 0)}, "
       f"noncanonical_source_systems_count={int(_noncanonical_source_systems_count or 0)}, "
-      f"missing_sqlserver_database_downstream_count={int(_missing_sqlserver_database_downstream_count or 0)}")
+      f"missing_sqlserver_database_downstream_count={int(_missing_sqlserver_database_downstream_count or 0)}, "
+      f"missing_target_column_name_count={int(_missing_target_col_count or 0)}")
 dbutils.notebook.exit(json.dumps({
     "status": "SUCCEEDED",
     "business_status": business_status,
     "legacy_identity_count": int(_legacy_identity_count or 0),
     "noncanonical_source_systems_count": int(_noncanonical_source_systems_count or 0),
     "missing_sqlserver_database_downstream_count": int(_missing_sqlserver_database_downstream_count or 0),
+    "missing_target_column_name_count": int(_missing_target_col_count or 0),
     "fatal_validation_error_count": 0,
     "run_id": run_id,
 }))

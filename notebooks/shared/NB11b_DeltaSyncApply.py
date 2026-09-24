@@ -326,7 +326,9 @@ for q in queue:
              "connection_id": conn_id,
              "source_server": None, "source_database": None,
              "source_schema": s_schema, "source_table": s_table}
-    t_catalog, t_schema, t_table = q["target_catalog"], q["target_schema"], q["target_table"]
+    t_catalog, t_schema, t_table = validate_target_identity(
+        q["target_catalog"], q["target_schema"], q["target_table"]
+    )
     stage_table = q["stage_table"]
     strategy = q["load_strategy"]
     pk = list(q["primary_key_columns"]) if q["primary_key_columns"] else []
@@ -384,6 +386,12 @@ for q in queue:
             adapter, q["source_query"]).cache()
         s_count = src_df.count()   # extracted_row_count
 
+        # Retrieve approved column mappings from one complete mapping snapshot
+        selected_run_id, approved_mappings = get_complete_mapping_snapshot(conn_id, src_id)
+
+        # Project and alias extracted source columns to target names with strict validation
+        src_df = project_and_validate_dataframe(src_df, approved_mappings)
+
         # --- Stage 2: APPLY to Bronze + Stage 3: RECONCILE the work unit -------
         # Reconciliation always happens here, BEFORE any checkpoint is committed.
         recon_result = None
@@ -400,9 +408,16 @@ for q in queue:
             if not wm_col or last_wm is None or upper_wm is None:
                 raise ValueError(
                     "WATERMARK queue item requires column, lower bound, and upper bound")
+            target_wm_col = resolve_target_column_name(wm_col, approved_mappings)
+            target_cols = spark.table(plain_target).columns
+            if target_wm_col not in target_cols:
+                raise ValueError(
+                    f"Resolved target watermark column {target_wm_col!r} (source {wm_col!r}) "
+                    f"is absent from target Delta table {plain_target}; available columns: {target_cols}"
+                )
             lower_lit = _delta_wm_literal(last_wm, wm_type, adapter)
             upper_lit = _delta_wm_literal(upper_wm, wm_type, adapter)
-            wm_sql = quote_databricks(wm_col)
+            wm_sql = quote_databricks(target_wm_col)
             # Retry-safe replacement of exactly the frozen source interval.
             spark.sql(
                 f"DELETE FROM {target_sql} "
@@ -425,27 +440,41 @@ for q in queue:
                 raise Exception("MERGE strategy requires primary_key_columns")
             if strategy == "HYBRID" and upper_wm is None:
                 raise ValueError("HYBRID queue item requires an upper watermark")
+            target_pk = [resolve_target_column_name(c, approved_mappings) for c in pk]
+            target_cols = spark.table(plain_target).columns
+            missing_target_pk = [c for c in target_pk if c not in target_cols]
+            if missing_target_pk:
+                raise ValueError(
+                    f"Resolved target PK column(s) {missing_target_pk} are absent from "
+                    f"target Delta table {plain_target}; available columns: {target_cols}"
+                )
+            missing_stage_pk = [c for c in target_pk if c not in src_df.columns]
+            if missing_stage_pk:
+                raise ValueError(
+                    f"Resolved target PK column(s) {missing_stage_pk} are absent from "
+                    f"projected DataFrame; available columns: {src_df.columns}"
+                )
             (conform_to_table(src_df, plain_target)
              .write.format("delta").mode("overwrite")
              .option("overwriteSchema", "true").saveAsTable(plain_stage))
             staged_count = spark.table(plain_stage).count()
             dup_count = spark.sql(
-                f"SELECT COUNT(*) AS c FROM (SELECT {pk_list(pk)} FROM {plain_stage} "
-                f"GROUP BY {pk_list(pk)} HAVING COUNT(*) > 1)"
+                f"SELECT COUNT(*) AS c FROM (SELECT {pk_list(target_pk)} FROM {plain_stage} "
+                f"GROUP BY {pk_list(target_pk)} HAVING COUNT(*) > 1)"
             ).collect()[0]["c"]
             # Propagate source deletes only from a COMPLETE snapshot (PRIMARY_KEY);
             # a HYBRID watermark slice can't tell a delete from an unchanged row.
             hard_delete = (strategy == "PRIMARY_KEY" and s_count > 0
                            and (delete_policy or "").upper() == "HARD_DELETE")
             spark.sql(ddl.build_merge_sql(t_catalog, t_schema, t_table,
-                                          stage_table, pk,
+                                          stage_table, target_pk,
                                           delete_unmatched=hard_delete))
             # Validate every staged key exists in Bronze BEFORE dropping the stage.
             current_stage = failcls.RECONCILIATION
             missing_count = spark.sql(
                 f"SELECT COUNT(*) AS c FROM "
-                f"(SELECT DISTINCT {pk_list(pk)} FROM {plain_stage}) s "
-                f"LEFT ANTI JOIN {target_sql} t ON {pk_join(pk)}"
+                f"(SELECT DISTINCT {pk_list(target_pk)} FROM {plain_stage}) s "
+                f"LEFT ANTI JOIN {target_sql} t ON {pk_join(target_pk)}"
             ).collect()[0]["c"]
             t_count = spark.table(plain_target).count()
             spark.sql(ddl.build_drop_table(t_catalog, t_schema, stage_table))

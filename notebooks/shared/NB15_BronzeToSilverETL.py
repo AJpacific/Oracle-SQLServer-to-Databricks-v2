@@ -90,18 +90,34 @@ if not d.get("etl_is_active"):
 if (d.get("current_status") or "") not in SUCCESS_INGEST_STATUSES:
     _fail_ineligible(f"ingest status {d.get('current_status')!r} is not a success state")
 
-bronze_fqn = (f"{d['target_catalog'] or CATALOG}.{d['target_schema'] or d['source_schema'].lower()}."
-              f"{d['target_table'] or d['source_table'].lower()}")
+t_catalog, t_schema, t_table = validate_target_identity(
+    d.get("target_catalog"), d.get("target_schema"), d.get("target_table")
+)
+bronze_fqn = f"{t_catalog}.{t_schema}.{t_table}"
 if not spark.catalog.tableExists(bronze_fqn):
     _fail_ineligible(f"Bronze table {bronze_fqn} does not exist")
 
 # Silver names default from Bronze only when not explicitly configured.
-silver_catalog = d.get("silver_catalog") or (d["target_catalog"] or CATALOG)
-silver_schema = d.get("silver_schema") or f"{(d['target_schema'] or d['source_schema'].lower())}_silver"
-silver_table = d.get("silver_table") or (d["target_table"] or d["source_table"].lower())
+silver_catalog = validate_identifier(str(d.get("silver_catalog") or t_catalog).strip())
+silver_schema = validate_identifier(str(d.get("silver_schema") or f"{t_schema}_silver").strip())
+silver_table = validate_identifier(str(d.get("silver_table") or t_table).strip())
 silver_fqn = f"{silver_catalog}.{silver_schema}.{silver_table}"
-pk = list(d["primary_key_columns"]) if d.get("primary_key_columns") else []
+
+selected_run_id, approved_mappings = get_complete_mapping_snapshot(connection_id, src_id)
+
+bronze_cols = spark.table(bronze_fqn).columns
+raw_pk = list(d["primary_key_columns"]) if d.get("primary_key_columns") else []
+pk = []
+for c in raw_pk:
+    if c in bronze_cols:
+        pk.append(c)
+    else:
+        pk.append(resolve_target_column_name(c, approved_mappings))
+
 etl_wm_col = d.get("etl_watermark_column")
+if etl_wm_col and etl_wm_col not in bronze_cols:
+    etl_wm_col = resolve_target_column_name(etl_wm_col, approved_mappings)
+
 last_etl_wm = d.get("last_etl_watermark_value")
 print(f"ETL {src_id}: bronze={bronze_fqn} silver={silver_fqn} pk={pk} mode={etl_mode}")
 
@@ -306,6 +322,33 @@ try:
             if rid in seen_rule_ids:
                 raise ValueError(f"duplicate active rule_id {rid!r}")
             seen_rule_ids.add(rid)
+            col_name = rd.get("column_name")
+            if col_name:
+                is_target_col = col_name in bronze_cols
+                src_matches = [
+                    m["target_column_name"]
+                    for m in approved_mappings
+                    if (m["column_name"] or "").strip().lower() == col_name.strip().lower()
+                ]
+                if is_target_col and src_matches:
+                    resolved_target = src_matches[0]
+                    if resolved_target.lower() != col_name.lower():
+                        raise ValueError(
+                            f"Ambiguous DQ column_name {col_name!r}: matches Bronze column {col_name!r} "
+                            f"and source column mapping to {resolved_target!r}"
+                        )
+                if not is_target_col:
+                    if src_matches:
+                        if len(src_matches) > 1:
+                            raise ValueError(
+                                f"Ambiguous source column {col_name!r} maps to multiple target columns"
+                            )
+                        rd["column_name"] = src_matches[0]
+                    else:
+                        try:
+                            rd["column_name"] = resolve_target_column_name(col_name, approved_mappings)
+                        except Exception:
+                            pass
             vr = dqr.validate_rule(rd, available_columns=bronze_cols,
                                    primary_key_columns=pk)
         except Exception as rule_error:

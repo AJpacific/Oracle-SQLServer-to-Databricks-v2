@@ -113,10 +113,12 @@ def _selected(schema, obj, is_sel, sel_status):
 
 def _target_schema(schema, database):
     if target_schema_mode == "EXPLICIT":
-        return explicit_target_schema
+        return validate_identifier(explicit_target_schema)
     if target_schema_mode == "PREFIX_WITH_DATABASE":
-        return f"{(database or '')}_{schema}".lower().strip("_")
-    return schema.lower()
+        norm_db = normalize_target_identifier(database, identifier_type="schema")
+        norm_sch = normalize_target_identifier(schema, identifier_type="schema")
+        return f"{norm_db}_{norm_sch}"
+    return normalize_target_identifier(schema, identifier_type="schema")
 
 # Check overlapping assessment selections across assessment IDs in ASSESSMENT_FLAGS mode
 if selection_mode == "ASSESSMENT_FLAGS":
@@ -160,7 +162,7 @@ for r in assessed:
         connection_id, src_system, src_server,
         src_db, schema, obj)
     t_schema = _target_schema(schema, src_db)
-    t_table = obj.lower()
+    t_table = normalize_target_identifier(obj, identifier_type="table")
     candidates.append({
         "source_table_id": sid, "connection_id": connection_id,
         "source_system": src_system, "source_server": src_server,
@@ -195,9 +197,7 @@ internal_collisions = {f for f, n in fqn_counts.items() if n > 1}
 #    plus the existing connection_id so a conflicting one can be blocked.
 existing = spark.sql(f"""
     SELECT source_table_id, connection_id,
-           lower(concat_ws('.', coalesce(target_catalog, '{CATALOG}'),
-                 coalesce(target_schema, lower(source_schema)),
-                 coalesce(target_table, lower(source_table)))) AS target_fqn,
+           lower(concat_ws('.', target_catalog, target_schema, target_table)) AS target_fqn,
            is_active, current_status
     FROM {ctrl('source_table_control')}
     WHERE target_catalog IS NOT NULL AND trim(target_catalog) <> ''
