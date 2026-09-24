@@ -1692,9 +1692,11 @@ class TestNB00ConnectionValidationAndJob1ASequence(unittest.TestCase):
         if not conn_row:
             return True
         conn_active = bool(conn_row.get("is_active")) if conn_row.get("is_active") is not None else False
+        if not conn_active:
+            return False  # inactive parent is parked, not structural corruption
         conn_status = str(conn_row.get("connection_status") or "").strip().upper()
         secret_scope = str(conn_row.get("secret_scope") or "").strip()
-        if not conn_active or conn_status != "VALID" or not secret_scope:
+        if conn_status != "VALID" or not secret_scope:
             return True
         return False
 
@@ -1807,13 +1809,11 @@ class TestNB00ConnectionValidationAndJob1ASequence(unittest.TestCase):
             table_active, {"is_active": True, "connection_status": "FAILED", "secret_scope": "sc"}
         ))
 
-        # Active table with VALID + false: flagged!
-        self.assertTrue(self._evaluate_active_table_invalid_connection(
+        # Active table with inactive parent (false or None): NOT flagged (parked state)
+        self.assertFalse(self._evaluate_active_table_invalid_connection(
             table_active, {"is_active": False, "connection_status": "VALID", "secret_scope": "sc"}
         ))
-
-        # Active table with VALID + NULL is_active: flagged!
-        self.assertTrue(self._evaluate_active_table_invalid_connection(
+        self.assertFalse(self._evaluate_active_table_invalid_connection(
             table_active, {"is_active": None, "connection_status": "VALID", "secret_scope": "sc"}
         ))
 
@@ -1875,13 +1875,17 @@ class TestNB00ConnectionValidationAndJob1ASequence(unittest.TestCase):
             FROM source_table_control c
             JOIN source_connection sc
               ON c.connection_id = sc.connection_id
-            WHERE c.is_active = true AND (
-                  coalesce(sc.is_active, false) <> true
-                  OR sc.connection_status IS NULL OR sc.connection_status <> 'VALID'
-              OR sc.secret_scope IS NULL OR trim(sc.secret_scope) = '')
+            WHERE c.is_active = true
+              AND coalesce(sc.is_active, false) = true
+              AND (
+                   sc.connection_status IS NULL
+                   OR upper(trim(sc.connection_status)) <> 'VALID'
+                   OR sc.secret_scope IS NULL
+                   OR trim(sc.secret_scope) = ''
+              )
         """)
         flagged_tables = [r[0] for r in cur.fetchall()]
-        self.assertEqual(sorted(flagged_tables), ["t_fail_parent", "t_inactive_parent", "t_null_parent", "t_reg_parent"])
+        self.assertEqual(sorted(flagged_tables), ["t_fail_parent", "t_reg_parent"])
 
     def test_job1a_sequence_initial_registration_to_validation(self):
         """Job 1A sequence: REGISTERED + true -> NB00 -> CONFIGURED worklist -> Validate -> VALID + true -> VALID worklist."""

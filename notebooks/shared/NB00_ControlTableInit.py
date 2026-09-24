@@ -528,16 +528,20 @@ _validation_checks = (
         WHERE lower(trim(coalesce(c.source_system, sc.source_system, ''))) = 'sqlserver'
           AND (c.source_database IS NULL OR trim(c.source_database) = '')
     """),
-  ("ACTIVE_TABLE_INVALID_CONNECTION", f"""
-    SELECT count(*) AS c
-    FROM {ctrl('source_table_control')} c
-    JOIN {ctrl('source_connection')} sc
-      ON c.connection_id = sc.connection_id
-    WHERE c.is_active = true AND (
-          coalesce(sc.is_active, false) <> true
-          OR sc.connection_status IS NULL OR sc.connection_status <> 'VALID'
-      OR sc.secret_scope IS NULL OR trim(sc.secret_scope) = '')
-  """),
+    ("ACTIVE_TABLE_INVALID_CONNECTION", f"""
+      SELECT count(*) AS c
+      FROM {ctrl('source_table_control')} c
+      JOIN {ctrl('source_connection')} sc
+        ON c.connection_id = sc.connection_id
+      WHERE c.is_active = true
+        AND coalesce(sc.is_active, false) = true
+        AND (
+             sc.connection_status IS NULL
+             OR upper(trim(sc.connection_status)) <> 'VALID'
+             OR sc.secret_scope IS NULL
+             OR trim(sc.secret_scope) = ''
+        )
+    """),
   ("ACTIVE_TABLE_INCOMPLETE_TARGET", f"""
     SELECT count(*) AS c FROM {ctrl('source_table_control')}
     WHERE is_active = true AND (
