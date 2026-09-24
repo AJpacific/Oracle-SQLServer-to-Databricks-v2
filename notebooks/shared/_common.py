@@ -730,6 +730,68 @@ def get_complete_mapping_snapshot(
     return selected_run_id, rows
 
 
+def _resolve_actual_source_columns(expected_source_columns, actual_source_columns):
+    """Resolve expected approved source columns to actual DataFrame columns.
+
+    Precedence:
+    1. Exact case-sensitive match first.
+    2. If no exact match exists, compare only leading/trailing whitespace using str.strip().
+    3. Accept the trimmed fallback only when exactly one actual src_df column matches.
+    4. If zero columns match, record as missing (reported with repr() for whitespace visibility).
+    5. If multiple actual columns match after trimming, fail explicitly as ambiguous.
+
+    Safety:
+    - Never trims internal spaces.
+    - Never performs case-insensitive matching.
+    - Rejects None, empty, or whitespace-only input.
+    """
+    actual_set = set(actual_source_columns)
+    resolved_map = {}
+    missing = []
+
+    for src_c in expected_source_columns:
+        if src_c is None or not str(src_c).strip():
+            raise ValueError(
+                f"Approved source column name is blank or invalid: {src_c!r}"
+            )
+
+        # 1. Exact case-sensitive match always wins
+        if src_c in actual_set:
+            resolved_map[src_c] = src_c
+            continue
+
+        # 2. Compare only leading/trailing whitespace via str.strip()
+        stripped_target = src_c.strip()
+        unique_cands = [c for c in dict.fromkeys(actual_source_columns) if c.strip() == stripped_target]
+
+        if len(unique_cands) == 1:
+            resolved_map[src_c] = unique_cands[0]
+        elif len(unique_cands) > 1:
+            raise ValueError(
+                f"Ambiguous source column mapping for approved column {src_c!r}: "
+                f"multiple DataFrame columns match after trimming: {', '.join(repr(c) for c in unique_cands)}"
+            )
+        else:
+            missing.append(src_c)
+
+    if missing:
+        raise ValueError(
+            "Extracted source DataFrame is missing approved columns: "
+            + ", ".join(repr(c) for c in missing)
+        )
+
+    # Validate that distinct approved mappings did not resolve to the same DataFrame column
+    from collections import Counter
+    resolved_counts = Counter(resolved_map.values())
+    dup_resolved = [c for c, count in resolved_counts.items() if count > 1]
+    if dup_resolved:
+        raise ValueError(
+            f"Multiple approved mappings resolved to the same source column: {', '.join(repr(c) for c in dup_resolved)}"
+        )
+
+    return resolved_map
+
+
 def project_and_validate_dataframe(src_df, approved_mappings):
     """Strictly project and validate source DataFrame to target columns.
 
@@ -761,20 +823,12 @@ def project_and_validate_dataframe(src_df, approved_mappings):
             f"Duplicate mappings found for source columns: {', '.join(repr(c) for c in dup_src)}"
         )
 
-    # Strict check: missing approved columns
-    missing_source_columns = [
-        name for name in expected_source_columns
-        if name not in actual_source_columns
-    ]
-    if missing_source_columns:
-        raise ValueError(
-            "Extracted source DataFrame is missing approved columns: "
-            + ", ".join(missing_source_columns)
-        )
+    # Resolve approved source columns to actual DataFrame column labels
+    col_map = _resolve_actual_source_columns(expected_source_columns, actual_source_columns)
 
-    # Strict check: duplicate column in src_df
+    # Strict check: duplicate column in src_df among resolved columns
     actual_counts = Counter(actual_source_columns)
-    dup_actual = [c for c in expected_source_columns if actual_counts[c] > 1]
+    dup_actual = [c for c in col_map.values() if actual_counts[c] > 1]
     if dup_actual:
         raise ValueError(
             f"Extracted source DataFrame has duplicate column instances for: {', '.join(repr(c) for c in dup_actual)}"
@@ -786,6 +840,7 @@ def project_and_validate_dataframe(src_df, approved_mappings):
     proj_exprs = []
     for m in mappings:
         src_c = _get(m, "column_name")
+        actual_c = col_map[src_c]
         t_c = _get(m, "target_column_name")
         if not t_c or not str(t_c).strip():
             raise ValueError(f"Target column name is blank for source column {src_c!r}")
@@ -796,7 +851,7 @@ def project_and_validate_dataframe(src_df, approved_mappings):
             raise ValueError(f"Duplicate target column name {t_c_str!r} in approved mappings")
         seen_targets.add(t_c_lower)
         expected_target_columns.append(t_c_str)
-        proj_exprs.append(safe_source_column(src_c).alias(t_c_str))
+        proj_exprs.append(safe_source_column(actual_c).alias(t_c_str))
 
     projected_df = src_df.select(*proj_exprs)
     if hasattr(projected_df, "columns") and isinstance(projected_df.columns, (list, tuple)):

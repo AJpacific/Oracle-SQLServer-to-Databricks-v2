@@ -1010,12 +1010,20 @@ test_table_exists_false_permits_ready (test_target_identifier_normalization.Test
 test_table_exists_true_blocks_with_collision (test_target_identifier_normalization.TestRepairNotebook.test_table_exists_true_blocks_with_collision) ... ok
 test_target_schema_and_table_derivations (test_target_identifier_normalization.TestRepairNotebook.test_target_schema_and_table_derivations) ... ok
 test_unsafe_pattern_removed (test_target_identifier_normalization.TestRepairNotebook.test_unsafe_pattern_removed) ... ok
+test_ambiguous_trimmed_fallback_fails (test_target_identifier_normalization.TestStrictSourceDataFrameProjection.test_ambiguous_trimmed_fallback_fails) ... ok
 test_backtick_handling_is_safe (test_target_identifier_normalization.TestStrictSourceDataFrameProjection.test_backtick_handling_is_safe) ... ok
+test_blank_approved_source_column_fails (test_target_identifier_normalization.TestStrictSourceDataFrameProjection.test_blank_approved_source_column_fails) ... ok
+test_case_difference_fails_without_silent_match (test_target_identifier_normalization.TestStrictSourceDataFrameProjection.test_case_difference_fails_without_silent_match) ... ok
 test_duplicate_source_mappings_fail (test_target_identifier_normalization.TestStrictSourceDataFrameProjection.test_duplicate_source_mappings_fail) ... ok
 test_duplicate_target_mappings_fail (test_target_identifier_normalization.TestStrictSourceDataFrameProjection.test_duplicate_target_mappings_fail) ... ok
+test_exact_source_column_match_wins_over_trimmed (test_target_identifier_normalization.TestStrictSourceDataFrameProjection.test_exact_source_column_match_wins_over_trimmed) ... ok
+test_internal_whitespace_not_normalized (test_target_identifier_normalization.TestStrictSourceDataFrameProjection.test_internal_whitespace_not_normalized) ... ok
 test_missing_approved_source_column_fails (test_target_identifier_normalization.TestStrictSourceDataFrameProjection.test_missing_approved_source_column_fails) ... ok
 test_period_in_source_column_treated_as_literal_name (test_target_identifier_normalization.TestStrictSourceDataFrameProjection.test_period_in_source_column_treated_as_literal_name) ... ok
 test_target_columns_appear_in_ordinal_order (test_target_identifier_normalization.TestStrictSourceDataFrameProjection.test_target_columns_appear_in_ordinal_order) ... ok
+test_unique_leading_and_trailing_whitespace_fallback (test_target_identifier_normalization.TestStrictSourceDataFrameProjection.test_unique_leading_and_trailing_whitespace_fallback) ... ok
+test_unique_leading_whitespace_fallback (test_target_identifier_normalization.TestStrictSourceDataFrameProjection.test_unique_leading_whitespace_fallback) ... ok
+test_unique_trailing_whitespace_fallback (test_target_identifier_normalization.TestStrictSourceDataFrameProjection.test_unique_trailing_whitespace_fallback) ... ok
 test_explicit_target_schema_validated (test_target_identifier_normalization.TestTableRouting.test_explicit_target_schema_validated) ... ok
 test_nb01b_wiring_uses_normalize_target_identifier (test_target_identifier_normalization.TestTableRouting.test_nb01b_wiring_uses_normalize_target_identifier) ... ok
 test_prefix_with_database_convention (test_target_identifier_normalization.TestTableRouting.test_prefix_with_database_convention) ... ok
@@ -1057,7 +1065,7 @@ test_source_mismatch_fails (test_type_mappers.TestYamlValidation.test_source_mis
 test_target_mismatch_fails (test_type_mappers.TestYamlValidation.test_target_mismatch_fails) ... ok
 
 ----------------------------------------------------------------------
-Ran 1012 tests in 1.463s
+Ran 1020 tests in 1.271s
 
 OK
 [_common] src location: D:\Visual Studio Code\Oracle-SQLServer-to-Databricks-v2\src

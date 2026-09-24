@@ -489,7 +489,7 @@ class TestCompleteMappingSnapshotSelection(unittest.TestCase):
 
 
 class TestStrictSourceDataFrameProjection(unittest.TestCase):
-    """B. Test strict source DataFrame column contract."""
+    """B. Test strict source DataFrame column contract and outer-whitespace resolution."""
 
     def test_missing_approved_source_column_fails(self):
         class MockDF:
@@ -502,7 +502,141 @@ class TestStrictSourceDataFrameProjection(unittest.TestCase):
         ]
         with self.assertRaises(ValueError) as ctx:
             project_and_validate_dataframe(MockDF(), mappings)
-        self.assertIn("Extracted source DataFrame is missing approved columns: col_b", str(ctx.exception))
+        self.assertIn("Extracted source DataFrame is missing approved columns: 'col_b'", str(ctx.exception))
+
+    def test_exact_source_column_match_wins_over_trimmed(self):
+        # Case 1: Exact match wins even when another column has the same trimmed form
+        captured_projections = []
+        class MockDF:
+            columns = ["Site", "Site "]
+            def select(self, *cols):
+                captured_projections.extend(cols)
+                class MockResult:
+                    columns = ["site"]
+                return MockResult()
+
+        mappings = [
+            {"column_name": "Site ", "target_column_name": "site"},
+        ]
+        res = project_and_validate_dataframe(MockDF(), mappings)
+        self.assertEqual(res.columns, ["site"])
+        self.assertEqual(len(captured_projections), 1)
+        self.assertEqual(captured_projections[0].src, "`Site `")
+        self.assertEqual(captured_projections[0].tgt, "site")
+
+    def test_unique_trailing_whitespace_fallback(self):
+        # Case 2: Unique trailing-whitespace fallback (e.g. "Site  " in mapping -> "Site" in DataFrame)
+        captured_projections = []
+        class MockDF:
+            columns = ["Site", "Other"]
+            def select(self, *cols):
+                captured_projections.extend(cols)
+                class MockResult:
+                    columns = ["site"]
+                return MockResult()
+
+        mappings = [
+            {"column_name": "Site  ", "target_column_name": "site"},
+        ]
+        res = project_and_validate_dataframe(MockDF(), mappings)
+        self.assertEqual(res.columns, ["site"])
+        self.assertEqual(captured_projections[0].src, "`Site`")
+        self.assertEqual(captured_projections[0].tgt, "site")
+
+    def test_unique_leading_whitespace_fallback(self):
+        # Unique leading whitespace fallback
+        captured_projections = []
+        class MockDF:
+            columns = ["Site", "Other"]
+            def select(self, *cols):
+                captured_projections.extend(cols)
+                class MockResult:
+                    columns = ["site"]
+                return MockResult()
+
+        mappings = [
+            {"column_name": "   Site", "target_column_name": "site"},
+        ]
+        res = project_and_validate_dataframe(MockDF(), mappings)
+        self.assertEqual(res.columns, ["site"])
+        self.assertEqual(captured_projections[0].src, "`Site`")
+        self.assertEqual(captured_projections[0].tgt, "site")
+
+    def test_unique_leading_and_trailing_whitespace_fallback(self):
+        # Unique leading and trailing whitespace fallback
+        captured_projections = []
+        class MockDF:
+            columns = ["Site", "Other"]
+            def select(self, *cols):
+                captured_projections.extend(cols)
+                class MockResult:
+                    columns = ["site"]
+                return MockResult()
+
+        mappings = [
+            {"column_name": "  Site  ", "target_column_name": "site"},
+        ]
+        res = project_and_validate_dataframe(MockDF(), mappings)
+        self.assertEqual(res.columns, ["site"])
+        self.assertEqual(captured_projections[0].src, "`Site`")
+        self.assertEqual(captured_projections[0].tgt, "site")
+
+    def test_ambiguous_trimmed_fallback_fails(self):
+        # Case 3: Ambiguous fallback when multiple actual columns match trimmed name
+        class MockDF:
+            columns = ["Site", "Site "]
+            def select(self, *cols): return self
+
+        mappings = [
+            {"column_name": "Site  ", "target_column_name": "site"},
+        ]
+        with self.assertRaises(ValueError) as ctx:
+            project_and_validate_dataframe(MockDF(), mappings)
+        err = str(ctx.exception)
+        self.assertIn("Ambiguous source column mapping", err)
+        self.assertIn("'Site  '", err)
+        self.assertIn("'Site'", err)
+        self.assertIn("'Site '", err)
+
+    def test_internal_whitespace_not_normalized(self):
+        # Case 4: Internal whitespace must not be removed
+        class MockDF:
+            columns = ["SiteCode"]
+            def select(self, *cols): return self
+
+        mappings = [
+            {"column_name": "Site Code", "target_column_name": "site_code"},
+        ]
+        with self.assertRaises(ValueError) as ctx:
+            project_and_validate_dataframe(MockDF(), mappings)
+        self.assertIn("Extracted source DataFrame is missing approved columns: 'Site Code'", str(ctx.exception))
+
+    def test_case_difference_fails_without_silent_match(self):
+        # Case 5: Case difference must fail closed (no case-insensitive matching)
+        class MockDF:
+            columns = ["site"]
+            def select(self, *cols): return self
+
+        mappings = [
+            {"column_name": "Site", "target_column_name": "site"},
+        ]
+        with self.assertRaises(ValueError) as ctx:
+            project_and_validate_dataframe(MockDF(), mappings)
+        self.assertIn("Extracted source DataFrame is missing approved columns: 'Site'", str(ctx.exception))
+
+    def test_blank_approved_source_column_fails(self):
+        # Case 7: Blank or invalid input
+        class MockDF:
+            columns = ["Site"]
+            def select(self, *cols): return self
+
+        for bad in ["", "   ", None]:
+            mappings = [
+                {"column_name": bad, "target_column_name": "site"},
+            ]
+            with self.assertRaises(ValueError) as ctx:
+                project_and_validate_dataframe(MockDF(), mappings)
+            self.assertIn("blank or invalid", str(ctx.exception))
 
     def test_duplicate_source_mappings_fail(self):
         class MockDF:
