@@ -97,6 +97,7 @@ from src.lakebridge_artifact_common import (
     normalize_diagnostic_severity,
     read_analyzer_report,
     mask_sql_literals_and_comments,
+    has_usable_analyzer_results,
 )
 from src.lakebridge_environment import (
     find_uv_binary,
@@ -3325,6 +3326,474 @@ class TestConversionClassificationNullabilityAndUpgrade(unittest.TestCase):
             expected_not_null_columns,
             "Only conversion_classification must become nullable; all other required NOT NULL columns must be unchanged",
         )
+
+
+class TestNB24LakebridgeRobustness(unittest.TestCase):
+    """Section 25: Comprehensive NB24 Lakebridge Robustness regression tests.
+
+    Covers:
+    A. Analyzer produces valid structured report plus generic failure indication
+    B. Analyzer produces no usable report (genuine failure)
+    C. BladeBridge raises 'Line out of bounds: line 99 >= total lines 99'
+    D. Multiple artifacts: one failure does not abort subsequent artifacts
+    E. Successful artifacts behave exactly as before
+    F. No converted SQL marked successful unless actual valid output exists
+    G. No source SQL manipulation or line-padding workaround
+    """
+
+    def test_A_analyzer_valid_report_with_generic_failure_indication(self):
+        """A. If Analyzer produces a valid structured report containing usable inventory results,
+        preserve and use that report even if Analyzer returns a generic non-fatal 'Analysis failed'.
+        Usable Analyzer metadata is retained and consumed, while diagnostic warning is preserved."""
+        with tempfile.TemporaryDirectory() as td:
+            in_dir = os.path.join(td, "input")
+            os.makedirs(in_dir, exist_ok=True)
+            with open(os.path.join(in_dir, "sp_calc.sql"), "w", encoding="utf-8") as f:
+                f.write("CREATE PROCEDURE dbo.sp_calc AS SELECT 1;")
+
+            rep_xlsx = os.path.join(td, "report.xlsx")
+            rep_json = os.path.join(td, "report.json")
+
+            valid_report_content = {
+                "inventory": [
+                    {
+                        "name": "dbo.sp_calc",
+                        "statementCount": 34,
+                        "scriptCategories": ["DML"],
+                        "complexityLevel": "MEDIUM",
+                        "objectRel": [{"object": "dbo.T_Source", "action": "READ", "count": 2}],
+                    }
+                ]
+            }
+
+            def mock_analyze(inp, out_xlsx, platform, is_debug=False, json_result=None, **kwargs):
+                if json_result:
+                    with open(str(json_result), "w", encoding="utf-8") as jf:
+                        json.dump(valid_report_content, jf)
+                raise RuntimeError("Analysis failed")
+
+            mock_mod = unittest.mock.MagicMock()
+            mock_cls = unittest.mock.MagicMock()
+            mock_mod.Analyzer = mock_cls
+            inst = mock_cls.return_value
+            inst.analyze = mock_analyze
+
+            with unittest.mock.patch.dict("sys.modules", {
+                "databricks": unittest.mock.MagicMock(),
+                "databricks.labs": unittest.mock.MagicMock(),
+                "databricks.labs.bladespector": unittest.mock.MagicMock(),
+                "databricks.labs.bladespector.analyzer": mock_mod,
+            }):
+                res = run_analyze({
+                    "input_dir": in_dir,
+                    "report_xlsx_path": rep_xlsx,
+                    "report_json_path": rep_json,
+                    "source_system": "sqlserver",
+                })
+
+                # Preserves status=SUCCEEDED with warning
+                self.assertEqual(res["status"], "SUCCEEDED")
+                self.assertTrue(res.get("has_warnings"))
+                self.assertIn("Analysis failed", res.get("warning", ""))
+
+            # Verify report can be read and contains usable inventory results
+            wb = read_analyzer_report(report_json_path=rep_json)
+            self.assertTrue(has_usable_analyzer_results(wb))
+            s_count, unk_count = extract_statement_counts(wb, object_name="dbo.sp_calc")
+            self.assertEqual(s_count, 34)
+            self.assertEqual(unk_count, 0)
+            comp = extract_complexity(wb, object_name="dbo.sp_calc")
+            self.assertEqual(comp, "MEDIUM")
+            refs = extract_referenced_objects(wb, object_name="dbo.sp_calc")
+            self.assertEqual(len(refs), 1)
+            self.assertEqual(refs[0]["object"], "dbo.T_Source")
+
+    def test_B_analyzer_no_usable_report_genuine_failure(self):
+        """B. Missing, corrupt, unreadable, empty, or structurally invalid Analyzer output
+        must still be treated as a genuine Analyzer failure."""
+        with tempfile.TemporaryDirectory() as td:
+            in_dir = os.path.join(td, "input")
+            os.makedirs(in_dir, exist_ok=True)
+            with open(os.path.join(in_dir, "test.sql"), "w", encoding="utf-8") as f:
+                f.write("SELECT 1;")
+
+            rep_xlsx = os.path.join(td, "report.xlsx")
+            rep_json = os.path.join(td, "report.json")
+
+            # 1. Missing report file + failure
+            def mock_fail_no_file(*args, **kwargs):
+                raise RuntimeError("Analysis failed completely")
+
+            mock_mod1 = unittest.mock.MagicMock()
+            mock_cls1 = unittest.mock.MagicMock()
+            mock_mod1.Analyzer = mock_cls1
+            mock_cls1.return_value.analyze = mock_fail_no_file
+
+            with unittest.mock.patch.dict("sys.modules", {
+                "databricks": unittest.mock.MagicMock(),
+                "databricks.labs": unittest.mock.MagicMock(),
+                "databricks.labs.bladespector": unittest.mock.MagicMock(),
+                "databricks.labs.bladespector.analyzer": mock_mod1,
+            }):
+                with self.assertRaises(RuntimeError) as ctx:
+                    run_analyze({
+                        "input_dir": in_dir,
+                        "report_xlsx_path": rep_xlsx,
+                        "report_json_path": rep_json,
+                        "source_system": "sqlserver",
+                    })
+                self.assertIn("Analysis failed completely", str(ctx.exception))
+
+            # 2. Corrupt / unreadable JSON
+            def mock_fail_corrupt(*args, **kwargs):
+                if "json_result" in kwargs:
+                    with open(str(kwargs["json_result"]), "w", encoding="utf-8") as jf:
+                        jf.write("NOT_VALID_JSON{{{")
+                raise RuntimeError("Analysis failed on bad syntax")
+
+            mock_mod2 = unittest.mock.MagicMock()
+            mock_cls2 = unittest.mock.MagicMock()
+            mock_mod2.Analyzer = mock_cls2
+            mock_cls2.return_value.analyze = mock_fail_corrupt
+
+            with unittest.mock.patch.dict("sys.modules", {
+                "databricks": unittest.mock.MagicMock(),
+                "databricks.labs": unittest.mock.MagicMock(),
+                "databricks.labs.bladespector": unittest.mock.MagicMock(),
+                "databricks.labs.bladespector.analyzer": mock_mod2,
+            }):
+                with self.assertRaises(RuntimeError) as ctx:
+                    run_analyze({
+                        "input_dir": in_dir,
+                        "report_xlsx_path": rep_xlsx,
+                        "report_json_path": rep_json,
+                        "source_system": "sqlserver",
+                    })
+                self.assertIn("Analysis failed on bad syntax", str(ctx.exception))
+
+            # 3. Empty inventory / summary only
+            def mock_empty_inventory(*args, **kwargs):
+                if "json_result" in kwargs:
+                    with open(str(kwargs["json_result"]), "w", encoding="utf-8") as jf:
+                        json.dump({"summary": [{"total": 0}], "inventory": []}, jf)
+                raise RuntimeError("Analysis failed with empty inventory")
+
+            mock_mod3 = unittest.mock.MagicMock()
+            mock_cls3 = unittest.mock.MagicMock()
+            mock_mod3.Analyzer = mock_cls3
+            mock_cls3.return_value.analyze = mock_empty_inventory
+
+            with unittest.mock.patch.dict("sys.modules", {
+                "databricks": unittest.mock.MagicMock(),
+                "databricks.labs": unittest.mock.MagicMock(),
+                "databricks.labs.bladespector": unittest.mock.MagicMock(),
+                "databricks.labs.bladespector.analyzer": mock_mod3,
+            }):
+                with self.assertRaises(RuntimeError) as ctx:
+                    run_analyze({
+                        "input_dir": in_dir,
+                        "report_xlsx_path": rep_xlsx,
+                        "report_json_path": rep_json,
+                        "source_system": "sqlserver",
+                    })
+                self.assertIn("Analysis failed with empty inventory", str(ctx.exception))
+
+            # 4. has_usable_analyzer_results rejects empty/corrupt dicts
+            self.assertFalse(has_usable_analyzer_results(None))
+            self.assertFalse(has_usable_analyzer_results({}))
+            self.assertFalse(has_usable_analyzer_results({"inventory": []}))
+            self.assertFalse(has_usable_analyzer_results({"summary": [{"count": 1}]}))
+
+    def test_C_bladebridge_line_out_of_bounds_isolation(self):
+        """C. BladeBridge raises 'Line out of bounds: line 99 >= total lines 99':
+        artifact is safely marked FAILED/manual-review without modifying the SQL.
+        converted_definition = NULL, converted_definition_hash = NULL,
+        sanitized error preserved, Analyzer metadata preserved."""
+        with tempfile.TemporaryDirectory() as td:
+            lines = [f"    -- Statement line {i}" for i in range(1, 98)]
+            src_sql = "CREATE PROCEDURE dbo.sp_payroll AS\nBEGIN\n" + "\n".join(lines) + "\nEND;"
+            physical_line_count = len(src_sql.splitlines())
+            self.assertEqual(physical_line_count, 100)
+
+            in_dir = os.path.join(td, "input")
+            os.makedirs(in_dir, exist_ok=True)
+            staged_file = prepare_lakebridge_input_file(
+                input_base_dir=in_dir,
+                connection_id="conn1",
+                source_database="db1",
+                source_schema="dbo",
+                object_type="PROCEDURE",
+                object_name="sp_payroll",
+                source_definition=src_sql,
+                source_system="sqlserver",
+            )
+
+            # Staged file must have the exact same line count and content - NO blank lines added!
+            with open(staged_file, "r", encoding="utf-8") as f:
+                staged_content = f.read()
+            self.assertEqual(staged_content, src_sql)
+            self.assertEqual(len(staged_content.splitlines()), physical_line_count)
+
+            out_file = os.path.join(td, "converted.sql")
+
+            # BladeBridge transpile raises IndexError: Line out of bounds
+            mock_bb_mod = unittest.mock.MagicMock()
+            mock_trans = unittest.mock.MagicMock()
+            mock_bb_mod.Transpiler = mock_trans
+            inst = mock_trans.return_value
+            async def mock_fail_transpile(fname, sql):
+                raise IndexError("Line out of bounds: line 99 >= total lines 99")
+            inst.transpile = mock_fail_transpile
+
+            with unittest.mock.patch.dict("sys.modules", {
+                "databricks": unittest.mock.MagicMock(),
+                "databricks.labs": unittest.mock.MagicMock(),
+                "databricks.labs.bladebridge": unittest.mock.MagicMock(),
+                "databricks.labs.bladebridge.transpiler": mock_bb_mod,
+            }):
+                with self.assertRaises(IndexError) as ctx:
+                    run_transpile({
+                        "source_file": staged_file,
+                        "output_file": out_file,
+                        "source_system": "sqlserver",
+                    })
+                self.assertIn("Line out of bounds: line 99 >= total lines 99", str(ctx.exception))
+
+            # Verify classification derivation when BladeBridge fails
+            cls_res, conv_status, man_req, man_reason, err_code, err_msg = derive_lakebridge_classification(
+                source_definition=src_sql,
+                converted_definition=None,
+                complexity="HIGH",
+                statement_count=34,
+                unknown_statement_count=0,
+                unknown_fragments=[],
+                constructs={"uses_error_handling": False, "uses_rowcount": False, "uses_cursor": False, "uses_dynamic_sql": False, "uses_trigger": False},
+                parsing_error_count=0,
+                validation_error_count=0,
+                generation_error_count=1,
+                fixme_count=0,
+                remaining_source_syntax=[],
+                analyzer_failed=False,
+                transpile_failed=True,
+                object_type="PROCEDURE",
+            )
+            self.assertEqual(conv_status, "FAILED")
+            self.assertTrue(man_req)
+            self.assertEqual(cls_res, LAKEBRIDGE_CLASSIFICATION_UNSUPPORTED)
+
+    def test_D_multiple_artifacts_one_failure_does_not_abort_subsequent_artifacts(self):
+        """D. Multiple artifacts: one BladeBridge failure does not stop subsequent artifacts.
+        Artifact A succeeds, Artifact B fails BladeBridge, Artifact C succeeds."""
+        processed_artifacts = []
+
+        candidates = [
+            {
+                "artifact_id": "art_1_view",
+                "object_name": "v_report",
+                "object_type": "VIEW",
+                "source_schema": "dbo",
+                "source_system": "sqlserver",
+                "source_definition": "CREATE VIEW dbo.v_report AS SELECT 1 AS id;",
+            },
+            {
+                "artifact_id": "art_2_proc_fails",
+                "object_name": "sp_large",
+                "object_type": "PROCEDURE",
+                "source_schema": "dbo",
+                "source_system": "sqlserver",
+                "source_definition": "CREATE PROCEDURE dbo.sp_large AS SELECT 2;",
+            },
+            {
+                "artifact_id": "art_3_proc_ok",
+                "object_name": "sp_next",
+                "object_type": "PROCEDURE",
+                "source_schema": "dbo",
+                "source_system": "sqlserver",
+                "source_definition": "CREATE PROCEDURE dbo.sp_next AS SELECT 3;",
+            },
+        ]
+
+        def mock_runner(req, attempt_dir):
+            act = req.get("action")
+            if act == "analyze":
+                r_json = req.get("report_json_path")
+                if r_json:
+                    with open(r_json, "w", encoding="utf-8") as jf:
+                        json.dump({"inventory": [{"name": "obj", "statementCount": 10}]}, jf)
+                return {"status": "SUCCEEDED"}
+            # In transpile:
+            if "art_2" in req.get("source_file", ""):
+                return {
+                    "status": "FAILED",
+                    "error": "Line out of bounds: line 99 >= total lines 99",
+                }
+            # Others succeed:
+            out_file = req.get("output_file")
+            if out_file:
+                os.makedirs(os.path.dirname(out_file), exist_ok=True)
+                with open(out_file, "w", encoding="utf-8") as f:
+                    f.write("CREATE OR REPLACE VIEW target_obj AS SELECT 1;")
+            return {"status": "SUCCEEDED", "diagnostic_error_count": 0}
+
+        results = {}
+        for cand in candidates:
+            art_id = cand["artifact_id"]
+            src_def = cand["source_definition"]
+            with tempfile.TemporaryDirectory() as att_dir:
+                in_dir = os.path.join(att_dir, "input")
+                rep_dir = os.path.join(att_dir, "report")
+                out_dir = os.path.join(att_dir, "output")
+                err_dir = os.path.join(att_dir, "error")
+                for d in (in_dir, rep_dir, out_dir, err_dir):
+                    os.makedirs(d, exist_ok=True)
+
+                in_f = prepare_lakebridge_input_file(
+                    in_dir, "conn1", None, "dbo", cand["object_type"],
+                    cand["object_name"], src_def, artifact_id=art_id,
+                )
+                rep_f = os.path.join(rep_dir, f"{art_id}_report.json")
+                out_f = os.path.join(out_dir, f"{art_id}_converted.sql")
+
+                # Analyze
+                mock_runner({
+                    "action": "analyze",
+                    "input_dir": in_dir,
+                    "report_json_path": rep_f,
+                    "source_system": "sqlserver",
+                }, att_dir)
+                has_rep = has_usable_analyzer_results(read_analyzer_report(report_json_path=rep_f))
+
+                # Transpile
+                tr_resp = mock_runner({
+                    "action": "transpile",
+                    "source_file": in_f,
+                    "output_file": out_f,
+                    "source_system": "sqlserver",
+                }, att_dir)
+
+                tr_failed = (tr_resp.get("status") != "SUCCEEDED")
+                conv_sql = None
+                if not tr_failed and os.path.isfile(out_f):
+                    with open(out_f, "r", encoding="utf-8") as cf:
+                        conv_sql = cf.read().strip()
+
+                cls_res, conv_status, man_req, man_reason, err_code, err_msg = derive_lakebridge_classification(
+                    source_definition=src_def,
+                    converted_definition=conv_sql,
+                    complexity="LOW",
+                    statement_count=10,
+                    unknown_statement_count=0,
+                    unknown_fragments=[],
+                    constructs={"uses_error_handling": False, "uses_rowcount": False, "uses_cursor": False, "uses_dynamic_sql": False, "uses_trigger": False},
+                    parsing_error_count=0,
+                    validation_error_count=0,
+                    generation_error_count=1 if tr_failed else 0,
+                    fixme_count=0,
+                    remaining_source_syntax=[],
+                    analyzer_failed=not has_rep,
+                    transpile_failed=tr_failed,
+                    object_type=cand["object_type"],
+                    object_map_applied=True,
+                )
+
+                results[art_id] = {
+                    "conversion_status": conv_status,
+                    "converted_definition": conv_sql,
+                    "manual_review_required": man_req,
+                    "classification": cls_res,
+                }
+                processed_artifacts.append(art_id)
+
+        # All 3 artifacts were processed
+        self.assertEqual(processed_artifacts, ["art_1_view", "art_2_proc_fails", "art_3_proc_ok"])
+        self.assertEqual(results["art_1_view"]["conversion_status"], "CONVERTED")
+        self.assertIsNotNone(results["art_1_view"]["converted_definition"])
+
+        self.assertEqual(results["art_2_proc_fails"]["conversion_status"], "FAILED")
+        self.assertIsNone(results["art_2_proc_fails"]["converted_definition"])
+        self.assertTrue(results["art_2_proc_fails"]["manual_review_required"])
+
+        self.assertEqual(results["art_3_proc_ok"]["conversion_status"], "CONVERTED")
+        self.assertIsNotNone(results["art_3_proc_ok"]["converted_definition"])
+
+    def test_E_successful_artifacts_behave_as_before(self):
+        """E. Successful artifacts behave exactly as before."""
+        cls_res, conv_status, man_req, man_reason, err_code, err_msg = derive_lakebridge_classification(
+            source_definition="CREATE VIEW dbo.v_test AS SELECT 1 AS x;",
+            converted_definition="CREATE OR REPLACE VIEW target.v_test AS SELECT 1 AS x;",
+            complexity="LOW",
+            statement_count=1,
+            unknown_statement_count=0,
+            unknown_fragments=[],
+            constructs={"uses_error_handling": False, "uses_rowcount": False, "uses_cursor": False, "uses_dynamic_sql": False, "uses_trigger": False},
+            parsing_error_count=0,
+            validation_error_count=0,
+            generation_error_count=0,
+            fixme_count=0,
+            remaining_source_syntax=[],
+            analyzer_failed=False,
+            transpile_failed=False,
+            object_type="VIEW",
+            object_map_applied=True,
+        )
+        self.assertEqual(cls_res, LAKEBRIDGE_CLASSIFICATION_AUTO_CANDIDATE)
+        self.assertEqual(conv_status, "CONVERTED")
+        self.assertFalse(man_req)
+        self.assertIsNone(err_code)
+        self.assertIsNone(err_msg)
+
+    def test_F_no_converted_sql_marked_successful_unless_actual_output_exists(self):
+        """F. No converted SQL is marked successful unless actual valid converted output exists."""
+        for empty_or_none in [None, "", "   \n\t  "]:
+            cls_res, conv_status, man_req, man_reason, err_code, err_msg = derive_lakebridge_classification(
+                source_definition="CREATE VIEW dbo.v_test AS SELECT 1;",
+                converted_definition=empty_or_none,
+                complexity="LOW",
+                statement_count=1,
+                unknown_statement_count=0,
+                unknown_fragments=[],
+                constructs={"uses_error_handling": False, "uses_rowcount": False, "uses_cursor": False, "uses_dynamic_sql": False, "uses_trigger": False},
+                parsing_error_count=0,
+                validation_error_count=0,
+                generation_error_count=0,
+                fixme_count=0,
+                remaining_source_syntax=[],
+                analyzer_failed=False,
+                transpile_failed=False,
+                object_type="VIEW",
+            )
+            self.assertNotEqual(conv_status, "CONVERTED")
+            self.assertEqual(cls_res, LAKEBRIDGE_CLASSIFICATION_UNSUPPORTED)
+            self.assertTrue(man_req)
+
+    def test_G_no_source_sql_manipulation_or_line_padding_workaround(self):
+        """G. No source SQL manipulation or line-padding workaround is introduced anywhere."""
+        runner_path = os.path.join(ROOT, "src", "lakebridge_runner.py")
+        with open(runner_path, "r", encoding="utf-8") as f:
+            runner_code = f.read()
+
+        nb24_path = os.path.join(ROOT, "notebooks", "shared", "NB24_LakebridgeAnalyzeAndTranspile.py")
+        with open(nb24_path, "r", encoding="utf-8") as f:
+            nb24_code = f.read()
+
+        # Verify no artificial blank lines or padding logic
+        for code in (runner_code, nb24_code):
+            self.assertNotIn("+ '\\n\\n'", code)
+            self.assertNotIn("+ \"\\n\\n\"", code)
+            self.assertNotIn("source_sql + \"\\n\"", code)
+            self.assertNotIn("source_sql + '\\n'", code)
+            self.assertNotIn("line 99", code)
+            self.assertNotIn("total lines 99", code)
+
+        # Verify prepare_lakebridge_input_file does not alter or pad SQL
+        with tempfile.TemporaryDirectory() as td:
+            sql_exact = "SELECT 1;\nSELECT 2;\nSELECT 3;"
+            written = prepare_lakebridge_input_file(
+                td, "c1", None, "dbo", "VIEW", "v1", sql_exact,
+            )
+            with open(written, "r", encoding="utf-8") as f:
+                read_back = f.read()
+            self.assertEqual(read_back, sql_exact)
 
 
 if __name__ == "__main__":

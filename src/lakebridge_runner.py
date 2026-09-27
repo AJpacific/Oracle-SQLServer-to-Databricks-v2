@@ -55,6 +55,8 @@ try:
         normalize_diagnostic_severity,
         get_analyzer_platform,
         get_bladebridge_tech,
+        read_analyzer_report,
+        has_usable_analyzer_results,
     )
 except ModuleNotFoundError:
     from lakebridge_artifact_common import (
@@ -63,6 +65,8 @@ except ModuleNotFoundError:
         normalize_diagnostic_severity,
         get_analyzer_platform,
         get_bladebridge_tech,
+        read_analyzer_report,
+        has_usable_analyzer_results,
     )
 
 
@@ -137,20 +141,42 @@ def run_analyze(request: Dict[str, Any]) -> Dict[str, Any]:
     if "json_result" in sig.parameters and report_json:
         kwargs["json_result"] = pathlib.Path(report_json)
 
-    analyze_fn(
-        pathlib.Path(input_dir),
-        pathlib.Path(report_xlsx),
-        platform,
-        **kwargs,
-    )
+    analysis_exc: Optional[Exception] = None
+    try:
+        analyze_fn(
+            pathlib.Path(input_dir),
+            pathlib.Path(report_xlsx),
+            platform,
+            **kwargs,
+        )
+    except Exception as exc:
+        analysis_exc = exc
 
     xlsx_exists = os.path.isfile(report_xlsx) and os.path.getsize(report_xlsx) > 0
     json_exists = bool(report_json and os.path.isfile(report_json) and os.path.getsize(report_json) > 0)
 
-    if not xlsx_exists and not json_exists:
+    usable_results = False
+    validation_err: Optional[str] = None
+    if xlsx_exists or json_exists:
+        try:
+            wb = read_analyzer_report(
+                report_xlsx_path=report_xlsx if xlsx_exists else None,
+                report_json_path=report_json if json_exists else None,
+            )
+            usable_results = has_usable_analyzer_results(wb)
+            if not usable_results:
+                validation_err = "Analyzer report was generated but contains no usable inventory results"
+        except Exception as read_err:
+            validation_err = f"Analyzer report is unreadable or corrupt: {sanitize_error(read_err)}"
+
+    if not usable_results:
+        if analysis_exc is not None:
+            raise analysis_exc
+        if validation_err:
+            raise RuntimeError(validation_err)
         raise RuntimeError(f"Analyzer finished but report was not generated at {report_xlsx}")
 
-    return {
+    res: Dict[str, Any] = {
         "status": "SUCCEEDED",
         "platform": platform,
         "report_xlsx_path": report_xlsx if xlsx_exists else None,
@@ -158,6 +184,11 @@ def run_analyze(request: Dict[str, Any]) -> Dict[str, Any]:
         "xlsx_generated": xlsx_exists,
         "json_generated": json_exists,
     }
+    if analysis_exc is not None:
+        res["warning"] = sanitize_error(analysis_exc)
+        res["has_warnings"] = True
+
+    return res
 
 
 def run_transpile(request: Dict[str, Any]) -> Dict[str, Any]:

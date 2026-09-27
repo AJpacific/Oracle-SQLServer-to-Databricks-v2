@@ -1245,6 +1245,52 @@ def read_analyzer_report(
     return merged
 
 
+def has_usable_analyzer_results(workbook_data: Optional[Dict[str, Any]]) -> bool:
+    """Check if Analyzer workbook data contains usable structured inventory results.
+
+    Returns True if and only if valid, readable, non-empty object inventory or program
+    records exist in the parsed report data. Returns False for empty, corrupt, or summary-only data.
+    """
+    if not workbook_data or not isinstance(workbook_data, dict):
+        return False
+
+    # 1. Direct inventory list (standard Lakebridge Analyzer / Bladespector JSON report)
+    inv = workbook_data.get("inventory")
+    if isinstance(inv, list) and len(inv) > 0:
+        if any(isinstance(r, dict) and any(v is not None and str(v).strip() != "" for v in r.values()) for r in inv):
+            return True
+
+    # 2. SQL programs sheet (standard Lakebridge Analyzer XLSX report)
+    sql_prog = workbook_data.get("sql_programs") or workbook_data.get("xlsx_sql_programs")
+    if isinstance(sql_prog, list) and len(sql_prog) > 0:
+        if any(isinstance(r, dict) and any(v is not None and str(v).strip() != "" for v in r.values()) for r in sql_prog):
+            return True
+
+    # 3. Cross reference or referenced objects sheets
+    for rel_key in (
+        "raw_program_object_xref", "xlsx_raw_program_object_xref",
+        "referenced_objects", "xlsx_referenced_objects",
+    ):
+        rels = workbook_data.get(rel_key)
+        if isinstance(rels, list) and len(rels) > 0:
+            if any(isinstance(r, dict) and any(v is not None and str(v).strip() != "" for v in r.values()) for r in rels):
+                return True
+
+    # 4. Other substantive object sheets (excluding summary/overview/warnings/metadata)
+    ignored_sheets = {
+        "summary", "overview", "runinfo", "run_info", "_warnings", "_contradictions",
+        "xlsx_summary", "xlsx_overview", "xlsx_runinfo", "xlsx_run_info",
+    }
+    for sheet_name, rows in workbook_data.items():
+        if sheet_name in ignored_sheets or sheet_name.startswith("_"):
+            continue
+        if isinstance(rows, list) and len(rows) > 0:
+            if any(isinstance(r, dict) and any(v is not None and str(v).strip() != "" for v in r.values()) for r in rows):
+                return True
+
+    return False
+
+
 def build_bounded_json(data: Any, max_bytes: int = 8192) -> str:
     """Serialize object to JSON bounded within max_bytes."""
     raw = json.dumps(data)

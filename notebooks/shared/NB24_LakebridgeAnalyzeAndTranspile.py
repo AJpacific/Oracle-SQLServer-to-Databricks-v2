@@ -76,6 +76,7 @@ try:
         build_lakebridge_report_path,
         build_lakebridge_converted_path,
         build_lakebridge_error_path,
+        has_usable_analyzer_results,
     )
     from src.sql_object_artifact_common import (
         build_artifact_relative_path,
@@ -130,6 +131,7 @@ except ModuleNotFoundError:
         build_lakebridge_report_path,
         build_lakebridge_converted_path,
         build_lakebridge_error_path,
+        has_usable_analyzer_results,
     )
     from sql_object_artifact_common import (
         build_artifact_relative_path,
@@ -420,40 +422,41 @@ def persist_control_row(row_entry: Dict[str, Any]) -> None:
 
 # Process each artifact independently with isolated attempt-staging and immediate logging
 for cand in candidates_to_process:
-    art_id = cand["artifact_id"]
-    oname = cand.get("object_name")
-    otype = normalize_object_type(cand.get("object_type"))
-    sch = cand.get("source_schema")
-    src_db = cand.get("source_database")
-    conn_id = cand.get("connection_id")
-    src_def = cand.get("source_definition")
-    src_sys = normalize_source_system(cand.get("source_system"))
-    target_cat = cand.get("target_catalog") or catalog
-    target_sch = cand.get("target_schema") or sch.lower()
-    attempt_num = cand.get("attempt_count") or 1
-    src_hash = cand.get("source_definition_hash") or compute_definition_hash(src_def)
-
-    cand_uuid = uuid.uuid4().hex
-    attempt_dir = f"/local_disk0/sql_artifact_lakebridge/{run_id}/{art_id}/{attempt_num}/{cand_uuid}"
-
-    if os.path.exists(attempt_dir):
-        raise RuntimeError(f"Unique staging attempt directory already exists: {attempt_dir}")
-
-    input_dir = os.path.join(attempt_dir, "input")
-    report_dir = os.path.join(attempt_dir, "report")
-    output_dir = os.path.join(attempt_dir, "output")
-    error_dir = os.path.join(attempt_dir, "error")
-
-    os.makedirs(input_dir, exist_ok=False)
-    os.makedirs(report_dir, exist_ok=False)
-    os.makedirs(output_dir, exist_ok=False)
-    os.makedirs(error_dir, exist_ok=False)
-
-    print(f"\nProcessing artifact {sch}.{oname} ({otype}) id={art_id}, attempt={attempt_num}")
-    tech = "mssql" if src_sys == "sqlserver" else "oracle"
-
+    art_id = cand.get("artifact_id", "unknown")
+    attempt_dir = ""
     artifact_counted = False
     try:
+        oname = cand.get("object_name")
+        otype = normalize_object_type(cand.get("object_type"))
+        sch = cand.get("source_schema")
+        src_db = cand.get("source_database")
+        conn_id = cand.get("connection_id")
+        src_def = cand.get("source_definition")
+        src_sys = normalize_source_system(cand.get("source_system"))
+        target_cat = cand.get("target_catalog") or catalog
+        target_sch = cand.get("target_schema") or (sch.lower() if sch else "default")
+        attempt_num = cand.get("attempt_count") or 1
+        src_hash = cand.get("source_definition_hash") or compute_definition_hash(src_def)
+
+        cand_uuid = uuid.uuid4().hex
+        attempt_dir = f"/local_disk0/sql_artifact_lakebridge/{run_id}/{art_id}/{attempt_num}/{cand_uuid}"
+
+        if os.path.exists(attempt_dir):
+            raise RuntimeError(f"Unique staging attempt directory already exists: {attempt_dir}")
+
+        input_dir = os.path.join(attempt_dir, "input")
+        report_dir = os.path.join(attempt_dir, "report")
+        output_dir = os.path.join(attempt_dir, "output")
+        error_dir = os.path.join(attempt_dir, "error")
+
+        os.makedirs(input_dir, exist_ok=False)
+        os.makedirs(report_dir, exist_ok=False)
+        os.makedirs(output_dir, exist_ok=False)
+        os.makedirs(error_dir, exist_ok=False)
+
+        print(f"\nProcessing artifact {sch}.{oname} ({otype}) id={art_id}, attempt={attempt_num}")
+        tech = "mssql" if src_sys == "sqlserver" else "oracle"
+
         # 1. Prepare collision-resistant input file
         input_file = prepare_lakebridge_input_file(
             input_base_dir=input_dir,
@@ -482,25 +485,46 @@ for cand in candidates_to_process:
         an_resp = execute_lakebridge_runner(an_req, attempt_dir)
         an_end_ts = datetime.now(timezone.utc)
 
-        analyzer_failed = (an_resp.get("status") != "SUCCEEDED")
-        safe_an_err = sanitize_cli_output(an_resp.get("error", "")) if analyzer_failed else ""
-        if analyzer_failed:
-            print(f"  [warn] Lakebridge Analyze failed: {safe_an_err}")
-            with open(os.path.join(error_dir, f"{art_id}_analyzer_error.txt"), "w", encoding="utf-8") as f:
-                f.write(safe_an_err)
+        raw_an_status = an_resp.get("status")
+        runner_an_err = sanitize_cli_output(an_resp.get("error", ""))
+        runner_an_warn = sanitize_cli_output(an_resp.get("warning", ""))
 
         # 3. Read Analyzer report if available (preferring structured JSON inventory, with XLSX fallback)
         workbook_data: Dict[str, List[Dict[str, Any]]] = {}
-        if not analyzer_failed and (os.path.exists(report_file) or os.path.exists(report_json_file)):
+        report_exists = (
+            (os.path.isfile(report_file) and os.path.getsize(report_file) > 0)
+            or (os.path.isfile(report_json_file) and os.path.getsize(report_json_file) > 0)
+        )
+        report_parse_err: Optional[str] = None
+        has_usable_report = False
+
+        if report_exists:
             try:
                 workbook_data = read_analyzer_report(
                     report_xlsx_path=report_file if os.path.exists(report_file) else None,
                     report_json_path=report_json_file if os.path.exists(report_json_file) else None,
                 )
+                has_usable_report = has_usable_analyzer_results(workbook_data)
+                if not has_usable_report:
+                    report_parse_err = "Analyzer report generated but contains no usable inventory results"
             except Exception as exc_wb:
-                analyzer_failed = True
-                safe_an_err = sanitize_message(exc_wb)
-                print(f"  [warn] Failed to parse Analyzer report: {safe_an_err}")
+                report_parse_err = sanitize_message(exc_wb)
+                print(f"  [warn] Failed to parse Analyzer report: {report_parse_err}")
+
+        # Decide analyzer_failed status
+        if has_usable_report:
+            analyzer_failed = False
+            an_warning = runner_an_warn or runner_an_err
+            safe_an_err = ""
+            if an_warning:
+                print(f"  [info] Analyzer report usable with non-fatal warning: {an_warning}")
+        else:
+            analyzer_failed = True
+            an_warning = ""
+            safe_an_err = runner_an_err or report_parse_err or "Lakebridge Analyzer failed to generate usable report"
+            print(f"  [warn] Lakebridge Analyze failed: {safe_an_err}")
+            with open(os.path.join(error_dir, f"{art_id}_analyzer_error.txt"), "w", encoding="utf-8") as f:
+                f.write(safe_an_err)
 
         # 4. Run BladeBridge Transpile via isolated Python runner
         error_file = os.path.join(error_dir, f"{art_id}_error.txt")
@@ -620,6 +644,15 @@ for cand in candidates_to_process:
             object_type=otype,
             diagnostic_warning_count=tr_diag_warnings,
         )
+
+        if transpile_failed and safe_tr_err:
+            err_code = "TRANSPILE_FAILED"
+            err_msg = safe_tr_err[:500]
+            man_reason = f"Transpilation failed: {safe_tr_err}"[:500]
+        elif analyzer_failed and safe_an_err:
+            err_code = "ANALYZER_FAILED"
+            err_msg = safe_an_err[:500]
+            man_reason = f"Analysis failed: {safe_an_err}"[:500]
 
         if not analyzer_failed:
             analyzed_count += 1
@@ -788,6 +821,8 @@ for cand in candidates_to_process:
             "diagnostic_warning_count": tr_diag_warnings,
             "diagnostics": sanitized_diagnostics,
         }
+        if an_warning:
+            log_meta["analyzer_warning"] = an_warning
 
         # Stage: Analyze
         persist_execution_log({
@@ -803,7 +838,7 @@ for cand in candidates_to_process:
             "converted_definition_hash": None,
             "classification": cls_res,
             "error_code": "ANALYZER_FAILED" if analyzer_failed else None,
-            "error_message": safe_an_err if analyzer_failed else None,
+            "error_message": safe_an_err if analyzer_failed else (an_warning if an_warning else None),
             "execution_metadata": build_bounded_json(log_meta, max_bytes=8192),
             "created_ts": datetime.now(timezone.utc),
         })
@@ -877,26 +912,31 @@ for cand in candidates_to_process:
     except Exception as art_exc:
         safe_exc = sanitize_message(art_exc)
         print(f"  [error] Artifact {art_id} processing failed: {safe_exc}")
-        print(f"  [diagnostics] Retaining attempt directory: {attempt_dir}")
+        if attempt_dir and os.path.exists(attempt_dir):
+            print(f"  [diagnostics] Retaining attempt directory: {attempt_dir}")
         if not artifact_counted:
             unsupported_count += 1
             artifact_counted = True
 
         try:
+            c_sch = cand.get("source_schema") or "default"
+            c_oname = cand.get("object_name") or "unnamed"
+            c_sdef = cand.get("source_definition")
+            c_shash = cand.get("source_definition_hash") or (compute_definition_hash(c_sdef) if c_sdef else None)
             persist_control_row({
                 "artifact_id": art_id,
-                "connection_id": conn_id,
-                "source_system": src_sys,
-                "source_database": src_db if src_db else None,
-                "source_schema": sch,
-                "object_name": oname,
-                "object_type": otype,
-                "target_catalog": target_cat,
-                "target_schema": target_sch,
-                "target_object_name": oname.lower(),
-                "source_definition": src_def,
+                "connection_id": cand.get("connection_id") or "unknown",
+                "source_system": normalize_source_system(cand.get("source_system")) if cand.get("source_system") else "unknown",
+                "source_database": cand.get("source_database"),
+                "source_schema": c_sch,
+                "object_name": c_oname,
+                "object_type": cand.get("object_type") or "VIEW",
+                "target_catalog": cand.get("target_catalog") or catalog,
+                "target_schema": cand.get("target_schema") or c_sch.lower(),
+                "target_object_name": c_oname.lower(),
+                "source_definition": c_sdef,
                 "converted_definition": None,
-                "source_definition_hash": src_hash,
+                "source_definition_hash": c_shash,
                 "converted_definition_hash": None,
                 "conversion_classification": LAKEBRIDGE_CLASSIFICATION_UNSUPPORTED,
                 "conversion_status": "FAILED",
@@ -906,7 +946,7 @@ for cand in candidates_to_process:
                 "unsupported_features": None,
                 "error_code": "ARTIFACT_PROCESSING_FAILED",
                 "error_message": safe_exc,
-                "attempt_count": attempt_num,
+                "attempt_count": cand.get("attempt_count") or 1,
                 "first_seen_ts": cand.get("first_seen_ts") or now_utc,
                 "last_seen_ts": now_utc,
                 "conversion_ts": None,
@@ -945,16 +985,16 @@ for cand in candidates_to_process:
                 "run_id": run_id,
                 "artifact_id": art_id,
                 "processing_stage": STAGE_LAKEBRIDGE_TRANSPILE,
-                "attempt_number": attempt_num,
+                "attempt_number": cand.get("attempt_count") or 1,
                 "start_ts": now_utc,
                 "end_ts": datetime.now(timezone.utc),
                 "status": "FAILED",
-                "source_definition_hash": src_hash,
+                "source_definition_hash": c_shash,
                 "converted_definition_hash": None,
                 "classification": LAKEBRIDGE_CLASSIFICATION_UNSUPPORTED,
                 "error_code": "ARTIFACT_PROCESSING_FAILED",
                 "error_message": safe_exc,
-                "execution_metadata": json.dumps({"source_system": src_sys, "artifact_id": art_id}),
+                "execution_metadata": json.dumps({"source_system": cand.get("source_system"), "artifact_id": art_id}),
                 "created_ts": datetime.now(timezone.utc),
             })
         except Exception as log_err:

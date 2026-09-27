@@ -268,7 +268,6 @@ NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materia
 NB18 complete: status=FAILED, business_status=PARTIAL, discovered=2, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
 NB18 complete: status=SUCCEEDED, business_status=NO_OBJECTS, discovered=0, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
 NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
-
 test_oracle_adapter_returns_oracle_discovery (test_assessment.TestAdapterDiscoveryRouting.test_oracle_adapter_returns_oracle_discovery) ... ok
 test_sqlserver_adapter_returns_sqlserver_discovery (test_assessment.TestAdapterDiscoveryRouting.test_sqlserver_adapter_returns_sqlserver_discovery) ... ok
 test_mandatory_discovery_failure_is_failed (test_assessment.TestAssessmentDiscoveryStatus.test_mandatory_discovery_failure_is_failed) ... ok
@@ -765,6 +764,20 @@ test_malformed_mime_rejected (test_lakebridge_artifact_migration.TestMimeExtract
 test_multiple_sql_attachments_rejected (test_lakebridge_artifact_migration.TestMimeExtractionHardening.test_multiple_sql_attachments_rejected) ... ok
 test_normal_non_mime_sql (test_lakebridge_artifact_migration.TestMimeExtractionHardening.test_normal_non_mime_sql) ... ok
 test_plain_sql_starting_with_comment (test_lakebridge_artifact_migration.TestMimeExtractionHardening.test_plain_sql_starting_with_comment) ... ok
+test_A_analyzer_valid_report_with_generic_failure_indication (test_lakebridge_artifact_migration.TestNB24LakebridgeRobustness.test_A_analyzer_valid_report_with_generic_failure_indication)
+A. If Analyzer produces a valid structured report containing usable inventory results, ... ok
+test_B_analyzer_no_usable_report_genuine_failure (test_lakebridge_artifact_migration.TestNB24LakebridgeRobustness.test_B_analyzer_no_usable_report_genuine_failure)
+B. Missing, corrupt, unreadable, empty, or structurally invalid Analyzer output ... ok
+test_C_bladebridge_line_out_of_bounds_isolation (test_lakebridge_artifact_migration.TestNB24LakebridgeRobustness.test_C_bladebridge_line_out_of_bounds_isolation)
+C. BladeBridge raises 'Line out of bounds: line 99 >= total lines 99': ... ok
+test_D_multiple_artifacts_one_failure_does_not_abort_subsequent_artifacts (test_lakebridge_artifact_migration.TestNB24LakebridgeRobustness.test_D_multiple_artifacts_one_failure_does_not_abort_subsequent_artifacts)
+D. Multiple artifacts: one BladeBridge failure does not stop subsequent artifacts. ... ok
+test_E_successful_artifacts_behave_as_before (test_lakebridge_artifact_migration.TestNB24LakebridgeRobustness.test_E_successful_artifacts_behave_as_before)
+E. Successful artifacts behave exactly as before. ... ok
+test_F_no_converted_sql_marked_successful_unless_actual_output_exists (test_lakebridge_artifact_migration.TestNB24LakebridgeRobustness.test_F_no_converted_sql_marked_successful_unless_actual_output_exists)
+F. No converted SQL is marked successful unless actual valid converted output exists. ... ok
+test_G_no_source_sql_manipulation_or_line_padding_workaround (test_lakebridge_artifact_migration.TestNB24LakebridgeRobustness.test_G_no_source_sql_manipulation_or_line_padding_workaround)
+G. No source SQL manipulation or line-padding workaround is introduced anywhere. ... ok
 test_baseline_manifest_integrity (test_lakebridge_artifact_migration.TestNonNegotiableIsolation.test_baseline_manifest_integrity)
 All 44 protected files must exist and match approved baseline hashes. ... ok
 test_both_nb13_notebooks_remain_unchanged (test_lakebridge_artifact_migration.TestNonNegotiableIsolation.test_both_nb13_notebooks_remain_unchanged)
@@ -1773,6 +1786,6 @@ test_source_mismatch_fails (test_type_mappers.TestYamlValidation.test_source_mis
 test_target_mismatch_fails (test_type_mappers.TestYamlValidation.test_target_mismatch_fails) ... ok
 
 ----------------------------------------------------------------------
-Ran 1385 tests in 5.191s
+Ran 1392 tests in 4.546s
 
 OK
