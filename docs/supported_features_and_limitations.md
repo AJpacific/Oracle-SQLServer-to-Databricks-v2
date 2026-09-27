@@ -145,11 +145,32 @@
   inaccessible definitions, which persist with an explicit `error_message`;
   coverage is `COMPLETE`, `PARTIAL`, or `FAILED`.
 - **SQL object artifact materialization (`NB18`):** Preserves original Oracle (VIEW, PROCEDURE, FUNCTION, PACKAGE, PACKAGE_BODY) and SQL Server (VIEW, PROCEDURE, FUNCTION) non-table database object definitions as raw `.sql` files in Unity Catalog Volumes (`_source_artifacts`).
-  - Stored under deterministic path `/Volumes/<target_catalog>/<target_schema>/_source_artifacts/<safe_connection_id>/<safe_source_schema>/<type_directory>/<safe_object_name>.sql`.
+  - Stored under deterministic path `/Volumes/<target_catalog>/<target_schema>/_source_artifacts/<safe_connection_id>/<safe_source_database>/<safe_source_schema>/<type_directory>/<safe_object_name>.sql`.
   - Content comes strictly from `sql_object_assessment.source_definition` unchanged.
-  - The feature preserves source SQL as an artifact for retention, review, and analysis. The accelerator does not convert, classify, review, execute, or deploy view, procedure, function, package, or package-body SQL.
-  - It does NOT make Oracle PL/SQL or SQL Server T-SQL executable in Databricks and does NOT automatically deploy Databricks views.
+  - NB18 preserves exact raw source SQL definitions without conversion, does not execute source SQL, does not classify source SQL for deployment, and does not deploy converted SQL objects.
+  - Handles raw-definition artifact ownership, collision prevention (using deterministic SHA-256 owner hashing for lossy/special names), idempotency, and missing/corrupt artifact repair (`REPAIRED_MISSING`, `REPAIRED_HASH_MISMATCH`) via atomic `.tmp` rewrite.
   - Live Unity Catalog Volume privileges (`CREATE VOLUME`, `READ VOLUME`, `WRITE VOLUME`) must be validated.
+- **SQL Artifact Migration workflow (`ACCELERATOR_SQL_ARTIFACT_MIGRATION`):** An independent selection-driven analyze, convert, and store workflow operating separately from Full Load and Delta Sync. It analyzes, transpiles, and stores; does not deploy, does not execute converted SQL, and never runs `CREATE VIEW` or `CREATE PROCEDURE`.
+  - Executable scope is **VIEW and PROCEDURE only**, selected after Assessment. Routine types `FUNCTION`, Oracle `PACKAGE`, `PACKAGE_BODY`, and `TRIGGER` are out of scope for the executable artifact job.
+  - Job graph: `T00_Create_Run_Context` -> `T03_Init_SQL_Artifact_Control` -> `T23_Fetch_Selected_SQL_Artifacts` -> `T24_Lakebridge_Analyze_And_Transpile` -> `T06_SQL_Artifact_Summary`.
+  - `NB21_SQLArtifactInit` initializes and additively manages dedicated control structures (`sql_artifact_control`, `sql_artifact_execution_log`) without modifying table pipeline state.
+  - `NB23_FetchSelectedSQLArtifacts` performs selected-only Oracle and SQL Server JDBC definition fetches from registered source databases and stores raw definitions under `_source_artifacts` Volumes.
+  - `NB24_LakebridgeAnalyzeAndTranspile` invokes Databricks Labs Lakebridge CLI:
+    - Runs Analyzer via `databricks labs lakebridge analyze --source-directory ... --report-file ... --source-tech ...`
+    - Runs BladeBridge transpilation via `databricks labs lakebridge transpile --source-dialect ... --input-source ... --output-folder ... --error-file-path ... --skip-validation true`
+    - Stores converted definitions under `_converted_artifacts` Volumes and reports/error logs under `_lakebridge_reports` Volumes.
+    - Uses unique local staging per artifact attempt (`/local_disk0/sql_artifact_lakebridge/<run_id>/<artifact_id>/<attempt>/<uuid>/`).
+    - Staging directory is cleaned up only on complete success; retained on failure for diagnostics.
+    - `CREATE SCHEMA IF NOT EXISTS` may be used only to support required Volumes.
+    - Converted SQL is never executed or deployed.
+  - Classifications:
+    - `AUTO` / `AUTO_CANDIDATE`: Allowed only for `VIEW` when transpilation succeeds with zero errors, zero warnings/fixmes, no risky constructs, no unresolved source syntax/references, and `object_map_applied = true`. Because `object_map_applied` is false in this release, no artifact is classified `AUTO`; never auto-deployed; `deployment_status = NOT_DEPLOYED`.
+    - `MANUAL_REVIEW`: Successfully converted `PROCEDURE`, or successfully converted `VIEW` while `object_map_applied = false`, or any artifact with high complexity, unknown statements, fixmes, risk constructs, or validation errors; reason recorded; converted definition stored if available; never auto-deployed; `deployment_status = NOT_DEPLOYED`.
+    - `UNSUPPORTED`: Missing or blank source definition, Analyzer failure, parsing/generation errors, transpile failure, or missing/blank output; non-migratable constructs or out-of-scope objects such as `TRIGGER`; reason recorded; converted definition stored if available; never auto-deployed; `deployment_status = NOT_DEPLOYED`.
+  - Historical reference: Legacy prototype `NB22_SQLArtifactMigrate` converts, classifies, and stores; does not deploy and does not connect to source databases. The active executable artifact pipeline uses Lakebridge CLI via `NB24_LakebridgeAnalyzeAndTranspile`.
+  - Assessment, Onboarding, Full Load, Delta Sync, ETL, Retry, and reconciliation remain unchanged.
+  - Lakebridge, BladeBridge, JDBC, Unity Catalog, Volume, and Databricks Job behavior require live validation.
+  - Dedicated artifact control tables are updated; existing configuration and table pipeline tables remain strictly read-only.
 
 ### Datatype mapper ownership
 - Shared mapping calls `adapter.load_type_mapper().map_column(...)` and consumes
@@ -166,9 +187,14 @@
 
 ### Oracle mapping policy
 - Oracle `NUMBER` uses Oracle-owned precision/scale resolution. Whole-number
-  precisions select `SMALLINT`, `INT`, `BIGINT`, or `DECIMAL`; unconstrained
-  `NUMBER` retains the approved `DECIMAL(38,0)` AUTO policy; precision over 38
-  remains BLOCKED.
+  precisions select `SMALLINT`, `INT`, `BIGINT`, or `DECIMAL`.
+- Unconstrained `NUMBER` does not default to AUTO/EXACT; it maps to `DECIMAL(38,0)`
+  only as a proposed fallback with status `REVIEW` and fidelity `UNKNOWN`, requiring
+  profiling of observed values and precision/scale before migration.
+- `NUMBER(p,s)` validates metadata (1 <= p <= 38). Scale > precision (such as
+  `NUMBER(4,5)`) fails closed to `REVIEW` with `LOSSY` fidelity. Valid negative
+  scale maps with status `REVIEW` and `WIDENED` fidelity. Precision > 38 remains
+  `BLOCKED`.
 - Oracle `DATE`, `TIMESTAMP`, LOB, JSON, BOOLEAN, VECTOR, interval, spatial, and
   user-defined behavior remains in `OracleTypeMapper` and the Oracle adapter.
   JSON and timezone-sensitive mappings retain their existing review policy;
@@ -178,6 +204,10 @@
 - SQL Server `decimal`/`numeric` precision and scale, unsigned `tinyint`
   widening, money families, `uniqueidentifier`, CLR/unsupported types, and
   temporal mappings are owned by `SqlServerTypeMapper`.
+- SQL Server `decimal`/`numeric` metadata is validated fail-closed: precision
+  must be between 1 and 38, scale between 0 and precision, and values must be
+  integers. Corrupt or synthetic metadata (such as `DECIMAL(0,0)`, scale > precision,
+  negative scale, or non-numeric precision/scale) produces `BLOCKED`/`UNKNOWN`.
 - `datetime2` maps to Delta `TIMESTAMP` with the existing AUTO/LOSSY
   microsecond policy. Source projection and watermark predicates normalize the
   selected `datetime2` value to six fractional digits in the SQL Server query
@@ -217,17 +247,14 @@
   from a secret, never logged), and dashboard views (`NB17`).
 
 ## Limitations / non-goals
-- No third pipeline, no generalized workflow engine, no custom scheduler
-  (Databricks Jobs orchestrate).
-- No SQL conversion of any kind: no SQL parser, no textual rewriting, no
-  dialect translation, and no conversion drafts. Original source definitions
-  are only inventoried and materialized unchanged as `.sql` artifacts.
-- Views, procedures, functions, packages, and package bodies are never
-  classified, reviewed, executed, or deployed automatically.
+- No generalized workflow engine or custom scheduler (Databricks Jobs orchestrate).
+- In the dedicated SQL Artifact Migration workflow, executable scope is strictly VIEW and PROCEDURE only, analyze/transpile and store only. Converted SQL is never executed, and `CREATE VIEW` or `CREATE PROCEDURE` is never run. Nothing is deployed. NB23 connects to registered source databases via JDBC only to fetch selected definitions. Raw definitions are stored in `_source_artifacts` Volumes. NB24 invokes Databricks Labs Lakebridge and BladeBridge to analyze and transpile, storing outputs in `_converted_artifacts` and `_lakebridge_reports` Volumes. `CREATE SCHEMA IF NOT EXISTS` may be used only to support required Volumes.
+- Routine types `FUNCTION`, Oracle `PACKAGE`, `PACKAGE_BODY`, and `TRIGGER` are out of scope for the active artifact migration job; any encountered trigger or unhandled routine is classified `UNSUPPORTED` and never deployed or executed.
+- Raw source definitions materialized by NB18 are preserved unchanged without conversion under `_source_artifacts` volumes.
+- No AI conversion of source SQL objects; transpilation uses deterministic rule-based transformations.
 - No Gold layer, no reporting warehouse, no cloud-billing ingestion, no
   automatic cost optimization, no anomaly detection, no ServiceNow/paging.
 - DQ rules are the fixed MVP set only; arbitrary SQL expressions are rejected.
-- No AI conversion of source SQL objects.
 - No new source systems beyond Oracle and SQL Server.
 - Existing physical-source IDs require the explicit dry-run-first
   `deployment/NB_MigrateSourceTableIdentityV2` upgrade. Initialization never

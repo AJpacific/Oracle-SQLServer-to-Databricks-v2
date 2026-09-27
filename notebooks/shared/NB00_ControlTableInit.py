@@ -265,6 +265,21 @@ CREATE TABLE IF NOT EXISTS {ctrl('sql_object_artifact_manifest')} (
 ) USING DELTA
 """)
 
+# --- SQL ARTIFACT MIGRATION: control & execution log -----------------------
+try:
+    from src.sql_artifact_control_common import (
+        build_create_artifact_control_ddl,
+        build_create_artifact_execution_log_ddl,
+    )
+except ModuleNotFoundError:
+    from sql_artifact_control_common import (
+        build_create_artifact_control_ddl,
+        build_create_artifact_execution_log_ddl,
+    )
+
+spark.sql(build_create_artifact_control_ddl(CATALOG, CONTROL_SCHEMA))
+spark.sql(build_create_artifact_execution_log_ddl(CATALOG, CONTROL_SCHEMA))
+
 # --- ETL: data-quality rules, results, and quarantine ----------------------
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {ctrl('dq_rule')} (

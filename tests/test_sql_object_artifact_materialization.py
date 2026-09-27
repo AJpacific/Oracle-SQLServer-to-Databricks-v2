@@ -51,6 +51,7 @@ class FakeFileIO:
         self.content = ""
 
     def __enter__(self):
+        self.fs.files[self.path] = ""
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -127,6 +128,9 @@ class FakeSparkSession:
             d = _row_to_dict_helper(r)
             key = (d.get("connection_id"), d.get("source_schema"), d.get("object_type"), d.get("object_name"))
             self.manifest_table[key] = dict(d)
+            if d.get("source_database"):
+                key_db = (d.get("connection_id"), str(d.get("source_database")).strip(), d.get("source_schema"), d.get("object_type"), d.get("object_name"))
+                self.manifest_table[key_db] = dict(d)
         self.fs = fs
         self.temp_views = {}
         self.created_dfs = []
@@ -146,10 +150,59 @@ class FakeSparkSession:
         if "CREATE VOLUME" in q:
             self.events.append("create_volume")
             return FakeDataFrame([])
-        if "CREATE SCHEMA" in q:
-            return FakeDataFrame([])
-        if "ranked" in q or "sql_object_assessment" in q:
-            return FakeDataFrame(self.candidates)
+        if "ranked" in q or "sql_object_assessment" in q or "latest_runs" in q:
+            filtered = list(self.candidates)
+            def _get_val(row, k):
+                if hasattr(row, "asDict"):
+                    return row.asDict().get(k)
+                if isinstance(row, dict):
+                    return row.get(k)
+                return getattr(row, k, None)
+
+            if "latest_runs" in q:
+                groups = {}
+                for r in filtered:
+                    cid = _get_val(r, "connection_id")
+                    sys = str(_get_val(r, "source_system") or "").lower()
+                    pdb = str(_get_val(r, "source_database") or "") if sys in ("sqlserver", "sql_server", "mssql") else ""
+                    key = (cid, pdb)
+                    groups.setdefault(key, []).append(r)
+
+                filtered_latest = []
+                for key, rows in groups.items():
+                    rows_sorted = sorted(
+                        rows,
+                        key=lambda x: (_get_val(x, "captured_ts") or datetime.min, str(_get_val(x, "run_id") or "")),
+                        reverse=True,
+                    )
+                    latest_run_id = _get_val(rows_sorted[0], "run_id")
+                    for r in rows:
+                        if _get_val(r, "run_id") == latest_run_id:
+                            filtered_latest.append(r)
+                filtered = filtered_latest
+
+            filtered = [r for r in filtered if str(_get_val(r, "object_type") or "").strip().upper() != "TABLE"]
+
+            if any(_get_val(r, "is_selected") is not None for r in filtered):
+                filtered = [r for r in filtered if _get_val(r, "is_selected") is True]
+
+            import re
+            run_match = re.search(r"\brun_id\s*=\s*'([^']+)'", q)
+            if run_match:
+                rid = run_match.group(1)
+                if any(_get_val(r, "run_id") is not None for r in filtered):
+                    filtered = [r for r in filtered if _get_val(r, "run_id") == rid]
+            conn_match = re.search(r"(?:sa\.)?connection_id\s*=\s*'([^']+)'", q)
+            if conn_match:
+                cid = conn_match.group(1)
+                if any(_get_val(r, "connection_id") is not None for r in filtered):
+                    filtered = [r for r in filtered if _get_val(r, "connection_id") == cid]
+            assess_match = re.search(r"\bassessment_id\s*=\s*'([^']+)'", q)
+            if assess_match:
+                aid = assess_match.group(1)
+                if any(_get_val(r, "assessment_id") is not None for r in filtered):
+                    filtered = [r for r in filtered if _get_val(r, "assessment_id") == aid]
+            return FakeDataFrame(filtered)
 
         if "MERGE INTO" in q:
             if self.fail_merge:
@@ -286,8 +339,9 @@ class FakeSparkSession:
 
 
 class FakeControlRepo:
-    def __init__(self, target_configs=None):
+    def __init__(self, target_configs=None, connections=None):
         self.target_configs = target_configs or {}
+        self.connections = connections or {}
 
     def resolve_target_config(self, conn_id):
         if conn_id in self.target_configs:
@@ -299,6 +353,19 @@ class FakeControlRepo:
             "target_catalog": "da_accelerators",
             "target_schema_mode": "SAME_AS_SOURCE",
             "target_schema": None,
+        }
+
+    def get_connection(self, conn_id):
+        if conn_id in self.connections:
+            c = self.connections[conn_id]
+            if isinstance(c, Exception):
+                raise c
+            return c
+        return {
+            "connection_id": conn_id,
+            "is_active": True,
+            "connection_status": "VALID",
+            "secret_scope": "test_scope",
         }
 
 
@@ -372,13 +439,32 @@ def run_nb18_harness(
     pre_finalize_hook=None,
     pre_general_merge_hook=None,
     events=None,
+    connections=None,
 ):
     if events is None:
         events = []
+    passed_fs = fs is not None
     if fs is None:
         fs = FakeFilesystem(events=events)
     else:
         fs.events = events
+    if manifest_rows and not passed_fs:
+        for mr in manifest_rows:
+            mr_d = _row_to_dict_helper(mr)
+            if mr_d.get("materialization_status") == "SUCCEEDED" and mr_d.get("artifact_path"):
+                art_p = mr_d["artifact_path"]
+                if art_p not in fs.files:
+                    matching_def = None
+                    if candidates:
+                        for c in candidates:
+                            cd = _row_to_dict_helper(c)
+                            if (cd.get("connection_id") == mr_d.get("connection_id") and
+                                cd.get("source_schema") == mr_d.get("source_schema") and
+                                cd.get("object_name") == mr_d.get("object_name")):
+                                matching_def = cd.get("source_definition")
+                                break
+                    if matching_def is not None:
+                        fs.files[art_p] = matching_def
     spark = FakeSparkSession(
         candidates=candidates,
         manifest_rows=manifest_rows,
@@ -389,8 +475,10 @@ def run_nb18_harness(
         events=events,
     )
     spark.fail_merge = fail_merge
-    repo = FakeControlRepo(target_configs=target_configs)
-    dbutils = FakeDbutils(widget_values=widget_values)
+    repo = FakeControlRepo(target_configs=target_configs, connections=connections)
+    w_vals = dict(widget_values or {})
+    w_vals.setdefault("allow_global_scope", "true")
+    dbutils = FakeDbutils(widget_values=w_vals)
     task_values = {}
 
     def set_task_value(k, v):
@@ -473,6 +561,10 @@ def run_nb18_harness(
     def fake_open(path, mode="r", **kwargs):
         if "w" in mode and isinstance(path, str) and "/Volumes/" in path:
             return FakeFileIO(fs, path)
+        if "r" in mode and isinstance(path, str) and "/Volumes/" in path:
+            if fs.exists(path):
+                import io
+                return io.StringIO(fs.files[path])
         return orig_builtins_open(path, mode, **kwargs)
 
     os.makedirs = fake_makedirs

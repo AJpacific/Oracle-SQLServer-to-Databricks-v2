@@ -9,14 +9,14 @@ try:
     from src.type_mappers.base import (
         AUTO, BLOCKED, EXACT, LOSSY, REVIEW, UNKNOWN, WIDENED,
         ColumnMappingResult, SourceTypeMapper, load_rules_from_yaml,
-        validate_rule_overrides,
+        validate_rule_overrides, parse_integral_metadata,
     )
 except ModuleNotFoundError:
     from source_identity import normalize_source_system
     from type_mappers.base import (
         AUTO, BLOCKED, EXACT, LOSSY, REVIEW, UNKNOWN, WIDENED,
         ColumnMappingResult, SourceTypeMapper, load_rules_from_yaml,
-        validate_rule_overrides,
+        validate_rule_overrides, parse_integral_metadata,
     )
 
 
@@ -212,26 +212,72 @@ class OracleTypeMapper(SourceTypeMapper):
         )
 
     def _map_number(self, source_type, precision, scale, is_nullable):
-        precision_value = precision
-        scale_value = scale
         notes = ""
+        # 1. Unconstrained NUMBER: precision and scale are both None
         if precision is None and scale is None:
             return ColumnMappingResult(
                 source_type=source_type or "NUMBER",
-                databricks_delta_type="DECIMAL(38,0)", status=AUTO,
-                fidelity=EXACT,
-                notes=("Unconstrained Oracle NUMBER mapped using "
-                       "the approved whole-number policy to DECIMAL(38,0)"),
+                databricks_delta_type="DECIMAL(38,0)",
+                status=REVIEW,
+                fidelity=UNKNOWN,
+                notes=("Unconstrained Oracle NUMBER mapped to DECIMAL(38,0) as a proposed fallback; "
+                       "manual review required because observed values and precision/scale must be profiled before migration"),
                 is_nullable=bool(is_nullable))
+
+        # 2. Validate precision and scale types if provided
+        precision_value = None
+        scale_value = None
+        if precision is not None:
+            precision_value = parse_integral_metadata(precision)
+            if precision_value is None:
+                return ColumnMappingResult(
+                    source_type=source_type or "NUMBER",
+                    databricks_delta_type=None,
+                    status=BLOCKED,
+                    fidelity=UNKNOWN,
+                    notes=f"Oracle NUMBER with non-integer precision ({precision!r})",
+                    is_nullable=bool(is_nullable))
+        if scale is not None:
+            scale_value = parse_integral_metadata(scale)
+            if scale_value is None:
+                return ColumnMappingResult(
+                    source_type=source_type or "NUMBER",
+                    databricks_delta_type=None,
+                    status=BLOCKED,
+                    fidelity=UNKNOWN,
+                    notes=f"Oracle NUMBER with non-integer scale ({scale!r})",
+                    is_nullable=bool(is_nullable))
+
+        # 3. NUMBER with scale but no precision
         if precision_value is None:
             return ColumnMappingResult(
                 source_type=source_type or "NUMBER",
-                databricks_delta_type="DECIMAL(38,10)", status=REVIEW,
+                databricks_delta_type="DECIMAL(38,10)",
+                status=REVIEW,
                 fidelity=WIDENED,
                 notes=("NUMBER with scale but no precision; clamped to "
                        "DECIMAL(38,10) - review magnitude/scale"),
                 is_nullable=bool(is_nullable))
 
+        # 4. Precision must be between 1 and 38
+        if precision_value <= 0:
+            return ColumnMappingResult(
+                source_type=source_type or "NUMBER",
+                databricks_delta_type=None,
+                status=BLOCKED,
+                fidelity=UNKNOWN,
+                notes=f"Oracle NUMBER precision must be > 0 (got {precision_value})",
+                is_nullable=bool(is_nullable))
+        if precision_value > MAX_DELTA_DECIMAL_PRECISION:
+            return ColumnMappingResult(
+                source_type=source_type or "NUMBER",
+                databricks_delta_type="STRING",
+                status=BLOCKED,
+                fidelity=UNKNOWN,
+                notes=f"NUMBER({precision_value},{scale_value}) exceeds Delta DECIMAL precision 38",
+                is_nullable=bool(is_nullable))
+
+        # 5. Whole numbers: scale is None or 0
         if scale_value is None or scale_value == 0:
             if precision_value <= 4:
                 datatype, fidelity = "SMALLINT", EXACT
@@ -239,47 +285,43 @@ class OracleTypeMapper(SourceTypeMapper):
                 datatype, fidelity = "INT", EXACT
             elif precision_value <= 18:
                 datatype, fidelity = "BIGINT", EXACT
-            elif precision_value <= MAX_DELTA_DECIMAL_PRECISION:
-                datatype, fidelity = f"DECIMAL({precision_value},0)", EXACT
             else:
-                return ColumnMappingResult(
-                    source_type=source_type or "NUMBER",
-                    databricks_delta_type="STRING", status=BLOCKED,
-                    fidelity=UNKNOWN,
-                    notes=(f"NUMBER({precision_value},0) exceeds Delta "
-                           "DECIMAL precision 38"),
-                    is_nullable=bool(is_nullable))
+                datatype, fidelity = f"DECIMAL({precision_value},0)", EXACT
             return ColumnMappingResult(
                 source_type=source_type or "NUMBER",
-                databricks_delta_type=datatype, status=AUTO,
-                fidelity=fidelity, notes=notes,
+                databricks_delta_type=datatype,
+                status=AUTO,
+                fidelity=fidelity,
+                notes=notes,
                 is_nullable=bool(is_nullable))
 
-        if precision_value > MAX_DELTA_DECIMAL_PRECISION:
+        # 6. Negative scale in Oracle
+        if scale_value < 0:
             return ColumnMappingResult(
                 source_type=source_type or "NUMBER",
-                databricks_delta_type="STRING", status=BLOCKED,
-                fidelity=UNKNOWN,
-                notes=(f"NUMBER({precision_value},{scale_value}) exceeds "
-                       "Delta DECIMAL precision 38"),
+                databricks_delta_type=f"DECIMAL({min(precision_value - scale_value, 38)},0)",
+                status=REVIEW,
+                fidelity=WIDENED,
+                notes=(f"NUMBER({precision_value},{scale_value}) has negative scale; "
+                       "widened - manual review required to verify rounding and magnitude"),
                 is_nullable=bool(is_nullable))
-        effective_scale = scale_value if scale_value is not None else 0
-        if effective_scale < 0:
+
+        # 7. Scale > precision in Oracle (e.g. NUMBER(4, 5)): fail closed, cannot be AUTO/EXACT
+        if scale_value > precision_value:
             return ColumnMappingResult(
                 source_type=source_type or "NUMBER",
-                databricks_delta_type=(
-                    f"DECIMAL({min(precision_value - effective_scale, 38)},0)"),
-                status=REVIEW, fidelity=WIDENED,
-                notes=(f"NUMBER({precision_value},{scale_value}) has negative "
-                       "scale; widened - review rounding"),
+                databricks_delta_type=f"DECIMAL({min(scale_value, 38)},{min(scale_value, 38)})",
+                status=REVIEW,
+                fidelity=LOSSY,
+                notes=(f"Oracle NUMBER({precision_value},{scale_value}) has scale > precision; "
+                       "cannot be safely mapped to AUTO/EXACT - manual review required"),
                 is_nullable=bool(is_nullable))
-        if effective_scale > precision_value:
-            effective_scale = precision_value
-            notes = (f"scale {scale_value} > precision {precision_value}; "
-                     f"clamped scale to {effective_scale}")
+
+        # 8. Normal valid decimal within bounds
         return ColumnMappingResult(
             source_type=source_type or "NUMBER",
-            databricks_delta_type=(
-                f"DECIMAL({precision_value},{effective_scale})"),
-            status=AUTO, fidelity=EXACT, notes=notes,
+            databricks_delta_type=f"DECIMAL({precision_value},{scale_value})",
+            status=AUTO,
+            fidelity=EXACT,
+            notes=notes,
             is_nullable=bool(is_nullable))

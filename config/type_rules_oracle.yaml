@@ -25,9 +25,9 @@ types:
   # ---- numeric ----
   number:
     databricks_delta: DECIMAL
-    status: AUTO
-    fidelity: EXACT
-    notes: "resolved in code from precision/scale; unconstrained NUMBER uses the approved whole-number mapping DECIMAL(38,0); precision greater than 38 is BLOCKED"
+    status: REVIEW
+    fidelity: UNKNOWN
+    notes: "resolved in code from precision/scale; unconstrained Oracle NUMBER is mapped to DECIMAL(38,0) as a proposed fallback for REVIEW (fidelity UNKNOWN) because observed values and precision/scale must be profiled before migration; precision greater than 38 is BLOCKED"
 
   float:
     databricks_delta: DOUBLE

@@ -85,32 +85,93 @@ def definition_sha256(source_definition: Any) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest().lower()
 
 
-def build_artifact_relative_path(*args: Any, **kwargs: Any) -> str:
+def canonical_artifact_owner_id(
+    connection_id: Any,
+    source_system: Any = None,
+    source_database: Any = None,
+    source_schema: Any = None,
+    object_type: Any = None,
+    object_name: Any = None,
+) -> str:
+    """Build a deterministic canonical artifact owner identity string."""
+    conn = str(connection_id or "").strip()
+    sys_name = str(source_system or "").strip().lower()
+    db = str(source_database or "").strip().lower() if source_database else ""
+    sch = str(source_schema or "").strip().lower()
+    otype = normalize_object_type(object_type)
+    obj = str(object_name or "").strip()
+    return f"{conn}:{sys_name}:{db}:{sch}:{otype}:{obj}"
+
+
+def canonical_owner_key(record: Any) -> Tuple[str, str, str, str, str, str]:
+    """Return 6-tuple canonical owner key:
+    (connection_id, source_system, source_database, source_schema, normalized_object_type, object_name)
+    """
+    rec = record.asDict() if hasattr(record, "asDict") else dict(record)
+    conn_id = str(rec.get("connection_id") or "").strip()
+    src_sys = str(rec.get("source_system") or "").strip().lower()
+    db = str(rec.get("source_database") or "").strip()
+    sch = str(rec.get("source_schema") or "").strip()
+    otype = normalize_object_type(rec.get("object_type"))
+    oname = str(rec.get("object_name") or "").strip()
+    return (conn_id, src_sys, db, sch, otype, oname)
+
+
+def build_artifact_relative_path(
+    *args: Any,
+    connection_id: Any = None,
+    source_system: Any = None,
+    source_database: Any = None,
+    source_schema: Any = None,
+    object_type: Any = None,
+    object_name: Any = None,
+    append_hash: bool = False,
+    **kwargs: Any,
+) -> str:
     """Build deterministic connection-owned relative path.
 
-    Supports path structure:
-      <connection_id>/<source_database>/<source_schema>/<object_type>/<object_name>.sql
-    or (when source_database is blank/omitted for backward compatibility):
-      <connection_id>/<source_schema>/<object_type>/<object_name>.sql
+    Supports keyword-only contract:
+      build_artifact_relative_path(
+          connection_id=..., source_system=..., source_database=...,
+          source_schema=..., object_type=..., object_name=...
+      )
+
+    Supports backward-compatible positional calls:
+      build_artifact_relative_path(conn_id, schema, otype, oname)
+      build_artifact_relative_path(conn_id, source_database, schema, otype, oname)
+
+    Collision resistance:
+      When normalization of object_name is lossy (e.g. uppercase characters,
+      spaces, slashes, or special characters), appends a short stable SHA-256
+      hash derived from the full canonical owner identity to ensure distinct
+      source objects (such as 'A B', 'A/B', 'A_B', 'Foo', 'FOO') never collide
+      on the same physical filename.
     """
-    conn_id = kwargs.get("connection_id")
-    source_database = kwargs.get("source_database")
-    schema = kwargs.get("source_schema")
-    otype = kwargs.get("object_type")
-    oname = kwargs.get("object_name")
+    conn_id = connection_id or kwargs.get("connection_id")
+    src_db = source_database or kwargs.get("source_database")
+    schema = source_schema or kwargs.get("source_schema")
+    otype = object_type or kwargs.get("object_type")
+    oname = object_name or kwargs.get("object_name")
+    src_sys = source_system or kwargs.get("source_system")
 
     pargs = list(args)
     if len(pargs) == 5:
         conn_id = conn_id or pargs[0]
-        source_database = source_database or pargs[1]
+        src_db = src_db or pargs[1]
         schema = schema or pargs[2]
         otype = otype or pargs[3]
         oname = oname or pargs[4]
     elif len(pargs) == 4:
         conn_id = conn_id or pargs[0]
-        candidate_type_1 = (pargs[1] or "").strip().upper().replace(" ", "_")
-        candidate_type_2 = (pargs[2] or "").strip().upper().replace(" ", "_")
-        if candidate_type_1 in SUPPORTED_OBJECT_TYPES:
+        cand_type_1 = (pargs[1] or "").strip().upper().replace(" ", "_")
+        cand_type_2 = (pargs[2] or "").strip().upper().replace(" ", "_")
+        if cand_type_1 in SUPPORTED_OBJECT_TYPES and cand_type_2 in SUPPORTED_OBJECT_TYPES:
+            # Ambiguous: e.g. ("c1", "VIEW", "PROCEDURE", "foo")
+            raise ValueError(
+                "Ambiguous positional arguments: schema and object_type both match "
+                "supported object types. Use keyword arguments."
+            )
+        elif cand_type_1 in SUPPORTED_OBJECT_TYPES:
             otype = otype or pargs[1]
             oname = oname or pargs[2]
             schema = schema or pargs[3]
@@ -120,8 +181,8 @@ def build_artifact_relative_path(*args: Any, **kwargs: Any) -> str:
             oname = oname or pargs[3]
     elif len(pargs) == 3:
         conn_id = conn_id or pargs[0]
-        candidate_type = (pargs[1] or "").strip().upper().replace(" ", "_")
-        if candidate_type in SUPPORTED_OBJECT_TYPES:
+        cand_type = (pargs[1] or "").strip().upper().replace(" ", "_")
+        if cand_type in SUPPORTED_OBJECT_TYPES:
             otype = otype or pargs[1]
             oname = oname or pargs[2]
         else:
@@ -135,13 +196,30 @@ def build_artifact_relative_path(*args: Any, **kwargs: Any) -> str:
     type_dir = OBJECT_TYPE_DIRECTORIES[norm_type]
     safe_obj = sanitize_path_component(oname, "object_name")
 
+    # Detect lossy normalization (e.g. spaces, slashes, punctuation replaced by _, or explicit append_hash)
+    val_str = str(oname)
+    is_lossy = (val_str.lower() != safe_obj)
+    if is_lossy or append_hash:
+        owner_id = canonical_artifact_owner_id(
+            connection_id=safe_conn,
+            source_system=src_sys,
+            source_database=src_db,
+            source_schema=schema,
+            object_type=norm_type,
+            object_name=oname,
+        )
+        short_hash = hashlib.sha256(owner_id.encode("utf-8")).hexdigest()[:8]
+        file_name = f"{safe_obj}_{short_hash}.sql"
+    else:
+        file_name = f"{safe_obj}.sql"
+
     parts = [safe_conn]
-    if source_database and str(source_database).strip():
-        parts.append(sanitize_path_component(source_database, "source_database"))
+    if src_db and str(src_db).strip():
+        parts.append(sanitize_path_component(src_db, "source_database"))
     if schema and str(schema).strip():
         parts.append(sanitize_path_component(schema, "source_schema"))
     parts.append(type_dir)
-    parts.append(f"{safe_obj}.sql")
+    parts.append(file_name)
 
     return "/".join(parts)
 
@@ -209,3 +287,23 @@ def select_latest_artifact_records(records: List[Dict[str, Any]]) -> List[Dict[s
         latest_list.append(sorted_items[0])
 
     return latest_list
+
+
+def write_atomic_file(filepath: str, content: str) -> None:
+    """Write content to filepath atomically using a temporary file and os.replace."""
+    import os
+    import uuid
+    dirname = os.path.dirname(filepath)
+    os.makedirs(dirname, exist_ok=True)
+    tmp_path = f"{filepath}.tmp.{uuid.uuid4().hex}"
+    try:
+        with open(tmp_path, "w", encoding="utf-8", newline="") as f:
+            f.write(content)
+        os.replace(tmp_path, filepath)
+    except Exception as exc:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+        raise exc

@@ -557,6 +557,8 @@ def module_definition_query(
 ) -> str:
     """SQL Server object definition text from sys.sql_modules as DEFINITION_TEXT.
 
+    Filters to explicitly supported module types ('V', 'P', 'FN', 'IF', 'TF')
+    to prevent tables, constraints, keys, and internal tables from being returned.
     An encrypted or otherwise inaccessible module returns a NULL definition,
     which the assessor records as UNABLE_TO_ASSESS rather than fabricating text.
     """
@@ -567,7 +569,8 @@ def module_definition_query(
         f"FROM {p}objects o "
         f"JOIN {p}schemas s ON o.schema_id = s.schema_id "
         f"LEFT JOIN {p}sql_modules m ON m.object_id = o.object_id "
-        f"WHERE {_ss_schema_filter(owner)}"
+        f"WHERE {_ss_schema_filter(owner)} "
+        "AND o.type IN ('V', 'P', 'FN', 'IF', 'TF')"
         + (f" AND o.name = {escape_string_literal(object_name)}" if object_name else "")
         + ") q"
     )

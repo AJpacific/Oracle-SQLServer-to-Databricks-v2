@@ -299,16 +299,31 @@ reads a source secret scope.
   that returns a per-table retry worklist with a safe `recovery_action`
   (checkpoint-only and finalization-only retries never reapply data).
 
-### SQL objects
+### SQL objects and artifact migration
 - `NB13_SQLObjectAssessmentAndConversion` retains its historical filename for
   workspace-path compatibility. It performs original source-definition
   extraction only: it captures Oracle `ALL_VIEWS`/`ALL_SOURCE` and SQL Server
   `sys.sql_modules` text and stores it unchanged in `sql_object_assessment`
-  (the table name is also retained; it now holds only source SQL-object
-  definitions and their inventory metadata).
-- The accelerator preserves source SQL definitions as artifacts. It does not
-  convert, classify, review, execute, or deploy view, procedure, function,
-  package, or package-body SQL.
+  (the table name is also retained; it holds source SQL-object definitions and
+  inventory metadata).
+- `NB18_MaterializeSourceArtifacts` materializes exact raw source SQL definitions
+  to deterministic paths in Unity Catalog Volumes (`_source_artifacts`). It preserves
+  source SQL text without conversion, does not execute source SQL, does not classify
+  source SQL for deployment, and does not deploy converted SQL objects. It handles
+  raw-definition artifact ownership, idempotency, collision prevention, and
+  missing/corrupt artifact repair.
+- The SQL Artifact Migration workflow (`ACCELERATOR_SQL_ARTIFACT_MIGRATION`) is an
+  independent pipeline operating separately from Full Load and Delta Sync. It initializes
+  dedicated control tables (`sql_artifact_control`, `sql_artifact_execution_log`) via
+  `NB21_SQLArtifactInit`.
+- `NB22_SQLArtifactMigrate` converts, classifies, and stores; does not deploy and does not connect to source databases. Reads only what Assessment (Job 1A) already captured. Objects are classified as `AUTO`, `MANUAL_REVIEW`, or `UNSUPPORTED`:
+  - `VIEW`: `AUTO` only after successful dialect conversion, external reference resolution via approved object map, and structural validation. Converted SQL is stored in Unity Catalog Volumes under `_converted_artifacts` via atomic writes; `deployment_status = NOT_DEPLOYED`.
+  - `PROCEDURE` and `FUNCTION`: Classified as `MANUAL_REVIEW`; never deployed. Converted SQL is stored if available; `deployment_status = NOT_DEPLOYED`.
+  - Oracle `PACKAGE` and `PACKAGE_BODY`: Classified as `MANUAL_REVIEW`; require manual decomposition; never deployed; `deployment_status = NOT_DEPLOYED`.
+  - `TRIGGER`: Excluded from default capture discovery; externally supplied trigger rows are classified as `UNSUPPORTED`; never deployed; `deployment_status = NOT_DEPLOYED`.
+  - Validation failures, comma-joins, or unresolved bare tables route to `MANUAL_REVIEW` or `UNSUPPORTED`.
+- Selection-driven candidates: Non-table rows in `source_assessment` where `is_selected = true`, joined on `run_id` to `sql_object_assessment`.
+- `NB_SQLArtifactSummary` aggregates execution and classification metrics scoped strictly to the current `run_id`. If T05 status is not `SUCCEEDED`, reports `FAILED` and raises. Existing table pipeline control tables are read-only.
 
 ### Bronze-to-Silver ETL and data quality
 - Enable per table with `etl_is_active`, a Silver target, and `dq_rule` rows.
@@ -657,6 +672,7 @@ reconciliation rules, failure classification and retry recovery mapping, SQL-obj
 classification/conversion, and DQ-rule parsing. `tests/_fakes.py` provides a Spark
 double for query-building assertions. Always run the suite after changing adapter
 contracts, query builders, mappings, reconciliation, or notebook wiring.
+The test suite contains 1,208 passed unit tests (plus 292 subtests), covering all components including the selection-driven convert-and-store SQL artifact workflow.
 
 Final command output and machine-readable status are written to:
 
@@ -689,6 +705,20 @@ Track those results separately in
 `docs/production_readiness_checklist.md`. Production readiness must not be
 claimed while required live checks remain `NOT_EXECUTED`.
 
-Repository changes do not update Databricks Job YAML. Deployed Jobs must be
-updated separately to use the run-only context, global worklist tasks, and the
-three-field ForEach payload.
+## SQL Artifact Migration (Job: ACCELERATOR_SQL_ARTIFACT_MIGRATION)
+
+The SQL Artifact Migration workflow is defined in `jobs/ACCELERATOR_SQL_ARTIFACT_MIGRATION.yaml`.
+It is a selection-driven convert-and-store pipeline for non-table database objects (`VIEW`, `PROCEDURE`, `FUNCTION`, `PACKAGE`, `PACKAGE_BODY`).
+It converts, classifies, and stores; does not deploy and does not connect to source databases. It reads only what Assessment (Job 1A) already captured.
+NB18 preserves raw definitions without conversion, does not execute source SQL, and does not deploy converted SQL objects. Artifacts are never auto-deployed.
+
+- **Selection-driven only**: Discovers non-table candidate objects from `source_assessment` where `is_selected = true`, joined to `sql_object_assessment` definitions from the same assessment run.
+- **Convert and Store Only**: Transpiles dialect SQL to Databricks SQL, classifies each artifact (`AUTO`, `MANUAL_REVIEW`, `UNSUPPORTED`), stores converted SQL as `.sql` files in Unity Catalog Volumes under `_converted_artifacts` using atomic writes (`temp-file + os.replace`), and records control status in `sql_artifact_control`.
+- **Zero Deployment**: No objects are deployed to Unity Catalog schemas, no target schemas are created, and `deployment_status = NOT_DEPLOYED` for every row. Objects are never auto-deployed.
+- **Job Graph**: Five sequential tasks:
+  1. `T00_Create_Run_Context` (`deployment/NB_CreateRunContext`)
+  2. `T03_Init_SQL_Artifact_Control` (`shared/NB21_SQLArtifactInit`)
+  3. `T04_Materialize_Source_Artifacts` (`shared/NB18_MaterializeSourceArtifacts`, `run_if: ALL_SUCCESS`)
+  4. `T05_Migrate_SQL_Artifacts` (`shared/NB22_SQLArtifactMigrate`, `run_if: ALL_SUCCESS`)
+  5. `T06_SQL_Artifact_Summary` (`deployment/NB_SQLArtifactSummary`, `run_if: ALL_DONE`)
+

@@ -79,7 +79,7 @@ class TestReleaseDocumentation(unittest.TestCase):
 
     def test_runtime_checklist_rows_default_to_not_executed(self):
         section = ""
-        runtime_sections = {"B", "C", "D", "E", "F", "G"}
+        runtime_sections = {"B", "C", "D", "E", "F", "G", "H"}
         for line in self.checklist.splitlines():
             if line.startswith("## "):
                 section = line[3:4]
@@ -188,6 +188,69 @@ class TestSharedNotebookDescriptions(unittest.TestCase):
             self.assertNotIn("SQL Server computed", top, name)
             self.assertNotIn("SQL Server hidden", top, name)
             self.assertNotIn("SQL Server datetime2", top, name)
+
+
+class TestSQLArtifactDocumentation(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.readme = _read(os.path.join(ROOT, "README.md"))
+        cls.supported = _read(os.path.join(DOCS, "supported_features_and_limitations.md"))
+        cls.jobs = _read(os.path.join(DOCS, "databricks_job_task_mapping.md"))
+        cls.checklist = _read(os.path.join(DOCS, "production_readiness_checklist.md"))
+        cls.combined = cls.readme + " " + cls.supported + " " + cls.jobs
+
+    def test_nb18_documented_as_raw_materialization_without_conversion(self):
+        self.assertIn("NB18_MaterializeSourceArtifacts", self.combined)
+        for doc in (self.readme, self.supported, self.jobs):
+            self.assertIn("NB18", doc)
+            self.assertIn("raw", doc.lower())
+            self.assertIn("without conversion", doc.lower())
+        self.assertIn("does not execute source sql", self.readme.lower())
+        self.assertIn("does not deploy converted sql objects", self.readme.lower())
+
+    def test_nb22_documented_as_conversion_and_deployment_stage(self):
+        self.assertIn("NB22_SQLArtifactMigrate", self.combined)
+        for term in ("classification", "transpilation", "validation", "deployment"):
+            self.assertIn(term, self.combined.lower())
+
+    def test_classification_statuses_documented_consistently(self):
+        for status in ("AUTO", "MANUAL_REVIEW", "UNSUPPORTED"):
+            self.assertIn(status, self.supported)
+            self.assertIn(status, self.jobs)
+        self.assertIn("never auto-deployed", self.supported.lower())
+        self.assertIn("never auto-deployed", self.jobs.lower())
+
+    def test_documentation_task_names_match_executable_yaml(self):
+        yaml_path = os.path.join(ROOT, "jobs", "ACCELERATOR_SQL_ARTIFACT_MIGRATION.yaml")
+        if os.path.isfile(yaml_path):
+            import yaml
+            with open(yaml_path, encoding="utf-8") as f:
+                job_def = yaml.safe_load(f)
+            tasks = job_def.get("tasks", [])
+            self.assertGreater(len(tasks), 0)
+            for task in tasks:
+                task_key = task["task_key"]
+                self.assertIn(task_key, self.jobs)
+
+    def test_documentation_does_not_claim_live_validation_as_completed(self):
+        self.assertIn("NOT_EXECUTED", self.checklist)
+        supported_norm = " ".join(self.supported.split())
+        self.assertIn("do not establish runtime production readiness", supported_norm)
+
+    def test_object_type_behavior_matches_converter_rules(self):
+        self.assertIn("VIEW", self.supported)
+        self.assertIn("PROCEDURE", self.supported)
+        self.assertIn("TRIGGER", self.supported)
+        self.assertIn("MANUAL_REVIEW", self.supported)
+        self.assertIn("UNSUPPORTED", self.supported)
+
+    def test_prohibited_contradictions_are_absent(self):
+        for prohibited in (
+            "no sql conversion of any kind",
+            "never classified, reviewed, executed, or deployed",
+            "sql objects are never classified",
+        ):
+            self.assertNotIn(prohibited, self.combined.lower())
 
 
 if __name__ == "__main__":

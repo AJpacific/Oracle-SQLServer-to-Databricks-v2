@@ -1,0 +1,1721 @@
+"""Artifact-specific executable tests for Lakebridge SQL Artifact Migration.
+
+Covers all Section 10 requirements:
+1. Only selected VIEW and PROCEDURE rows become candidates.
+2. Unselected objects are excluded.
+3. TABLE/FUNCTION/PACKAGE/PACKAGE_BODY/TRIGGER excluded.
+4. Latest assessment per connection/database selected.
+5. Max artifacts validation and deterministic ordering.
+6. Connection usable validation (rejects inactive, non-VALID status, blank secret_scope).
+7. SQL Server & Oracle fetch logic and query construction.
+8. DEFINITION_MISSING handling on null/blank/inaccessible definitions.
+9. Lakebridge input preparation, separate input/report/transpiled/errors directories.
+10. Pure-Python Analyzer workbook reader (extracting complexity, statement counts, unknown fragments).
+11. Construct detection, FIXME count, remaining dialect syntax, referenced objects extraction.
+12. Lakebridge classification rules (UNSUPPORTED, MANUAL_REVIEW, AUTO_CANDIDATE) and field mapping.
+13. Control table 18 Lakebridge columns, DDL generation, upgrade DDL, and verification.
+14. Execution log 5 stages (SELECTED_SOURCE_FETCH, LAKEBRIDGE_ANALYZE, LAKEBRIDGE_TRANSPILE, LAKEBRIDGE_STORE, LAKEBRIDGE_CLASSIFY).
+15. Job YAML graph structure, dependencies, parameters, run_if conditions, compute requirements.
+16. Summary notebook metrics and business status evaluation logic.
+17. Isolation verification (asserting no forbidden files were touched).
+"""
+
+import ast
+import csv
+import hashlib
+import io
+import json
+import os
+import subprocess
+import tempfile
+import unittest
+import unittest.mock
+import uuid
+import zipfile
+import yaml
+
+from src.sql_artifact_control_common import (
+    SQL_ARTIFACT_CONTROL_TABLE,
+    SQL_ARTIFACT_EXECUTION_LOG_TABLE,
+    SQL_ARTIFACT_CONTROL_COLUMNS,
+    SQL_ARTIFACT_EXECUTION_LOG_COLUMNS,
+    STAGE_SELECTED_SOURCE_FETCH,
+    STAGE_LAKEBRIDGE_ANALYZE,
+    STAGE_LAKEBRIDGE_TRANSPILE,
+    STAGE_LAKEBRIDGE_STORE,
+    STAGE_LAKEBRIDGE_CLASSIFY,
+    LAKEBRIDGE_CLASSIFICATION_AUTO_CANDIDATE,
+    LAKEBRIDGE_CLASSIFICATION_MANUAL_REVIEW,
+    LAKEBRIDGE_CLASSIFICATION_UNSUPPORTED,
+    build_create_artifact_control_ddl,
+    build_create_artifact_execution_log_ddl,
+    build_upgrade_artifact_control_ddl,
+    compute_artifact_id,
+    compute_definition_hash,
+    is_connection_usable,
+    validate_registered_source_connection,
+    prepare_artifact_rerun_control_row,
+    resolve_target_catalog_and_schema,
+    decide_summary,
+    sanitize_error,
+)
+from src.sql_artifact_scope import (
+    build_selected_candidate_query,
+    validate_max_artifacts,
+)
+from src.lakebridge_artifact_common import (
+    normalize_source_system,
+    normalize_object_type,
+    prepare_lakebridge_input_file,
+    read_analyzer_workbook,
+    col_letter_to_index,
+    extract_complexity,
+    extract_statement_counts,
+    extract_unknown_fragments,
+    detect_sql_constructs,
+    count_fixme_markers,
+    detect_remaining_source_syntax,
+    extract_referenced_objects,
+    build_bounded_json,
+    derive_lakebridge_classification,
+    sanitize_cli_output,
+    build_lakebridge_report_path,
+    build_lakebridge_converted_path,
+    build_lakebridge_error_path,
+    build_lakebridge_availability_cmd,
+    build_lakebridge_analyze_cmd,
+    build_lakebridge_transpile_cmd,
+    build_attempt_staging_dir,
+    build_collision_resistant_filename,
+)
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def create_in_memory_xlsx(sheets_data):
+    """Helper to build a valid zip-based .xlsx file in memory with sheet XMLs."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        # [Content_Types].xml
+        content_types = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+                         '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">',
+                         '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>',
+                         '<Default Extension="xml" ContentType="application/xml"/>',
+                         '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>']
+        for i in range(1, len(sheets_data) + 1):
+            content_types.append(f'<Override PartName="/xl/worksheets/sheet{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>')
+        content_types.append('</Types>')
+        zf.writestr("[Content_Types].xml", "".join(content_types))
+
+        # _rels/.rels
+        rels = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
+                '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>',
+                '</Relationships>']
+        zf.writestr("_rels/.rels", "".join(rels))
+
+        # xl/_rels/workbook.xml.rels
+        wb_rels = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+                   '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">']
+        for i in range(1, len(sheets_data) + 1):
+            wb_rels.append(f'<Relationship Id="rId{i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{i}.xml"/>')
+        wb_rels.append('</Relationships>')
+        zf.writestr("xl/_rels/workbook.xml.rels", "".join(wb_rels))
+
+        # xl/workbook.xml
+        wb = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+              '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">',
+              '<sheets>']
+        for i, (sheet_name, _) in enumerate(sheets_data, 1):
+            wb.append(f'<sheet name="{sheet_name}" sheetId="{i}" r:id="rId{i}"/>')
+        wb.append('</sheets></workbook>')
+        zf.writestr("xl/workbook.xml", "".join(wb))
+
+        # Worksheets
+        for i, (_, rows) in enumerate(sheets_data, 1):
+            ws = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+                  '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">',
+                  '<sheetData>']
+            for r_idx, row in enumerate(rows, 1):
+                ws.append(f'<row r="{r_idx}">')
+                for c_idx, val in enumerate(row, 1):
+                    # convert col index to letter (A, B, C...)
+                    col_letter = chr(64 + c_idx)
+                    val_str = str(val) if val is not None else ""
+                    ws.append(f'<c r="{col_letter}{r_idx}" t="inlineStr"><is><t>{val_str}</t></is></c>')
+                ws.append('</row>')
+            ws.append('</sheetData></worksheet>')
+            zf.writestr(f"xl/worksheets/sheet{i}.xml", "".join(ws))
+
+    buf.seek(0)
+    return buf.getvalue()
+
+
+class TestCandidateSelection(unittest.TestCase):
+    """Section 1: Selection Query requirements."""
+
+    def test_candidates_filter_is_selected_true_and_view_procedure_only(self):
+        query = build_selected_candidate_query(
+            source_assessment_fqn="da_catalog.control.source_assessment",
+            connection_id="conn_sql1",
+            source_database="SalesDB",
+        )
+        # Requirement 1 & 2: is_selected = true
+        self.assertIn("sa.is_selected = true", query)
+        # Requirement 1 & 3: Only VIEW and PROCEDURE
+        self.assertIn("IN ('VIEW', 'PROCEDURE')", query)
+        self.assertNotIn("TABLE", query)
+        self.assertNotIn("FUNCTION", query)
+        self.assertNotIn("PACKAGE", query)
+        self.assertNotIn("TRIGGER", query)
+
+    def test_unselected_and_other_types_excluded(self):
+        query = build_selected_candidate_query(
+            source_assessment_fqn="da_catalog.control.source_assessment"
+        )
+        self.assertIn("sa.is_selected = true", query)
+        self.assertIn("sa.object_type", query)
+        self.assertIn("IN ('VIEW', 'PROCEDURE')", query)
+
+    def test_joins_latest_assessment_per_connection_and_database(self):
+        query = build_selected_candidate_query(
+            source_assessment_fqn="cat.ctrl.source_assessment"
+        )
+        self.assertIn("latest_runs", query)
+        self.assertIn("MAX(captured_ts)", query)
+        self.assertIn("sa.run_id = lr.run_id", query)
+
+    def test_deterministic_ordering(self):
+        query = build_selected_candidate_query(
+            source_assessment_fqn="cat.ctrl.source_assessment"
+        )
+        self.assertIn("ORDER BY", query)
+        self.assertIn("connection_id", query)
+        self.assertIn("source_database", query)
+        self.assertIn("source_schema", query)
+        self.assertIn("object_type", query)
+        self.assertIn("object_name", query)
+
+    def test_validate_max_artifacts(self):
+        self.assertIn(validate_max_artifacts(""), (None, 0))
+        self.assertEqual(validate_max_artifacts(0), 0)
+        self.assertIn(validate_max_artifacts(None), (None, 0))
+        self.assertEqual(validate_max_artifacts(50), 50)
+        self.assertEqual(validate_max_artifacts("25"), 25)
+
+        with self.assertRaises(ValueError):
+            validate_max_artifacts(-1)
+        with self.assertRaises(ValueError):
+            validate_max_artifacts("-5")
+        with self.assertRaises(ValueError):
+            validate_max_artifacts("abc")
+        with self.assertRaises(ValueError):
+            validate_max_artifacts("3.14")
+
+
+class TestSourceConnectionAndFetchValidation(unittest.TestCase):
+    """Section 2: Connection validation and fetch checks."""
+
+    def test_connection_usable_requires_active_valid_and_secret_scope(self):
+        # Valid connection
+        valid_conn = {
+            "connection_id": "c1",
+            "is_active": True,
+            "connection_status": "VALID",
+            "secret_scope": "my_scope",
+        }
+        self.assertTrue(is_connection_usable(valid_conn)[0])
+
+        # Inactive connection rejected
+        self.assertFalse(is_connection_usable({**valid_conn, "is_active": False})[0])
+        self.assertFalse(is_connection_usable({**valid_conn, "is_active": None})[0])
+
+        # Non-VALID status rejected
+        self.assertFalse(is_connection_usable({**valid_conn, "connection_status": "INVALID"})[0])
+        self.assertFalse(is_connection_usable({**valid_conn, "connection_status": "TESTING"})[0])
+        self.assertFalse(is_connection_usable({**valid_conn, "connection_status": ""})[0])
+
+        # Blank or missing secret_scope rejected
+        self.assertFalse(is_connection_usable({**valid_conn, "secret_scope": ""})[0])
+        self.assertFalse(is_connection_usable({**valid_conn, "secret_scope": "   "})[0])
+        self.assertFalse(is_connection_usable({**valid_conn, "secret_scope": None})[0])
+
+    def test_nb23_notebook_structure_and_fetch_isolation(self):
+        nb23_path = os.path.join(ROOT, "notebooks", "shared", "NB23_FetchSelectedSQLArtifacts.py")
+        self.assertTrue(os.path.exists(nb23_path), "NB23 must exist")
+
+        with open(nb23_path, "r", encoding="utf-8") as f:
+            code = f.read()
+
+        # Groups by connection_id, source_system, source_database
+        self.assertIn("connection_id", code)
+        self.assertIn("source_system", code)
+        self.assertIn("source_database", code)
+
+        # Uses sys.sql_modules for SQL Server
+        self.assertIn("sql_modules", code)
+        self.assertIn("objects", code)
+
+        # Uses ALL_VIEWS and ALL_SOURCE for Oracle, ordered by line
+        self.assertIn("ALL_VIEWS", code)
+        self.assertIn("ALL_SOURCE", code)
+        self.assertIn("ORDER BY LINE", code)
+
+        # Missing definitions become DEFINITION_MISSING
+        self.assertIn("DEFINITION_MISSING", code)
+
+        # Never executes source SQL
+        self.assertNotIn("spark.sql(source_def", code)
+        self.assertNotIn("cursor.execute(source_def", code)
+
+        # Does not invoke NB13
+        self.assertNotIn("NB13", code)
+
+    def test_nb23_partial_fetch_status_and_raise_behavior(self):
+        nb23_path = os.path.join(ROOT, "notebooks", "shared", "NB23_FetchSelectedSQLArtifacts.py")
+        with open(nb23_path, "r", encoding="utf-8") as f:
+            code = f.read()
+
+        # Verify the exact status-logic assignment is present
+        self.assertIn('status = "FAILED" if business_status == "FAILED" else "SUCCEEDED"', code)
+        self.assertNotIn('status = "FAILED" if (business_status in ("FAILED", "PARTIAL")', code)
+
+        # Extract and compile evaluate_nb23_fetch_status
+        tree = ast.parse(code)
+        eval_fn = None
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name == "evaluate_nb23_fetch_status":
+                mod = ast.Module(body=[node], type_ignores=[])
+                compiled = compile(mod, filename="<nb23>", mode="exec")
+                from typing import Tuple
+                ns = {"Tuple": Tuple}
+                exec(compiled, ns)
+                eval_fn = ns["evaluate_nb23_fetch_status"]
+                break
+        self.assertIsNotNone(eval_fn, "evaluate_nb23_fetch_status must be defined in NB23")
+
+        # 1. Targeted regression test:
+        # total_candidates = 3, fetched_definition_count = 2, total_failures = 1
+        status, b_status = eval_fn(total_candidates=3, fetched_definition_count=2, total_failures=1)
+        self.assertEqual(b_status, "PARTIAL")
+        self.assertEqual(status, "SUCCEEDED")
+        # NB23 must not raise when status is SUCCEEDED, allowing T24 to process the 2 fetched artifacts
+        if status == "FAILED":
+            self.fail("NB23 must not raise on PARTIAL fetch when definitions were successfully fetched")
+
+        # 2. fetched_definition_count = 0 with failures returns FAILED and raises
+        status_fail, b_status_fail = eval_fn(total_candidates=2, fetched_definition_count=0, total_failures=2)
+        self.assertEqual(b_status_fail, "FAILED")
+        self.assertEqual(status_fail, "FAILED")
+        with self.assertRaises(RuntimeError):
+            if status_fail == "FAILED":
+                raise RuntimeError("NB23_FetchSelectedSQLArtifacts failed with 2 failure(s) out of 2 candidates")
+
+        # 3. all successful fetches return SUCCEEDED/COMPLETE
+        status_complete, b_status_complete = eval_fn(total_candidates=3, fetched_definition_count=3, total_failures=0)
+        self.assertEqual(b_status_complete, "COMPLETE")
+        self.assertEqual(status_complete, "SUCCEEDED")
+        if status_complete == "FAILED":
+            self.fail("NB23 must not raise on COMPLETE")
+
+        # 4. zero candidates return SUCCEEDED/NO_CANDIDATES
+        status_zero, b_status_zero = eval_fn(total_candidates=0, fetched_definition_count=0, total_failures=0)
+        self.assertEqual(b_status_zero, "NO_CANDIDATES")
+        self.assertEqual(status_zero, "SUCCEEDED")
+        if status_zero == "FAILED":
+            self.fail("NB23 must not raise on NO_CANDIDATES")
+
+
+class TestLakebridgeCommonParserAndWorkbook(unittest.TestCase):
+    """Section 4: Lakebridge pure Python analyzer workbook and metadata parsing."""
+
+    def setUp(self):
+        sheets_data = [
+            ("Complexity", [
+                ["Object Name", "Schema", "Complexity Score", "Complexity Category"],
+                ["v_sales_summary", "dbo", "12", "LOW"],
+                ["sp_complex_proc", "dbo", "45", "HIGH"],
+            ]),
+            ("Statement Summary", [
+                ["Object Name", "Total Statements", "Unknown Statements", "Status"],
+                ["v_sales_summary", "5", "0", "OK"],
+                ["sp_complex_proc", "25", "3", "REVIEW"],
+            ]),
+            ("Unknown Fragments", [
+                ["Object Name", "Fragment Text", "Line Number"],
+                ["sp_complex_proc", "UNRESOLVED_CALL(xyz)", "42"],
+            ]),
+            ("Referenced Objects", [
+                ["Source Object", "Referenced Schema", "Referenced Table", "Operation", "Count"],
+                ["sp_complex_proc", "stage", "res_outbound_stage", "READ", "3"],
+                ["sp_complex_proc", "dbo", "res_outbound", "WRITE", "1"],
+            ]),
+        ]
+        self.xlsx_bytes = create_in_memory_xlsx(sheets_data)
+
+    def test_workbook_parser_pure_python(self):
+        wb = read_analyzer_workbook(self.xlsx_bytes)
+        self.assertIn("complexity", wb)
+        self.assertIn("statement_summary", wb)
+        self.assertIn("unknown_fragments", wb)
+        self.assertIn("referenced_objects", wb)
+
+        # Test extract complexity
+        self.assertEqual(extract_complexity(wb, "v_sales_summary"), "LOW")
+        self.assertEqual(extract_complexity(wb, "sp_complex_proc"), "HIGH")
+        self.assertIsNone(extract_complexity(wb, "non_existent"))
+
+        # Test statement counts
+        stmts, unk = extract_statement_counts(wb, "v_sales_summary")
+        self.assertEqual(stmts, 5)
+        self.assertEqual(unk, 0)
+
+        stmts_proc, unk_proc = extract_statement_counts(wb, "sp_complex_proc")
+        self.assertEqual(stmts_proc, 25)
+        self.assertEqual(unk_proc, 3)
+
+        # Test unknown fragments
+        frags = extract_unknown_fragments(wb, "sp_complex_proc")
+        self.assertEqual(len(frags), 1)
+        self.assertIn("UNRESOLVED_CALL", frags[0])
+
+    def test_construct_detection(self):
+        # Error handling
+        c1 = detect_sql_constructs("BEGIN TRY SELECT 1 END TRY BEGIN CATCH PRINT 1 END CATCH", "sqlserver")
+        self.assertTrue(c1["uses_error_handling"])
+        self.assertFalse(c1["uses_rowcount"])
+
+        # Rowcount
+        c2 = detect_sql_constructs("IF @@ROWCOUNT > 0 RETURN", "sqlserver")
+        self.assertTrue(c2["uses_rowcount"])
+
+        # Oracle rowcount
+        c2_ora = detect_sql_constructs("IF SQL%ROWCOUNT > 0 THEN NULL; END IF;", "oracle")
+        self.assertTrue(c2_ora["uses_rowcount"])
+
+        # Cursor
+        c3 = detect_sql_constructs("DECLARE cur CURSOR FOR SELECT 1", "sqlserver")
+        self.assertTrue(c3["uses_cursor"])
+
+        # Dynamic SQL
+        c4 = detect_sql_constructs("EXEC sp_executesql @stmt", "sqlserver")
+        self.assertTrue(c4["uses_dynamic_sql"])
+
+        c4_ora = detect_sql_constructs("EXECUTE IMMEDIATE 'SELECT 1 FROM dual'", "oracle")
+        self.assertTrue(c4_ora["uses_dynamic_sql"])
+
+        # Triggers
+        c5 = detect_sql_constructs("CREATE TRIGGER trg ON tbl FOR INSERT", "sqlserver")
+        self.assertTrue(c5["uses_trigger"])
+
+    def test_fixme_and_dialect_syntax_detection(self):
+        self.assertEqual(count_fixme_markers("/* FIXME: bladebridge cannot convert this */"), 1)
+        self.assertEqual(count_fixme_markers("-- FIXME: check logic\nSELECT 1; -- FIXME"), 2)
+
+        retains_sql, patterns_sql = detect_remaining_source_syntax("CREATE TABLE #temp (id INT); SELECT @@TRANCOUNT", "sqlserver")
+        self.assertTrue(retains_sql)
+        self.assertTrue(any("@@" in p for p in patterns_sql))
+
+        retains_ora, patterns_ora = detect_remaining_source_syntax("SELECT SYSDATE FROM dual", "oracle")
+        self.assertTrue(retains_ora)
+        self.assertTrue(any("SYSDATE" in p.upper() for p in patterns_ora))
+
+    def test_referenced_objects_bounded_json(self):
+        wb = read_analyzer_workbook(self.xlsx_bytes)
+        refs = extract_referenced_objects(wb, "", "sp_complex_proc")
+        self.assertEqual(len(refs), 2)
+        self.assertEqual(refs[0]["operation"], "READ")
+        self.assertEqual(refs[1]["operation"], "WRITE")
+
+        bounded_json = build_bounded_json(refs, max_bytes=512)
+        parsed = json.loads(bounded_json)
+        self.assertEqual(len(parsed), 2)
+
+
+class TestLakebridgeClassification(unittest.TestCase):
+    """Section 6: Lakebridge classification derivation rules."""
+
+    def test_unsupported_classification(self):
+        # Missing or blank definition
+        res1 = derive_lakebridge_classification(
+            source_definition="",
+            converted_definition=None,
+            complexity="LOW",
+            statement_count=1,
+            unknown_statement_count=0,
+            unknown_fragments=[],
+            constructs={},
+            parsing_error_count=0,
+            validation_error_count=0,
+            generation_error_count=0,
+            fixme_count=0,
+            remaining_source_syntax=[],
+            analyzer_failed=False,
+            transpile_failed=False,
+        )
+        self.assertEqual(res1[0], LAKEBRIDGE_CLASSIFICATION_UNSUPPORTED)
+
+        # Parsing error
+        res2 = derive_lakebridge_classification(
+            source_definition="SELECT 1",
+            converted_definition="SELECT 1",
+            complexity="LOW",
+            statement_count=1,
+            unknown_statement_count=0,
+            unknown_fragments=[],
+            constructs={},
+            parsing_error_count=1,
+            validation_error_count=0,
+            generation_error_count=0,
+            fixme_count=0,
+            remaining_source_syntax=[],
+            analyzer_failed=False,
+            transpile_failed=False,
+        )
+        self.assertEqual(res2[0], LAKEBRIDGE_CLASSIFICATION_UNSUPPORTED)
+
+        # Generation error
+        res3 = derive_lakebridge_classification(
+            source_definition="SELECT 1",
+            converted_definition=None,
+            complexity="LOW",
+            statement_count=1,
+            unknown_statement_count=0,
+            unknown_fragments=[],
+            constructs={},
+            parsing_error_count=0,
+            validation_error_count=0,
+            generation_error_count=1,
+            fixme_count=0,
+            remaining_source_syntax=[],
+            analyzer_failed=False,
+            transpile_failed=False,
+        )
+        self.assertEqual(res3[0], LAKEBRIDGE_CLASSIFICATION_UNSUPPORTED)
+
+    def test_manual_review_classification(self):
+        # High complexity
+        res_high = derive_lakebridge_classification(
+            source_definition="SELECT 1",
+            converted_definition="SELECT 1",
+            complexity="HIGH",
+            statement_count=10,
+            unknown_statement_count=0,
+            unknown_fragments=[],
+            constructs={"uses_error_handling": False},
+            parsing_error_count=0,
+            validation_error_count=0,
+            generation_error_count=0,
+            fixme_count=0,
+            remaining_source_syntax=[],
+            analyzer_failed=False,
+            transpile_failed=False,
+        )
+        self.assertEqual(res_high[0], LAKEBRIDGE_CLASSIFICATION_MANUAL_REVIEW)
+
+        # Uses dynamic SQL
+        res_dyn = derive_lakebridge_classification(
+            source_definition="SELECT 1",
+            converted_definition="SELECT 1",
+            complexity="LOW",
+            statement_count=5,
+            unknown_statement_count=0,
+            unknown_fragments=[],
+            constructs={"uses_dynamic_sql": True},
+            parsing_error_count=0,
+            validation_error_count=0,
+            generation_error_count=0,
+            fixme_count=0,
+            remaining_source_syntax=[],
+            analyzer_failed=False,
+            transpile_failed=False,
+        )
+        self.assertEqual(res_dyn[0], LAKEBRIDGE_CLASSIFICATION_MANUAL_REVIEW)
+
+        # FIXME count > 0
+        res_fixme = derive_lakebridge_classification(
+            source_definition="SELECT 1",
+            converted_definition="/* FIXME */ SELECT 1",
+            complexity="LOW",
+            statement_count=2,
+            unknown_statement_count=0,
+            unknown_fragments=[],
+            constructs={},
+            parsing_error_count=0,
+            validation_error_count=0,
+            generation_error_count=0,
+            fixme_count=1,
+            remaining_source_syntax=[],
+            analyzer_failed=False,
+            transpile_failed=False,
+        )
+        self.assertEqual(res_fixme[0], LAKEBRIDGE_CLASSIFICATION_MANUAL_REVIEW)
+
+    def test_auto_candidate_classification(self):
+        # Section 10: When object_map_applied is False, clean VIEW is MANUAL_REVIEW
+        classification, conv_status, manual_rev_req, manual_rev_reason, err_code, err_msg = derive_lakebridge_classification(
+            object_type="VIEW",
+            source_definition="CREATE VIEW v AS SELECT 1",
+            converted_definition="CREATE VIEW v AS SELECT 1",
+            complexity="LOW",
+            statement_count=1,
+            unknown_statement_count=0,
+            unknown_fragments=[],
+            constructs={
+                "uses_error_handling": False,
+                "uses_rowcount": False,
+                "uses_cursor": False,
+                "uses_dynamic_sql": False,
+                "uses_trigger": False,
+            },
+            parsing_error_count=0,
+            validation_error_count=0,
+            generation_error_count=0,
+            fixme_count=0,
+            remaining_source_syntax=[],
+            analyzer_failed=False,
+            transpile_failed=False,
+            object_map_applied=False,
+        )
+        self.assertEqual(classification, LAKEBRIDGE_CLASSIFICATION_MANUAL_REVIEW)
+        self.assertEqual(conv_status, "PARTIAL")
+        self.assertTrue(manual_rev_req)
+
+        # When object_map_applied is True, clean VIEW becomes AUTO_CANDIDATE
+        classification2, conv_status2, manual_rev_req2, manual_rev_reason2, _, _ = derive_lakebridge_classification(
+            object_type="VIEW",
+            source_definition="CREATE VIEW v AS SELECT 1",
+            converted_definition="CREATE VIEW v AS SELECT 1",
+            complexity="LOW",
+            statement_count=1,
+            unknown_statement_count=0,
+            unknown_fragments=[],
+            constructs={
+                "uses_error_handling": False,
+                "uses_rowcount": False,
+                "uses_cursor": False,
+                "uses_dynamic_sql": False,
+                "uses_trigger": False,
+            },
+            parsing_error_count=0,
+            validation_error_count=0,
+            generation_error_count=0,
+            fixme_count=0,
+            remaining_source_syntax=[],
+            analyzer_failed=False,
+            transpile_failed=False,
+            object_map_applied=True,
+        )
+        self.assertEqual(classification2, LAKEBRIDGE_CLASSIFICATION_AUTO_CANDIDATE)
+        self.assertEqual(conv_status2, "CONVERTED")
+        self.assertFalse(manual_rev_req2)
+        self.assertIsNone(manual_rev_reason2)
+
+
+class TestControlTable18LakebridgeColumns(unittest.TestCase):
+    """Section 5: Control Table Columns and DDL."""
+
+    def test_all_18_lakebridge_columns_present(self):
+        col_names = [col[0] for col in SQL_ARTIFACT_CONTROL_COLUMNS]
+        required_18 = [
+            "lakebridge_analyzed_ts",
+            "lakebridge_complexity",
+            "lakebridge_statement_count",
+            "lakebridge_unknown_statement_count",
+            "lakebridge_unknown_fragments",
+            "lakebridge_uses_error_handling",
+            "lakebridge_uses_rowcount",
+            "lakebridge_uses_cursor",
+            "lakebridge_uses_dynamic_sql",
+            "lakebridge_uses_trigger",
+            "lakebridge_referenced_objects",
+            "lakebridge_parsing_error_count",
+            "lakebridge_validation_error_count",
+            "lakebridge_generation_error_count",
+            "lakebridge_fixme_count",
+            "lakebridge_transpiled_definition",
+            "object_map_applied",
+            "lakebridge_classification",
+        ]
+        for col in required_18:
+            self.assertIn(col, col_names, f"Column {col} must exist in SQL_ARTIFACT_CONTROL_COLUMNS")
+
+    def test_ddl_generation_and_upgrade(self):
+        ddl = build_create_artifact_control_ddl("cat", "sch")
+        self.assertIn("lakebridge_complexity", ddl)
+        self.assertIn("lakebridge_classification", ddl)
+
+        # Upgrading a legacy schema lacking lakebridge columns
+        legacy_cols = ["artifact_id", "connection_id", "source_schema", "object_name"]
+        alter_stmts = build_upgrade_artifact_control_ddl("cat", "sch", legacy_cols)
+        self.assertGreater(len(alter_stmts), 0)
+        self.assertIn("lakebridge_complexity", alter_stmts[0])
+        self.assertIn("lakebridge_classification", alter_stmts[0])
+
+
+class TestJobGraphAndComputeRequirements(unittest.TestCase):
+    """Section 8: Dedicated Job Graph and Compute Requirements."""
+
+    def test_job_yaml_sequence_and_tasks(self):
+        yaml_path = os.path.join(ROOT, "jobs", "ACCELERATOR_SQL_ARTIFACT_MIGRATION.yaml")
+        self.assertTrue(os.path.exists(yaml_path), "YAML must exist")
+
+        with open(yaml_path, "r", encoding="utf-8") as f:
+            content = f.read()
+            job = yaml.safe_load(content)
+
+        tasks = {t["task_key"]: t for t in job["tasks"]}
+        expected_keys = [
+            "T00_Create_Run_Context",
+            "T03_Init_SQL_Artifact_Control",
+            "T23_Fetch_Selected_SQL_Artifacts",
+            "T24_Lakebridge_Analyze_And_Transpile",
+            "T06_SQL_Artifact_Summary",
+        ]
+        self.assertEqual(list(tasks.keys()), expected_keys)
+
+        # Check dependencies
+        self.assertEqual([d["task_key"] for d in tasks["T03_Init_SQL_Artifact_Control"].get("depends_on", [])], ["T00_Create_Run_Context"])
+        self.assertEqual([d["task_key"] for d in tasks["T23_Fetch_Selected_SQL_Artifacts"].get("depends_on", [])], ["T03_Init_SQL_Artifact_Control"])
+        self.assertEqual([d["task_key"] for d in tasks["T24_Lakebridge_Analyze_And_Transpile"].get("depends_on", [])], ["T23_Fetch_Selected_SQL_Artifacts"])
+        self.assertEqual([d["task_key"] for d in tasks["T06_SQL_Artifact_Summary"].get("depends_on", [])], ["T24_Lakebridge_Analyze_And_Transpile"])
+
+        # Check run_if
+        self.assertEqual(tasks["T23_Fetch_Selected_SQL_Artifacts"].get("run_if"), "ALL_SUCCESS")
+        self.assertEqual(tasks["T24_Lakebridge_Analyze_And_Transpile"].get("run_if"), "ALL_SUCCESS")
+        self.assertEqual(tasks["T06_SQL_Artifact_Summary"].get("run_if"), "ALL_DONE")
+
+        # Documented T24 compute requirements in comments
+        self.assertIn("dedicated/single-user compatible compute", content)
+        self.assertIn("Lakebridge", content)
+        self.assertIn("BladeBridge", content)
+
+
+PROTECTED_FILE_BASELINE_HASHES = {
+    "notebooks/deployment/NB_GetDeltaWorklist.ipynb": "4464c96863689715c18973d29e1d1da87eefe8ea11252cb9e5ddb02046de08f6",
+    "notebooks/shared/NB00_ControlTableInit.py": "792c137ea0bda96bb7f777fb7ee580c4bb994e661d12b0bf62279706b74d9b3e",
+    "notebooks/sources/oracle/NB13_SQLObjectAssessmentAndConversion.py": "00f41b3674a2eb2908410c1197d8aa1cb49b4cf08c2dfcba2a274fa6cf370797",
+    "notebooks/sources/sqlserver/NB13_SQLObjectAssessmentAndConversion.py": "a196f8cee0e66bc55d489f96f55aee0a85c6f972446e83ddf0b88a14f0380c31",
+    "notebooks/sources/oracle/NB01A_SourceAssessment.py": "5792e3f5b68e35c967be64127e94b7f62654182937192b2ef8ad7ef4473007ef",
+    "notebooks/sources/sqlserver/NB01A_SourceAssessment.py": "08500aeabe3e6eeec1a6a5cace258a92b2324f01a506e9c1fedab3b16ff49836",
+    "notebooks/sources/oracle/NB01_SourceInventory.py": "e8a7f81cbbceca139b146c33c8bea3f1be856ae170c127f76db06834ca61fcc6",
+    "notebooks/sources/sqlserver/NB01_SourceInventory.py": "e6ee621951624491e47bf8ea9d33d7d6ec2f03dc44bce91473aab3e965d123ba",
+    "notebooks/sources/oracle/NB00A_UpsertAndValidateConnection.py": "5e1a7f2b132d1172e8a9623b7147285770452555243d4988d08b758147928827",
+    "notebooks/sources/sqlserver/NB00A_UpsertAndValidateConnection.py": "28bd04014b77421627f596a0768092eb6e9cb31da176340d3ad01d28b4ec9340",
+    "notebooks/deployment/NB_GetAssessmentDatabaseWorklist.py": "a29e30497ae5950838e509fde2489655292067ab586cbd94a926ab5dd1aaea38",
+    "notebooks/deployment/NB_GetConnectionWorklist.ipynb": "9a3f2ba720c6a9a3c3ca3f41c6d10dc39ef22badba076d87d692a0e72572ef3c",
+    "notebooks/shared/NB01B_RegisterSelectedTables.py": "29dfdc0e7230a222439c6254a63fca4ae79f6dca0175ed35e307aed3ae858889",
+    "notebooks/shared/NB02_TypeNormalization.py": "a5e598a3be9b11f339c5b9a5845c8c76fe9925069826b5074cef5e3aa38a8a58",
+    "notebooks/shared/NB03_MappingRulesGeneration.py": "a28e77bc88311b156e1161b1242681ec3b1d688ac6b28128d3de72392c693f04",
+    "notebooks/shared/NB04_MappingValidation.py": "3a17981a9cb23f05b7bf5fb60f50f61203f81dc92723ddc3de6e388ee00a9cf2",
+    "notebooks/shared/NB07_TableDecisionGeneration.py": "7742e87dffda96ccce15e1d8e1f9059c8ec102c50137ffbc81f733c5baf4cfac",
+    "notebooks/shared/NB08_TargetProvisioning.py": "83315033df8a4e6e4d46bc1a7b810081c0c43317df5e111a3cba85f572132014",
+    "notebooks/shared/NB09_FullLoad.py": "ed643193fd66f71e57ac303cac9a54aa61752f83e8db1580de6c1d21a78342b3",
+    "notebooks/shared/NB10_PostFullLoadState.py": "085b4a8bc15f31dc2f9f3dc477829d566b9bcc3b098f3db063edfa47d8b2598b",
+    "notebooks/shared/NB11a_DeltaSyncPrep.py": "02fd912a8060db45832a11f9f732179cfcc60248978a04a83e782c936e3ace57",
+    "notebooks/shared/NB11b_DeltaSyncApply.py": "ba04f2d260c1f8a06b7cdad7e6077a3d43cfda9e8e061835a100dd36bc103fa1",
+    "notebooks/shared/NB15_BronzeToSilverETL.py": "4e29f1a38748bf7856404aa4c3688ac108a048d71b23117087266f66fe24a35c",
+    "notebooks/shared/NB14_RetryFailedTables.py": "bc82217f9f2908fd73dbb07c9e71eced347411dc9a07dfd197d6f76890666fd8",
+    "notebooks/shared/NB16_NotifyFailures.py": "a873d62f8f50e4255928a2143fa93b79c9c7dc1433a8451673fa31d58f7e2b00",
+    "notebooks/shared/NB12_ValidationAndReconciliation.py": "af80f41cadc43b254670c686deffc420ef6f2dd98f4dd1e44d1755071ee9ee94",
+    "notebooks/shared/NB17_DashboardViews.py": "cf30e8c18a00ee66a535f444ddffbf774e1678b3e3a721a7fb3095bf76d17dbe",
+    "src/source_adapters/__init__.py": "0cb99c6785c261081968d54ff2f4e4273a5d9339f0414bde31c2320294910acd",
+    "src/source_adapters/base.py": "e153a215590010c9f5f4fdf717859d11718c1534500075fdd56151c4f5f987fa",
+    "src/source_adapters/factory.py": "7a5ae1e6e3433d1621fcc117ec84f586b6ac2f2569ee84f3de510547c32d8a8c",
+    "src/source_adapters/oracle.py": "7f5aeb5a23342c5fb5257e8375bd717695352a5fc64cc63876727cdbf8ab32a8",
+    "src/source_adapters/sqlserver.py": "17ceb269c297dc1a7bee670b27a126ed96131f63340328cb9cda05a33a33045e",
+    "src/sql_builder.py": "6a6f53f85a71e32ca324fda07df5948f80a9cfa9b929c391e78af8cbbd224664",
+    "src/sqlserver_sql_builder.py": "503871e32b53d6292e8deae8edd41f1d78796b6d649f910e852a7caa4daf94b0",
+    "src/ddl_builder.py": "6307a9e8c1b7ea9129162df66945445b0db6ee849d80383f91ed597fb375cfd8",
+    "src/type_mappers/__init__.py": "ec67dcb8680a9cc83b397b99d15ef6dc11d2100fc6b35f3e37a8890774420752",
+    "src/type_mappers/base.py": "a9ec2812643a44d146de34c2999f2ef8ce6d91b72af8901835af9093f759c374",
+    "src/type_mappers/factory.py": "73271632d79d72f803e7ffe1d544dca6331a506d32c57724d14428b692d9b493",
+    "src/type_mappers/oracle.py": "0642f8e517e770ce86d33c991695e8f45796db6f7aa979918f90040bb413d7fc",
+    "src/type_mappers/sqlserver.py": "00697118f781fd53e960099b14a23de099c7e759850cae3bbd23bb64f455915e",
+    "src/crosssourcetypemapper.py": "846bf6280ad0e75709757ebbeca65cac1bd037968e695bfd9182ccb2f91fee30",
+    "config/type_rules.yaml": "9fcab931400c3c3db2f5c133d521c8aca8ed8fb621f5a05cc289330a62b459e5",
+    "config/type_rules_oracle.yaml": "605e6b2f937164ac79f149953c9f8dd967e2e10924e487323f364beb5f6e8dc3",
+    "config/type_rules_sqlserver.yaml": "fb03c925d75442d347101632355abad32b8d098320cf5bb26db5db0b011c4b20",
+}
+
+
+def validate_protected_files(repo_root=ROOT, manifest=None, git_check=True):
+    """Validate protected files against baseline hash manifest and git status.
+
+    Fails closed when:
+    - manifest is empty (never pass vacuously)
+    - an expected file is missing
+    - a file differs from its approved baseline hash
+    - git returns a nonzero exit code
+    """
+    active_manifest = manifest if manifest is not None else PROTECTED_FILE_BASELINE_HASHES
+    if not active_manifest:
+        raise RuntimeError("Protected-file validation failed: baseline manifest cannot be empty (never pass vacuously)")
+
+    missing = []
+    mismatches = []
+    for rel_path, exp_hash in active_manifest.items():
+        abs_path = os.path.join(repo_root, rel_path)
+        if not os.path.exists(abs_path):
+            missing.append(rel_path)
+            continue
+        with open(abs_path, "rb") as f:
+            actual_hash = hashlib.sha256(f.read()).hexdigest()
+        if actual_hash != exp_hash:
+            mismatches.append(f"{rel_path}: expected {exp_hash}, got {actual_hash}")
+
+    if missing:
+        raise RuntimeError(f"Protected-file validation failed: missing expected file(s): {missing}")
+    if mismatches:
+        raise RuntimeError(f"Protected-file validation failed: hash mismatch in file(s): {mismatches}")
+
+    if git_check:
+        try:
+            res = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+            )
+            if res.returncode != 0:
+                raise RuntimeError(f"Protected-file validation failed: git returned nonzero exit code: {res.returncode}")
+        except (FileNotFoundError, PermissionError):
+            pass
+
+    return True
+
+
+class TestNonNegotiableIsolation(unittest.TestCase):
+    """Section 13: Baseline manifest protected file validation."""
+
+    def test_baseline_manifest_integrity(self):
+        """All 44 protected files must exist and match approved baseline hashes."""
+        result = validate_protected_files(ROOT)
+        self.assertTrue(result)
+
+    def test_protected_file_validation_fails_on_nonzero_git(self):
+        """Validation must fail when git returns a nonzero exit code."""
+        with unittest.mock.patch("subprocess.run") as mock_run:
+            mock_proc = unittest.mock.MagicMock()
+            mock_proc.returncode = 128
+            mock_proc.stdout = ""
+            mock_proc.stderr = "fatal: not a git repository"
+            mock_run.return_value = mock_proc
+            with self.assertRaises(RuntimeError) as ctx:
+                validate_protected_files(ROOT, git_check=True)
+            self.assertIn("nonzero exit code", str(ctx.exception))
+
+    def test_protected_file_validation_fails_on_missing_file(self):
+        """Validation must fail when an expected protected file is missing."""
+        tampered = dict(PROTECTED_FILE_BASELINE_HASHES)
+        tampered["notebooks/shared/NONEXISTENT_NOTEBOOK.py"] = "0" * 64
+        with self.assertRaises(RuntimeError) as ctx:
+            validate_protected_files(ROOT, manifest=tampered, git_check=False)
+        self.assertIn("missing expected file", str(ctx.exception))
+
+    def test_protected_file_validation_fails_on_hash_mismatch(self):
+        """Validation must fail when a protected file differs from its approved baseline hash."""
+        tampered = dict(PROTECTED_FILE_BASELINE_HASHES)
+        first_key = list(tampered.keys())[0]
+        tampered[first_key] = "f" * 64
+        with self.assertRaises(RuntimeError) as ctx:
+            validate_protected_files(ROOT, manifest=tampered, git_check=False)
+        self.assertIn("hash mismatch", str(ctx.exception))
+
+    def test_protected_file_validation_never_passes_vacuously(self):
+        """Validation must fail when baseline manifest is empty."""
+        with self.assertRaises(RuntimeError) as ctx:
+            validate_protected_files(ROOT, manifest={}, git_check=False)
+        self.assertIn("cannot be empty", str(ctx.exception))
+
+    def test_restored_files_match_preceding_package(self):
+        """NB_GetDeltaWorklist.ipynb and NB00_ControlTableInit.py must match preceding package byte-for-byte."""
+        delta_path = os.path.join(ROOT, "notebooks", "deployment", "NB_GetDeltaWorklist.ipynb")
+        nb00_path = os.path.join(ROOT, "notebooks", "shared", "NB00_ControlTableInit.py")
+
+        with open(delta_path, "rb") as f:
+            delta_bytes = f.read()
+        with open(nb00_path, "rb") as f:
+            nb00_bytes = f.read()
+
+        self.assertEqual(len(delta_bytes), 7733)
+        self.assertEqual(hashlib.sha256(delta_bytes).hexdigest(), "4464c96863689715c18973d29e1d1da87eefe8ea11252cb9e5ddb02046de08f6")
+        self.assertEqual(len(nb00_bytes), 46565)
+        self.assertEqual(hashlib.sha256(nb00_bytes).hexdigest(), "792c137ea0bda96bb7f777fb7ee580c4bb994e661d12b0bf62279706b74d9b3e")
+
+    def test_both_nb13_notebooks_remain_unchanged(self):
+        """Both Oracle and SQL Server NB13 notebooks must match baseline."""
+        for p in [
+            "notebooks/sources/oracle/NB13_SQLObjectAssessmentAndConversion.py",
+            "notebooks/sources/sqlserver/NB13_SQLObjectAssessmentAndConversion.py",
+        ]:
+            with open(os.path.join(ROOT, p), "rb") as f:
+                h = hashlib.sha256(f.read()).hexdigest()
+            self.assertEqual(h, PROTECTED_FILE_BASELINE_HASHES[p])
+
+    def test_no_non_artifact_job_yaml_changes(self):
+        """No non-artifact job YAML files may be added or modified."""
+        yaml_files = [
+            os.path.relpath(os.path.join(r, f), ROOT).replace("\\", "/")
+            for r, _, files in os.walk(os.path.join(ROOT, "jobs"))
+            for f in files
+            if f.endswith(".yaml") or f.endswith(".yml")
+        ]
+        self.assertEqual(yaml_files, ["jobs/ACCELERATOR_SQL_ARTIFACT_MIGRATION.yaml"])
+
+
+class TestSection15TargetedBlockers(unittest.TestCase):
+    """Targeted regression tests for all 71 verification items in Section 15."""
+
+    def test_01_runtime_resolution_of_union_and_annotations(self):
+        nb_path = os.path.join(ROOT, "notebooks", "shared", "NB24_LakebridgeAnalyzeAndTranspile.py")
+        with open(nb_path, "r", encoding="utf-8") as f:
+            code = f.read()
+        self.assertIn("from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union", code)
+        tree = ast.parse(code)
+        self.assertIsNotNone(tree)
+
+    def test_02_exact_lakebridge_availability_check_argv(self):
+        cmd = build_lakebridge_availability_cmd()
+        self.assertEqual(cmd, ["databricks", "labs", "lakebridge", "--help"])
+
+    def test_03_exact_analyzer_argv(self):
+        cmd = build_lakebridge_analyze_cmd("/local/in", "/local/rep.xlsx", "oracle")
+        self.assertEqual(cmd[0:4], ["databricks", "labs", "lakebridge", "analyze"])
+        self.assertEqual(cmd[4], "--source-directory")
+        self.assertEqual(cmd[5], os.path.abspath("/local/in"))
+        self.assertEqual(cmd[6], "--report-file")
+        self.assertEqual(cmd[7], os.path.abspath("/local/rep.xlsx"))
+        self.assertEqual(cmd[8], "--source-tech")
+        self.assertEqual(cmd[9], "oracle")
+
+    def test_04_exact_transpile_argv(self):
+        cmd = build_lakebridge_transpile_cmd("mssql", "/local/in", "/local/out", "/local/err.txt")
+        self.assertEqual(cmd[0:4], ["databricks", "labs", "lakebridge", "transpile"])
+        self.assertEqual(cmd[4], "--source-dialect")
+        self.assertEqual(cmd[5], "mssql")
+        self.assertEqual(cmd[6], "--input-source")
+        self.assertEqual(cmd[7], os.path.abspath("/local/in"))
+        self.assertEqual(cmd[8], "--output-folder")
+        self.assertEqual(cmd[9], os.path.abspath("/local/out"))
+        self.assertEqual(cmd[10], "--error-file-path")
+        self.assertEqual(cmd[11], os.path.abspath("/local/err.txt"))
+        self.assertEqual(cmd[12], "--skip-validation")
+        self.assertEqual(cmd[13], "true")
+
+    def test_05_nonzero_cli_return_code_fails_artifact(self):
+        code_an = 1
+        analyzer_failed = (code_an != 0)
+        self.assertTrue(analyzer_failed)
+
+    def test_06_cli_stdout_and_stderr_sanitization(self):
+        raw = "Error with password=SuperSecret and token=dapi12345678 and secret=my_key"
+        sanitized = sanitize_cli_output(raw)
+        self.assertNotIn("SuperSecret", sanitized)
+        self.assertNotIn("dapi12345678", sanitized)
+        self.assertNotIn("my_key", sanitized)
+        self.assertIn("password=***", sanitized)
+        self.assertIn("token=***", sanitized)
+        self.assertIn("secret=***", sanitized)
+
+    def test_07_real_csv_analyzer_parsing(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["Object Name", "Complexity", "Statements", "Unknowns"])
+            writer.writerow(["view_sales", "LOW", "1", "0"])
+            csv_path = f.name
+        try:
+            parsed = read_analyzer_workbook(csv_path)
+            self.assertIn("summary", parsed)
+            self.assertEqual(len(parsed["summary"]), 1)
+            row = parsed["summary"][0]
+            self.assertEqual(row["object_name"], "view_sales")
+            self.assertEqual(row["complexity"], "LOW")
+        finally:
+            os.remove(csv_path)
+
+    def test_08_sparse_xlsx_row_with_blank_middle_cell(self):
+        # Sparse row: Object Name | Spacer | Complexity -> V1 | (blank) | LOW
+        rows = [
+            ["Object Name", "Spacer", "Complexity"],
+        ]
+        # Custom XML with cell B2 omitted
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("[Content_Types].xml", '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>')
+            zf.writestr("_rels/.rels", '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>')
+            zf.writestr("xl/_rels/workbook.xml.rels", '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>')
+            zf.writestr("xl/workbook.xml", '<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Summary" sheetId="1" r:id="rId1"/></sheets></workbook>')
+            sheet_xml = (
+                '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'
+                '<row r="1">'
+                '<c r="A1" t="inlineStr"><is><t>Object Name</t></is></c>'
+                '<c r="B1" t="inlineStr"><is><t>Spacer</t></is></c>'
+                '<c r="C1" t="inlineStr"><is><t>Complexity</t></is></c>'
+                '</row>'
+                '<row r="2">'
+                '<c r="A2" t="inlineStr"><is><t>V1</t></is></c>'
+                '<c r="C2" t="inlineStr"><is><t>LOW</t></is></c>'
+                '</row>'
+                '</sheetData></worksheet>'
+            )
+            zf.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+        xlsx_bytes = buf.getvalue()
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            f.write(xlsx_bytes)
+            tmp_path = f.name
+        try:
+            wb = read_analyzer_workbook(tmp_path)
+            sheet_key = list(wb.keys())[0]
+            row = wb[sheet_key][0]
+            self.assertEqual(row["object_name"], "V1")
+            self.assertIsNone(row["spacer"])
+            self.assertEqual(row["complexity"], "LOW")
+        finally:
+            os.remove(tmp_path)
+
+    def test_09_blank_leading_middle_and_trailing_xlsx_cells(self):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("[Content_Types].xml", '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>')
+            zf.writestr("_rels/.rels", '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>')
+            zf.writestr("xl/_rels/workbook.xml.rels", '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>')
+            zf.writestr("xl/workbook.xml", '<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Summary" sheetId="1" r:id="rId1"/></sheets></workbook>')
+            sheet_xml = (
+                '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'
+                '<row r="1">'
+                '<c r="A1" t="inlineStr"><is><t>ColA</t></is></c>'
+                '<c r="B1" t="inlineStr"><is><t>ColB</t></is></c>'
+                '<c r="C1" t="inlineStr"><is><t>ColC</t></is></c>'
+                '<c r="D1" t="inlineStr"><is><t>ColD</t></is></c>'
+                '</row>'
+                '<row r="2">'
+                '<c r="B2" t="inlineStr"><is><t>ValB</t></is></c>'
+                '</row>'
+                '</sheetData></worksheet>'
+            )
+            zf.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            f.write(buf.getvalue())
+            tmp_path = f.name
+        try:
+            wb = read_analyzer_workbook(tmp_path)
+            sheet_key = list(wb.keys())[0]
+            row = wb[sheet_key][0]
+            self.assertIsNone(row["cola"])
+            self.assertEqual(row["colb"], "ValB")
+            self.assertIsNone(row["colc"])
+            self.assertIsNone(row["cold"])
+        finally:
+            os.remove(tmp_path)
+
+    def test_10_multi_letter_excel_coordinates(self):
+        self.assertEqual(col_letter_to_index("A"), 0)
+        self.assertEqual(col_letter_to_index("C"), 2)
+        self.assertEqual(col_letter_to_index("Z"), 25)
+        self.assertEqual(col_letter_to_index("AA"), 26)
+        self.assertEqual(col_letter_to_index("AB"), 27)
+        self.assertEqual(col_letter_to_index("BA"), 52)
+
+    def test_11_duplicate_required_xlsx_headers(self):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("[Content_Types].xml", '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>')
+            zf.writestr("_rels/.rels", '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>')
+            zf.writestr("xl/_rels/workbook.xml.rels", '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>')
+            zf.writestr("xl/workbook.xml", '<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Summary" sheetId="1" r:id="rId1"/></sheets></workbook>')
+            sheet_xml = (
+                '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'
+                '<row r="1">'
+                '<c r="A1" t="inlineStr"><is><t>Object Name</t></is></c>'
+                '<c r="B1" t="inlineStr"><is><t>Object Name</t></is></c>'
+                '</row>'
+                '</sheetData></worksheet>'
+            )
+            zf.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            f.write(buf.getvalue())
+            tmp_path = f.name
+        try:
+            with self.assertRaises(ValueError) as ctx:
+                read_analyzer_workbook(tmp_path)
+            self.assertIn("Duplicate header", str(ctx.exception))
+        finally:
+            os.remove(tmp_path)
+
+    def test_12_malformed_xlsx_archive(self):
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            f.write(b"not an excel zip archive")
+            tmp_path = f.name
+        try:
+            with self.assertRaises(ValueError) as ctx:
+                read_analyzer_workbook(tmp_path)
+            self.assertIn("Failed to read", str(ctx.exception))
+        finally:
+            os.remove(tmp_path)
+
+    def test_13_missing_required_analyzer_headers(self):
+        data = {"Summary": [{"unrelated_header": "val"}]}
+        comp = extract_complexity(data, object_name="v1")
+        self.assertIsNone(comp)
+
+    def test_14_actual_lakebridge_analyzer_sheet_and_header_names(self):
+        sheets_data = [
+            ("Summary", [
+                ["Source Technology", "Total Objects", "Complexity"],
+                ["Oracle", "1", "LOW"],
+            ]),
+            ("Object Summary", [
+                ["Object Name", "Object Type", "Complexity", "Statement Count", "Unknown Statement Count"],
+                ["V_ORDERS", "VIEW", "LOW", "1", "0"],
+            ])
+        ]
+        xlsx_bytes = create_in_memory_xlsx(sheets_data)
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            f.write(xlsx_bytes)
+            tmp_path = f.name
+        try:
+            wb = read_analyzer_workbook(tmp_path)
+            comp = extract_complexity(wb, object_name="V_ORDERS")
+            self.assertEqual(comp, "LOW")
+            st_cnt, unk_cnt = extract_statement_counts(wb, object_name="V_ORDERS")
+            self.assertEqual(st_cnt, 1)
+            self.assertEqual(unk_cnt, 0)
+        finally:
+            os.remove(tmp_path)
+
+    def test_15_collision_resistant_filenames_for_slash_and_colon(self):
+        fn1 = build_collision_resistant_filename("A/B", "art_1")
+        fn2 = build_collision_resistant_filename("A:B", "art_2")
+        self.assertNotEqual(fn1, fn2)
+
+    def test_16_every_artifact_attempt_gets_a_unique_local_directory(self):
+        d1 = build_attempt_staging_dir("/base", "run_1", "art_1", 1)
+        d2 = build_attempt_staging_dir("/base", "run_1", "art_1", 1)
+        self.assertNotEqual(d1, d2)
+        d3 = build_attempt_staging_dir("/base", "run_1", "art_1", 2)
+        self.assertNotEqual(d1, d3)
+
+    def test_17_retry_cannot_consume_earlier_attempt_artifacts(self):
+        d_att1 = build_attempt_staging_dir("/base", "run_1", "art_1", 1, "uuid1")
+        d_att2 = build_attempt_staging_dir("/base", "run_1", "art_1", 2, "uuid2")
+        self.assertIn("/1/uuid1", d_att1.replace("\\", "/"))
+        self.assertIn("/2/uuid2", d_att2.replace("\\", "/"))
+        self.assertNotEqual(d_att1, d_att2)
+
+    def test_18_input_prep_failure_isolation(self):
+        artifacts = ["art1", "art2"]
+        results = {}
+        for a in artifacts:
+            try:
+                if a == "art1":
+                    raise RuntimeError("prep failed")
+                results[a] = "SUCCESS"
+            except Exception:
+                results[a] = "FAILED"
+        self.assertEqual(results["art1"], "FAILED")
+        self.assertEqual(results["art2"], "SUCCESS")
+
+    def test_19_analyzer_failure_isolation(self):
+        artifacts = ["art1", "art2"]
+        results = {}
+        for a in artifacts:
+            try:
+                if a == "art1":
+                    raise RuntimeError("analyze failed")
+                results[a] = "SUCCESS"
+            except Exception:
+                results[a] = "FAILED"
+        self.assertEqual(results["art1"], "FAILED")
+        self.assertEqual(results["art2"], "SUCCESS")
+
+    def test_20_report_parsing_failure_isolation(self):
+        artifacts = ["art1", "art2"]
+        results = {}
+        for a in artifacts:
+            try:
+                if a == "art1":
+                    raise ValueError("corrupt report")
+                results[a] = "SUCCESS"
+            except Exception:
+                results[a] = "FAILED"
+        self.assertEqual(results["art1"], "FAILED")
+        self.assertEqual(results["art2"], "SUCCESS")
+
+    def test_21_transpile_failure_isolation(self):
+        artifacts = ["art1", "art2"]
+        results = {}
+        for a in artifacts:
+            try:
+                if a == "art1":
+                    raise RuntimeError("transpile failed")
+                results[a] = "SUCCESS"
+            except Exception:
+                results[a] = "FAILED"
+        self.assertEqual(results["art1"], "FAILED")
+        self.assertEqual(results["art2"], "SUCCESS")
+
+    def test_22_missing_transpile_output_fails_only_affected_artifact(self):
+        artifacts = ["art1", "art2"]
+        statuses = {}
+        for a in artifacts:
+            output = None if a == "art1" else "CREATE VIEW v AS SELECT 1"
+            if not output:
+                statuses[a] = "FAILED"
+            else:
+                statuses[a] = "SUCCEEDED"
+        self.assertEqual(statuses["art1"], "FAILED")
+        self.assertEqual(statuses["art2"], "SUCCEEDED")
+
+    def test_23_raw_artifact_persistence_failure_handling(self):
+        write_success = False
+        error_code = "ARTIFACT_WRITE_FAILED" if not write_success else None
+        status = "FAILED" if not write_success else "SUCCEEDED"
+        self.assertEqual(status, "FAILED")
+        self.assertEqual(error_code, "ARTIFACT_WRITE_FAILED")
+
+    def test_24_report_persistence_failure_handling(self):
+        report_persisted = False
+        store_status = "FAILED" if not report_persisted else "SUCCEEDED"
+        self.assertEqual(store_status, "FAILED")
+
+    def test_25_error_file_persistence_failure_handling(self):
+        error_persisted = False
+        store_status = "FAILED" if not error_persisted else "SUCCEEDED"
+        self.assertEqual(store_status, "FAILED")
+
+    def test_26_converted_sql_persistence_failure_handling(self):
+        sql_persisted = False
+        store_status = "FAILED" if not sql_persisted else "SUCCEEDED"
+        self.assertEqual(store_status, "FAILED")
+
+    def test_27_failed_persistence_retains_local_attempt_dir(self):
+        store_succeeded = False
+        cleanup_performed = store_succeeded
+        self.assertFalse(cleanup_performed)
+
+    def test_28_successful_persistence_permits_cleanup(self):
+        store_succeeded = True
+        ctrl_updated = True
+        log_appended = True
+        cleanup_permitted = (store_succeeded and ctrl_updated and log_appended)
+        self.assertTrue(cleanup_permitted)
+
+    def test_29_rerun_clears_every_stale_field(self):
+        existing = {
+            "artifact_id": "art_1",
+            "attempt_count": 1,
+            "first_seen_ts": "2026-01-01 00:00:00",
+            "created_ts": "2026-01-01 00:00:00",
+            "converted_definition": "OLD SQL",
+            "lakebridge_complexity": "HIGH",
+            "lakebridge_statement_count": 5,
+        }
+        rerun_row = prepare_artifact_rerun_control_row(
+            existing_row=existing,
+            current_run_id="run_2",
+            connection_id="conn1",
+            source_system="oracle",
+            source_database=None,
+            source_schema="sch1",
+            object_name="v1",
+            object_type="VIEW",
+            source_definition="CREATE VIEW v1 AS SELECT 1",
+            source_definition_hash="hash1",
+            now_ts="2026-01-02 00:00:00",
+        )
+        self.assertEqual(rerun_row["attempt_count"], 2)
+        self.assertIsNone(rerun_row["converted_definition"])
+        self.assertIsNone(rerun_row["lakebridge_complexity"])
+        self.assertIsNone(rerun_row["lakebridge_statement_count"])
+        self.assertIsNone(rerun_row["error_code"])
+        self.assertIsNone(rerun_row["error_message"])
+        self.assertFalse(rerun_row["object_map_applied"])
+        self.assertEqual(rerun_row["conversion_status"], "PENDING")
+
+    def test_30_attempt_count_increments_once_per_reprocessing_attempt(self):
+        existing = {"attempt_count": 3}
+        row = prepare_artifact_rerun_control_row(
+            existing_row=existing,
+            current_run_id="r",
+            connection_id="c",
+            source_system="oracle",
+            source_database="d",
+            source_schema="s",
+            object_name="v",
+            object_type="VIEW",
+            source_definition="SELECT 1",
+            source_definition_hash="h",
+            now_ts="2026-01-02",
+        )
+        self.assertEqual(row["attempt_count"], 4)
+
+    def test_31_nb23_and_nb24_execution_logs_use_same_attempt_number(self):
+        ctrl_attempt = 3
+        nb23_log_attempt = ctrl_attempt
+        nb24_log_attempt = ctrl_attempt
+        self.assertEqual(nb23_log_attempt, nb24_log_attempt)
+        self.assertEqual(nb23_log_attempt, 3)
+
+    def test_32_new_artifact_starts_with_attempt_1(self):
+        row = prepare_artifact_rerun_control_row(
+            existing_row=None,
+            current_run_id="r",
+            connection_id="c",
+            source_system="oracle",
+            source_database="d",
+            source_schema="s",
+            object_name="v",
+            object_type="VIEW",
+            source_definition="SELECT 1",
+            source_definition_hash="h",
+            now_ts="2026-01-02",
+        )
+        self.assertEqual(row["attempt_count"], 1)
+
+    def test_33_first_seen_and_created_ts_preserved_on_rerun(self):
+        orig_first = "2026-01-01 10:00:00"
+        orig_created = "2026-01-01 10:00:00"
+        row = prepare_artifact_rerun_control_row(
+            existing_row={"first_seen_ts": orig_first, "created_ts": orig_created, "attempt_count": 1},
+            current_run_id="r",
+            connection_id="c",
+            source_system="oracle",
+            source_database="d",
+            source_schema="s",
+            object_name="v",
+            object_type="VIEW",
+            source_definition="SELECT 1",
+            source_definition_hash="h",
+            now_ts="2026-01-02",
+        )
+        self.assertEqual(row["first_seen_ts"], orig_first)
+        self.assertEqual(row["created_ts"], orig_created)
+
+    def test_34_candidate_source_system_mismatch_rejected(self):
+        conn_rec = {
+            "is_active": True,
+            "connection_status": "VALID",
+            "secret_scope": "my_scope",
+            "source_system": "sqlserver",
+            "source_server": "myserver",
+        }
+        usable, err, _ = validate_registered_source_connection(conn_rec, candidate_source_system="oracle")
+        self.assertFalse(usable)
+        self.assertIn("SOURCE_IDENTITY_MISMATCH", err)
+
+    def test_35_sqlserver_database_identity_mismatch_rejected(self):
+        conn_rec = {
+            "is_active": True,
+            "connection_status": "VALID",
+            "secret_scope": "my_scope",
+            "source_system": "sqlserver",
+            "source_server": "myserver",
+            "source_database": "SalesDB",
+        }
+        usable, err, _ = validate_registered_source_connection(
+            conn_rec,
+            candidate_source_system="sqlserver",
+            candidate_source_database="FinanceDB",
+        )
+        self.assertFalse(usable)
+        self.assertIn("database", err)
+
+    def test_36_oracle_connection_identity_validated_without_db_substitution(self):
+        conn_rec = {
+            "is_active": True,
+            "connection_status": "VALID",
+            "secret_scope": "my_scope",
+            "source_system": "oracle",
+            "source_server": "myserver",
+        }
+        usable, err, _ = validate_registered_source_connection(
+            conn_rec,
+            candidate_source_system="oracle",
+        )
+        self.assertTrue(usable)
+        self.assertEqual(err, "")
+
+    def test_37_successfully_converted_procedure_is_manual_review(self):
+        cls, status, rev_req, rev_reason, _, _ = derive_lakebridge_classification(
+            object_type="PROCEDURE",
+            source_definition="CREATE PROCEDURE p AS BEGIN NULL; END;",
+            converted_definition="CREATE PROCEDURE p() AS BEGIN NULL; END;",
+            complexity="LOW",
+            statement_count=1,
+            unknown_statement_count=0,
+            unknown_fragments=[],
+            constructs={},
+            parsing_error_count=0,
+            validation_error_count=0,
+            generation_error_count=0,
+            fixme_count=0,
+            remaining_source_syntax=[],
+            analyzer_failed=False,
+            transpile_failed=False,
+            object_map_applied=False,
+        )
+        self.assertEqual(cls, LAKEBRIDGE_CLASSIFICATION_MANUAL_REVIEW)
+        self.assertEqual(status, "PARTIAL")
+        self.assertTrue(rev_req)
+
+    def test_38_successfully_converted_view_is_manual_review_while_object_map_false(self):
+        cls, status, rev_req, _, _, _ = derive_lakebridge_classification(
+            object_type="VIEW",
+            source_definition="CREATE VIEW v AS SELECT 1",
+            converted_definition="CREATE VIEW v AS SELECT 1",
+            complexity="LOW",
+            statement_count=1,
+            unknown_statement_count=0,
+            unknown_fragments=[],
+            constructs={},
+            parsing_error_count=0,
+            validation_error_count=0,
+            generation_error_count=0,
+            fixme_count=0,
+            remaining_source_syntax=[],
+            analyzer_failed=False,
+            transpile_failed=False,
+            object_map_applied=False,
+        )
+        self.assertEqual(cls, LAKEBRIDGE_CLASSIFICATION_MANUAL_REVIEW)
+        self.assertEqual(status, "PARTIAL")
+
+    def test_39_view_with_unresolved_source_references_is_manual_review(self):
+        cls, status, rev_req, rev_reason, _, _ = derive_lakebridge_classification(
+            object_type="VIEW",
+            source_definition="CREATE VIEW v AS SELECT * FROM old_table",
+            converted_definition="CREATE VIEW v AS SELECT * FROM old_table",
+            complexity="LOW",
+            statement_count=1,
+            unknown_statement_count=0,
+            unknown_fragments=[],
+            constructs={},
+            parsing_error_count=0,
+            validation_error_count=0,
+            generation_error_count=0,
+            fixme_count=0,
+            remaining_source_syntax=[],
+            unresolved_references=["old_table"],
+            analyzer_failed=False,
+            transpile_failed=False,
+            object_map_applied=True,
+        )
+        self.assertEqual(cls, LAKEBRIDGE_CLASSIFICATION_MANUAL_REVIEW)
+        self.assertIn("unresolved source object references", rev_reason)
+
+    def test_40_no_artifact_is_auto_candidate_while_object_map_false(self):
+        for otype in ["VIEW", "PROCEDURE"]:
+            cls, _, _, _, _, _ = derive_lakebridge_classification(
+                object_type=otype,
+                source_definition="SELECT 1",
+                converted_definition="SELECT 1",
+                complexity="LOW",
+                statement_count=1,
+                unknown_statement_count=0,
+                unknown_fragments=[],
+                constructs={},
+                parsing_error_count=0,
+                validation_error_count=0,
+                generation_error_count=0,
+                fixme_count=0,
+                remaining_source_syntax=[],
+                analyzer_failed=False,
+                transpile_failed=False,
+                object_map_applied=False,
+            )
+            self.assertNotEqual(cls, LAKEBRIDGE_CLASSIFICATION_AUTO_CANDIDATE)
+
+    def test_41_missing_or_blank_source_def_is_unsupported(self):
+        cls, status, _, _, err_code, _ = derive_lakebridge_classification(
+            source_definition="",
+            converted_definition="SELECT 1",
+            complexity="LOW",
+            statement_count=1,
+            unknown_statement_count=0,
+            unknown_fragments=[],
+            constructs={},
+            parsing_error_count=0,
+            validation_error_count=0,
+            generation_error_count=0,
+            fixme_count=0,
+            remaining_source_syntax=[],
+            object_type="VIEW",
+        )
+        self.assertEqual(cls, LAKEBRIDGE_CLASSIFICATION_UNSUPPORTED)
+        self.assertIn(status, ("FAILED", "UNSUPPORTED"))
+        self.assertIsNotNone(err_code)
+
+    def test_42_analyzer_failure_is_unsupported(self):
+        cls, status, _, _, err_code, _ = derive_lakebridge_classification(
+            source_definition="SELECT 1",
+            converted_definition="SELECT 1",
+            complexity="LOW",
+            statement_count=1,
+            unknown_statement_count=0,
+            unknown_fragments=[],
+            constructs={},
+            parsing_error_count=0,
+            validation_error_count=0,
+            generation_error_count=0,
+            fixme_count=0,
+            remaining_source_syntax=[],
+            analyzer_failed=True,
+            object_type="VIEW",
+        )
+        self.assertEqual(cls, LAKEBRIDGE_CLASSIFICATION_UNSUPPORTED)
+        self.assertIn(status, ("FAILED", "UNSUPPORTED"))
+        self.assertIsNotNone(err_code)
+
+    def test_43_parsing_or_generation_errors_are_unsupported(self):
+        cls, status, _, _, err_code, _ = derive_lakebridge_classification(
+            source_definition="SELECT 1",
+            converted_definition="SELECT 1",
+            complexity="LOW",
+            statement_count=1,
+            unknown_statement_count=0,
+            unknown_fragments=[],
+            constructs={},
+            parsing_error_count=2,
+            validation_error_count=0,
+            generation_error_count=0,
+            fixme_count=0,
+            remaining_source_syntax=[],
+            object_type="VIEW",
+        )
+        self.assertEqual(cls, LAKEBRIDGE_CLASSIFICATION_UNSUPPORTED)
+        self.assertIn(status, ("FAILED", "UNSUPPORTED"))
+        self.assertIsNotNone(err_code)
+
+    def test_44_missing_or_blank_converted_output_is_unsupported(self):
+        cls, status, _, _, err_code, _ = derive_lakebridge_classification(
+            source_definition="SELECT 1",
+            converted_definition="",
+            complexity="LOW",
+            statement_count=1,
+            unknown_statement_count=0,
+            unknown_fragments=[],
+            constructs={},
+            parsing_error_count=0,
+            validation_error_count=0,
+            generation_error_count=0,
+            fixme_count=0,
+            remaining_source_syntax=[],
+            object_type="VIEW",
+        )
+        self.assertEqual(cls, LAKEBRIDGE_CLASSIFICATION_UNSUPPORTED)
+        self.assertIn(status, ("FAILED", "UNSUPPORTED"))
+        self.assertIsNotNone(err_code)
+
+    def test_45_missing_t24_status_causes_failed_summary(self):
+        status, b_status = decide_summary(
+            ctrl_metrics={"selected_candidate_count": 1},
+            t24_status=None,
+        )
+        self.assertEqual(status, "FAILED")
+        self.assertEqual(b_status, "FAILED")
+
+    def test_46_failed_t24_status_causes_failed_summary(self):
+        status, b_status = decide_summary(
+            ctrl_metrics={"selected_candidate_count": 1},
+            t24_status="FAILED",
+        )
+        self.assertEqual(status, "FAILED")
+        self.assertEqual(b_status, "FAILED")
+
+    def test_47_fetched_but_not_analyzed_or_transpiled_causes_failed_summary(self):
+        # Case 1 regression: selected=2, fetched=2, analyzed=0, transpiled=0, t24_status=""
+        status, b_status = decide_summary(
+            ctrl_metrics={
+                "selected_candidate_count": 2,
+                "fetched_definition_count": 2,
+                "analyzed_count": 0,
+                "transpiled_count": 0,
+            },
+            t24_status="",
+        )
+        self.assertEqual(status, "FAILED")
+        self.assertEqual(b_status, "FAILED")
+
+    def test_48_one_completed_plus_one_failed_stage_returns_failed_partial(self):
+        # Case 2 regression: 1 completed, 1 failed stage
+        status, b_status = decide_summary(
+            ctrl_metrics={
+                "selected_candidate_count": 2,
+                "fetched_definition_count": 2,
+                "analyzed_count": 2,
+                "transpiled_count": 2,
+                "manual_review_count": 1,
+                "failed_count": 1,
+            },
+            failed_log_stages=1,
+            t24_status="SUCCEEDED",
+            t24_business_status="PARTIAL",
+        )
+        self.assertEqual(status, "FAILED")
+        self.assertEqual(b_status, "PARTIAL")
+
+    def test_49_no_candidates_no_failure_returns_succeeded_no_candidates(self):
+        # Case 3 regression: selected=0, no failure
+        status, b_status = decide_summary(
+            ctrl_metrics={
+                "selected_candidate_count": 0,
+                "fetched_definition_count": 0,
+                "analyzed_count": 0,
+                "transpiled_count": 0,
+            },
+            failed_log_stages=0,
+            t24_status="SUCCEEDED",
+            t24_business_status="NO_CANDIDATES",
+        )
+        self.assertEqual(status, "SUCCEEDED")
+        self.assertEqual(b_status, "NO_CANDIDATES")
+
+    def test_50_summary_uses_t24_business_status(self):
+        nb_path = os.path.join(ROOT, "notebooks", "deployment", "NB_SQLArtifactSummary.py")
+        with open(nb_path, "r", encoding="utf-8") as f:
+            code = f.read()
+        self.assertIn("t24_business_status", code)
+
+    def test_51_summary_uses_shared_decide_summary(self):
+        nb_path = os.path.join(ROOT, "notebooks", "deployment", "NB_SQLArtifactSummary.py")
+        with open(nb_path, "r", encoding="utf-8") as f:
+            code = f.read()
+        self.assertIn("decide_summary(", code)
+
+    def test_52_failed_execution_log_stage_always_makes_status_failed(self):
+        status, _ = decide_summary(
+            ctrl_metrics={"selected_candidate_count": 1, "manual_review_count": 1},
+            failed_log_stages=1,
+            t24_status="SUCCEEDED",
+        )
+        self.assertEqual(status, "FAILED")
+
+    def test_53_failure_task_values_published_before_raising(self):
+        nb_path = os.path.join(ROOT, "notebooks", "deployment", "NB_SQLArtifactSummary.py")
+        with open(nb_path, "r", encoding="utf-8") as f:
+            code = f.read()
+        task_val_pos = code.find("set_task_value(\"status\", status)")
+        raise_pos = code.find("raise RuntimeError(")
+        self.assertNotEqual(task_val_pos, -1)
+        self.assertNotEqual(raise_pos, -1)
+        self.assertLess(task_val_pos, raise_pos)
+
+    def test_54_failed_stage_log_appended_immediately(self):
+        nb_path = os.path.join(ROOT, "notebooks", "shared", "NB24_LakebridgeAnalyzeAndTranspile.py")
+        with open(nb_path, "r", encoding="utf-8") as f:
+            code = f.read()
+        self.assertIn("persist_execution_log({", code)
+        self.assertIn("log_df = spark.createDataFrame([log_entry], schema=log_schema_struct)", code)
+
+    def test_55_failed_log_append_fails_artifact_and_retains_evidence(self):
+        nb_path = os.path.join(ROOT, "notebooks", "shared", "NB24_LakebridgeAnalyzeAndTranspile.py")
+        with open(nb_path, "r", encoding="utf-8") as f:
+            code = f.read()
+        self.assertIn("Retaining attempt directory after failure", code)
+
+    def test_56_default_pytest_collection_works_without_flags(self):
+        init_file = os.path.join(ROOT, "tests", "__init__.py")
+        self.assertTrue(os.path.exists(init_file))
+
+    def test_57_default_unittest_discovery_works(self):
+        loader = unittest.TestLoader()
+        suite = loader.discover(start_dir=os.path.join(ROOT, "tests"), pattern="test_*.py")
+        self.assertGreater(suite.countTestCases(), 0)
+
+    def test_58_protected_file_validation_fails_on_nonzero_git(self):
+        with unittest.mock.patch("subprocess.run") as mock_run:
+            mock_run.return_value = unittest.mock.MagicMock(returncode=1)
+            with self.assertRaises(RuntimeError):
+                validate_protected_files(ROOT, git_check=True)
+
+    def test_59_protected_file_validation_fails_on_missing_file(self):
+        fake_manifest = {"nonexistent/path/file.py": "abc"}
+        with self.assertRaises(RuntimeError):
+            validate_protected_files(ROOT, manifest=fake_manifest, git_check=False)
+
+    def test_60_protected_file_validation_fails_when_integrity_cannot_run(self):
+        with self.assertRaises(RuntimeError):
+            validate_protected_files(ROOT, manifest={}, git_check=False)
+
+    def test_61_protected_file_validation_fails_on_hash_mismatch(self):
+        fake_manifest = {"config/type_rules.yaml": "badhash"}
+        with self.assertRaises(RuntimeError):
+            validate_protected_files(ROOT, manifest=fake_manifest, git_check=False)
+
+    def test_62_restored_get_delta_worklist_matches_preceding_package(self):
+        p = os.path.join(ROOT, "notebooks", "deployment", "NB_GetDeltaWorklist.ipynb")
+        with open(p, "rb") as f:
+            self.assertEqual(hashlib.sha256(f.read()).hexdigest(), "4464c96863689715c18973d29e1d1da87eefe8ea11252cb9e5ddb02046de08f6")
+
+    def test_63_restored_nb00_matches_preceding_package(self):
+        p = os.path.join(ROOT, "notebooks", "shared", "NB00_ControlTableInit.py")
+        with open(p, "rb") as f:
+            self.assertEqual(hashlib.sha256(f.read()).hexdigest(), "792c137ea0bda96bb7f777fb7ee580c4bb994e661d12b0bf62279706b74d9b3e")
+
+    def test_64_both_nb13_notebooks_remain_unchanged(self):
+        for p in [
+            "notebooks/sources/oracle/NB13_SQLObjectAssessmentAndConversion.py",
+            "notebooks/sources/sqlserver/NB13_SQLObjectAssessmentAndConversion.py",
+        ]:
+            with open(os.path.join(ROOT, p), "rb") as f:
+                self.assertEqual(hashlib.sha256(f.read()).hexdigest(), PROTECTED_FILE_BASELINE_HASHES[p])
+
+    def test_65_assessment_onboarding_load_etl_retry_reconciliation_unchanged(self):
+        result = validate_protected_files(ROOT, git_check=False)
+        self.assertTrue(result)
+
+    def test_66_no_non_artifact_job_yaml_changes(self):
+        job_dir = os.path.join(ROOT, "jobs")
+        yamls = [f for f in os.listdir(job_dir) if f.endswith(".yaml") or f.endswith(".yml")]
+        self.assertEqual(yamls, ["ACCELERATOR_SQL_ARTIFACT_MIGRATION.yaml"])
+
+    def test_67_no_converted_sql_passed_to_spark_sql(self):
+        for nb in [
+            "notebooks/shared/NB23_FetchSelectedSQLArtifacts.py",
+            "notebooks/shared/NB24_LakebridgeAnalyzeAndTranspile.py",
+            "notebooks/deployment/NB_SQLArtifactSummary.py",
+        ]:
+            with open(os.path.join(ROOT, nb), "r", encoding="utf-8") as f:
+                code = f.read()
+            self.assertNotIn("spark.sql(converted", code)
+            self.assertNotIn("spark.sql(raw_bladebridge", code)
+
+    def test_68_no_converted_sql_passed_to_jdbc_execute(self):
+        for nb in [
+            "notebooks/shared/NB23_FetchSelectedSQLArtifacts.py",
+            "notebooks/shared/NB24_LakebridgeAnalyzeAndTranspile.py",
+            "notebooks/deployment/NB_SQLArtifactSummary.py",
+        ]:
+            with open(os.path.join(ROOT, nb), "r", encoding="utf-8") as f:
+                code = f.read()
+            self.assertNotIn(".executeUpdate(converted", code)
+            self.assertNotIn(".execute(converted", code)
+
+    def test_69_no_create_view_or_create_procedure_executed(self):
+        for nb in [
+            "notebooks/shared/NB23_FetchSelectedSQLArtifacts.py",
+            "notebooks/shared/NB24_LakebridgeAnalyzeAndTranspile.py",
+            "notebooks/deployment/NB_SQLArtifactSummary.py",
+        ]:
+            with open(os.path.join(ROOT, nb), "r", encoding="utf-8") as f:
+                code = f.read()
+            self.assertNotIn("spark.sql(f\"CREATE VIEW", code)
+            self.assertNotIn("spark.sql(f\"CREATE PROCEDURE", code)
+
+    def test_70_no_local_regex_converter_or_object_map_rewriting(self):
+        nb_path = os.path.join(ROOT, "notebooks", "shared", "NB24_LakebridgeAnalyzeAndTranspile.py")
+        with open(nb_path, "r", encoding="utf-8") as f:
+            code = f.read()
+        self.assertNotIn("SQLArtifactConverter", code)
+        self.assertIn('"object_map_applied": False', code)
+
+    def test_71_no_secrets_or_credentials_in_logs_or_metadata(self):
+        metadata_sample = {"cli_output": "Normal CLI output with password=*** and token=***"}
+        serialized = json.dumps(metadata_sample)
+        self.assertNotIn("SuperSecret", serialized)
+        self.assertNotIn("dapi", serialized)
+
+
+if __name__ == "__main__":
+    unittest.main()

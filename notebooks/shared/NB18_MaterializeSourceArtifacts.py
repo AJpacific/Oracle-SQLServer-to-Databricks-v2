@@ -24,6 +24,19 @@ try:
 except ModuleNotFoundError:
     import sql_object_artifact_common as sqlobj_art
 
+try:
+    from src.sql_artifact_control_common import is_connection_usable, resolve_target_catalog_and_schema
+    from src.sql_artifact_scope import build_candidate_query, validate_max_artifacts
+except ModuleNotFoundError:
+    try:
+        from sql_artifact_control_common import is_connection_usable, resolve_target_catalog_and_schema
+        from sql_artifact_scope import build_candidate_query, validate_max_artifacts
+    except ModuleNotFoundError:
+        is_connection_usable = None
+        resolve_target_catalog_and_schema = None
+        build_candidate_query = None
+        validate_max_artifacts = None
+
 INACCESSIBLE_DEFINITION_REASON = (
     "Source definition is unavailable, blank, encrypted, "
     "or not visible to the registered source principal."
@@ -89,66 +102,58 @@ def _ensure_widget(name, default):
 
 _ensure_widget("run_id", "")
 _ensure_widget("connection_id", "")
+_ensure_widget("source_database", "")
 _ensure_widget("catalog", "da_accelerators")
 _ensure_widget("control_schema", "control")
-_ensure_widget("only_source_system", "")
-_ensure_widget("only_assessment_id", "")
+_ensure_widget("max_artifacts", "0")
 _ensure_widget("volume_name", "_source_artifacts")
 
 run_id = dbutils.widgets.get("run_id").strip() or get_run_id()
+if not run_id:
+    raise ValueError("Blank run_id rejected: current run_id scope is required")
+
 connection_id = dbutils.widgets.get("connection_id").strip()
+source_database = dbutils.widgets.get("source_database").strip()
 catalog = dbutils.widgets.get("catalog").strip() or CATALOG
 control_schema = dbutils.widgets.get("control_schema").strip() or CONTROL_SCHEMA
-only_source_system = dbutils.widgets.get("only_source_system").strip()
-only_assessment_id = dbutils.widgets.get("only_assessment_id").strip()
 volume_name = dbutils.widgets.get("volume_name").strip() or sqlobj_art.DEFAULT_VOLUME_NAME
+max_artifacts = validate_max_artifacts(dbutils.widgets.get("max_artifacts").strip() if dbutils.widgets.get("max_artifacts") else None)
 
 repo = control_repo()
 
+source_assessment_fqn = f"{quote_databricks(catalog)}.{quote_databricks(control_schema)}.{quote_databricks('source_assessment')}"
 assessment_fqn = f"{quote_databricks(catalog)}.{quote_databricks(control_schema)}.{quote_databricks('sql_object_assessment')}"
 manifest_fqn = f"{quote_databricks(catalog)}.{quote_databricks(control_schema)}.{quote_databricks('sql_object_artifact_manifest')}"
 
-where_clauses = [
-    "upper(trim(replace(object_type, ' ', '_'))) IN ('VIEW', 'PROCEDURE', 'FUNCTION', 'PACKAGE', 'PACKAGE_BODY')"
-]
-
-if only_assessment_id:
-    where_clauses.append(f"assessment_id = {escape_string_literal(only_assessment_id)}")
-
-if connection_id:
-    where_clauses.append(f"connection_id = {escape_string_literal(connection_id)}")
-
-if only_source_system:
-    canonical_src = normalize_source_system(only_source_system)
-    where_clauses.append(f"lower(trim(source_system)) = {escape_string_literal(canonical_src)}")
-
-where_str = " AND ".join(where_clauses)
-if where_str:
-    where_str = "WHERE " + where_str
-
-candidate_query = f"""
-WITH ranked AS (
-    SELECT
-        assessment_id, run_id, connection_id, source_system, source_database,
-        source_schema, object_name, object_type, source_definition,
-        captured_ts, updated_ts,
-        ROW_NUMBER() OVER (
-            PARTITION BY connection_id, source_database, source_schema, object_type, object_name
-            ORDER BY captured_ts DESC NULLS LAST, updated_ts DESC NULLS LAST,
-                     assessment_id DESC, run_id DESC
-        ) AS rn
-    FROM {assessment_fqn}
-    {where_str}
+candidate_query = build_candidate_query(
+    source_assessment_fqn=source_assessment_fqn,
+    sql_object_assessment_fqn=assessment_fqn,
+    connection_id=connection_id,
+    source_database=source_database,
+    max_artifacts=max_artifacts,
 )
-SELECT assessment_id, run_id, connection_id, source_system, source_database,
-       source_schema, object_name, object_type, source_definition,
-       captured_ts, updated_ts
-FROM ranked
-WHERE rn = 1
-"""
 
 raw_candidates = spark.sql(candidate_query).collect()
 candidates = [_row_to_dict(r) for r in raw_candidates]
+if max_artifacts and max_artifacts > 0:
+    candidates = candidates[:max_artifacts]
+
+# Filter out candidates from unusable connections without raising or opening JDBC
+discovered_conn_ids = sorted(list({c.get("connection_id") for c in candidates if c.get("connection_id")}))
+usable_connections = {}
+for cid in discovered_conn_ids:
+    try:
+        crec = repo.get_connection(cid) if hasattr(repo, "get_connection") else None
+        if not crec:
+            usable_connections[cid] = (False, f"Connection {cid} not found")
+        else:
+            cd_d = crec.asDict() if hasattr(crec, "asDict") else dict(crec)
+            usable, reason = is_connection_usable(cd_d) if is_connection_usable else (True, "")
+            usable_connections[cid] = (usable, reason)
+    except Exception as e:
+        raise e
+
+candidates = [c for c in candidates if usable_connections.get(c.get("connection_id"), (True, ""))[0]]
 
 raw_manifest = spark.sql(f"SELECT * FROM {manifest_fqn}").collect()
 existing_manifest_rows = [_row_to_dict(r) for r in raw_manifest]
@@ -157,20 +162,71 @@ existing_manifest_by_owner = {}
 existing_paths_to_owner = {}
 duplicate_manifest_owners = set()
 
+seen_manifest_owners = set()
 for r in existing_manifest_rows:
     owner = sqlobj_art.artifact_owner_key(r)
-    if owner in existing_manifest_by_owner:
+    if owner in seen_manifest_owners:
         duplicate_manifest_owners.add(owner)
+    seen_manifest_owners.add(owner)
     existing_manifest_by_owner[owner] = r
+
+    legacy_owner = (r.get("connection_id"), r.get("source_schema"), sqlobj_art.normalize_object_type(r.get("object_type")), r.get("object_name"))
+    if legacy_owner != owner:
+        if legacy_owner in existing_manifest_by_owner:
+            duplicate_manifest_owners.add(legacy_owner)
+        else:
+            existing_manifest_by_owner[legacy_owner] = r
+
     path = r.get("artifact_path")
     if path:
         existing_paths_to_owner.setdefault(path, set()).add(owner)
+        if legacy_owner != owner:
+            existing_paths_to_owner[path].add(legacy_owner)
+
+# Precompute paths and detect same-run collisions before performing any write
+candidate_target_paths = {}
+same_run_colliding_paths = set()
+path_to_distinct_owners = {}
+current_run_claimed_paths = set()
+
+for r in candidates:
+    try:
+        c_conn = r.get("connection_id")
+        c_sys = r.get("source_system")
+        c_db = r.get("source_database")
+        c_sch = r.get("source_schema")
+        c_name = r.get("object_name")
+        c_type = sqlobj_art.normalize_object_type(r.get("object_type"))
+        c_owner = sqlobj_art.artifact_owner_key(r)
+
+        c_cfg = repo.resolve_target_config(c_conn)
+        c_cat, c_target_sch = resolve_target_catalog_and_schema(c_cfg, c_db, c_sch)
+
+        c_rel = sqlobj_art.build_artifact_relative_path(
+            connection_id=c_conn,
+            source_system=c_sys,
+            source_database=c_db,
+            source_schema=c_sch,
+            object_type=c_type,
+            object_name=c_name,
+        )
+        c_vol = sqlobj_art.build_artifact_volume_path(c_cat, c_target_sch, volume_name, c_rel)
+        candidate_target_paths[c_owner] = (c_vol, c_rel, c_cat, c_target_sch)
+        path_to_distinct_owners.setdefault(c_vol, set()).add(c_owner)
+    except Exception:
+        pass
+
+for p_vol, p_owners in path_to_distinct_owners.items():
+    if len(p_owners) > 1:
+        same_run_colliding_paths.add(p_vol)
 
 discovered_count = 0
 materialized_count = 0
 updated_count = 0
 unchanged_count = 0
+repaired_count = 0
 skipped_count = 0
+skipped_missing_def_count = 0
 failed_count = 0
 errors = []
 manifest_updates = []
@@ -465,7 +521,11 @@ for row in candidates:
 
     owner = sqlobj_art.artifact_owner_key(row)
     legacy_owner = (conn_id, source_sch, norm_type, obj_name)
-    existing_rec = existing_manifest_by_owner.get(owner) or existing_manifest_by_owner.get(legacy_owner)
+    if source_db and str(source_db).strip() and source_sys == "sqlserver":
+        # Complete database-qualified owner key only; never fall back to legacy database-less key for SQL Server
+        existing_rec = existing_manifest_by_owner.get(owner)
+    else:
+        existing_rec = existing_manifest_by_owner.get(owner) or existing_manifest_by_owner.get(legacy_owner)
     prev_created_ts = existing_rec.get("created_ts") if existing_rec else None
 
     # Fail fast if another active run is currently materializing this owner:
@@ -482,17 +542,22 @@ for row in candidates:
     source_def = row.get("source_definition")
     if source_def is None or not str(source_def).strip():
         skipped_count += 1
+        skipped_missing_def_count += 1
         _append_manifest_result(
             row=row,
             object_type=norm_type,
             materialization_status="UNABLE_TO_MATERIALIZE",
-            error_message=INACCESSIBLE_DEFINITION_REASON,
+            error_message="DEFINITION_MISSING: " + INACCESSIBLE_DEFINITION_REASON,
             target_volume=volume_name,
             created_ts=prev_created_ts,
         )
         continue
 
-    if owner in duplicate_manifest_owners:
+    is_duplicate = (owner in duplicate_manifest_owners)
+    if source_sys != "sqlserver":
+        is_duplicate = is_duplicate or (legacy_owner in duplicate_manifest_owners)
+
+    if is_duplicate:
         err_msg = f"DUPLICATE_MANIFEST_OWNERS: Duplicate manifest entry found for owner {owner}"
         errors.append(failcls.sanitize_message(err_msg)[:500])
         failed_count += 1
@@ -508,6 +573,7 @@ for row in candidates:
 
     try:
         target_cfg = repo.resolve_target_config(conn_id)
+        target_cat, target_sch = resolve_target_catalog_and_schema(target_cfg, source_db, source_sch)
     except Exception as e:
         err_msg = f"TARGET_CONFIG_ERROR: {failcls.sanitize_message(e)}"
         errors.append(err_msg[:500])
@@ -522,34 +588,14 @@ for row in candidates:
         )
         continue
 
-    target_cat = target_cfg.get("target_catalog")
-    target_mode = str(target_cfg.get("target_schema_mode") or "").upper().strip()
-    explicit_sch = target_cfg.get("target_schema")
-
-    if target_mode == "EXPLICIT":
-        if not explicit_sch or not explicit_sch.strip():
-            err_msg = "TARGET_CONFIG_ERROR: EXPLICIT target_schema_mode requires target_schema"
-            errors.append(err_msg[:500])
-            failed_count += 1
-            _append_manifest_result(
-                row=row,
-                object_type=norm_type,
-                materialization_status="TARGET_CONFIG_ERROR",
-                error_message=err_msg,
-                target_catalog=target_cat,
-                target_volume=volume_name,
-                created_ts=prev_created_ts,
-            )
-            continue
-        target_sch = explicit_sch.strip()
-    elif target_mode == "PREFIX_WITH_DATABASE":
-        target_sch = f"{(source_db or '')}_{source_sch}".lower().strip("_")
-    else:
-        target_sch = source_sch.lower()
-
     try:
         rel_path = sqlobj_art.build_artifact_relative_path(
-            conn_id, source_sch, norm_type, obj_name, source_database=source_db
+            connection_id=conn_id,
+            source_system=source_sys,
+            source_database=source_db,
+            source_schema=source_sch,
+            object_type=norm_type,
+            object_name=obj_name,
         )
         vol_path = sqlobj_art.build_artifact_volume_path(target_cat, target_sch, volume_name, rel_path)
     except Exception as e:
@@ -568,8 +614,26 @@ for row in candidates:
         )
         continue
 
+    if vol_path in same_run_colliding_paths:
+        err_msg = f"ARTIFACT_PATH_COLLISION: path {vol_path} is claimed by multiple candidates in the same run"
+        errors.append(failcls.sanitize_message(err_msg)[:500])
+        failed_count += 1
+        _append_manifest_result(
+            row=row,
+            object_type=norm_type,
+            materialization_status="ARTIFACT_PATH_COLLISION",
+            error_message=err_msg,
+            target_catalog=target_cat,
+            target_schema=target_sch,
+            target_volume=volume_name,
+            artifact_path=vol_path,
+            created_ts=prev_created_ts,
+        )
+        continue
+
     owners_with_path = existing_paths_to_owner.get(vol_path, set())
-    if any(o != owner and o != legacy_owner for o in owners_with_path):
+    valid_owners = {owner} if (source_sys == "sqlserver" and source_db and str(source_db).strip()) else {owner, legacy_owner}
+    if any(o not in valid_owners for o in owners_with_path) or vol_path in current_run_claimed_paths:
         err_msg = f"ARTIFACT_PATH_COLLISION: path {vol_path} is already claimed by another owner"
         errors.append(failcls.sanitize_message(err_msg)[:500])
         failed_count += 1
@@ -587,6 +651,9 @@ for row in candidates:
         continue
 
     def_hash = sqlobj_art.definition_sha256(source_def)
+
+    is_unchanged = False
+    repair_reason = None
 
     if existing_rec:
         old_path = existing_rec.get("artifact_path")
@@ -612,8 +679,42 @@ for row in candidates:
             continue
 
         if old_hash == def_hash and old_status == "SUCCEEDED":
-            unchanged_count += 1
-            continue
+            if os.path.exists(vol_path):
+                if os.path.isdir(vol_path):
+                    err_msg = f"UNREADABLE_PATH: artifact path {vol_path} is a directory"
+                    errors.append(failcls.sanitize_message(err_msg)[:500])
+                    failed_count += 1
+                    _append_manifest_result(
+                        row=row,
+                        object_type=norm_type,
+                        materialization_status="FAILED",
+                        error_message=err_msg,
+                        target_catalog=target_cat,
+                        target_schema=target_sch,
+                        target_volume=volume_name,
+                        artifact_path=vol_path,
+                        source_definition_hash=def_hash,
+                        created_ts=prev_created_ts,
+                    )
+                    continue
+                try:
+                    with open(vol_path, "r", encoding="utf-8") as f:
+                        disk_content = f.read()
+                    disk_hash = sqlobj_art.definition_sha256(disk_content)
+                    if disk_hash == def_hash:
+                        is_unchanged = True
+                    else:
+                        repair_reason = "REPAIRED_HASH_MISMATCH"
+                except Exception:
+                    repair_reason = "REPAIRED_HASH_MISMATCH"
+            else:
+                repair_reason = "REPAIRED_MISSING"
+
+    if is_unchanged:
+        unchanged_count += 1
+        current_run_claimed_paths.add(vol_path)
+        existing_paths_to_owner.setdefault(vol_path, set()).add(owner)
+        continue
 
     # Attempt conditional IN_PROGRESS claim and verify ownership before mutating filesystem
     claimed, claim_err, reread_rec = _claim_manifest_owner(
@@ -632,7 +733,10 @@ for row in candidates:
         continue
 
     existing_manifest_by_owner[owner] = reread_rec
-    existing_manifest_by_owner[legacy_owner] = reread_rec
+    if not (source_db and str(source_db).strip()):
+        existing_manifest_by_owner[(conn_id, source_sch, norm_type, obj_name)] = reread_rec
+    current_run_claimed_paths.add(vol_path)
+    existing_paths_to_owner.setdefault(vol_path, set()).add(owner)
 
     try:
         spark.sql(ddl.build_create_schema(target_cat, target_sch))
@@ -716,7 +820,9 @@ for row in candidates:
         "updated_ts": now_utc(),
     }
     if _finalize_claimed_owner(success_res):
-        if existing_rec:
+        if repair_reason:
+            repaired_count += 1
+        elif existing_rec:
             updated_count += 1
         else:
             materialized_count += 1
@@ -732,6 +838,8 @@ elif failed_count > 0 and (materialized_count > 0 or updated_count > 0 or unchan
     business_status = "PARTIAL"
 elif failed_count > 0:
     business_status = "FAILED"
+elif skipped_missing_def_count > 0:
+    business_status = "PARTIAL"
 else:
     business_status = "COMPLETE"
 
@@ -744,6 +852,7 @@ set_task_value("discovered_count", int(discovered_count))
 set_task_value("materialized_count", int(materialized_count))
 set_task_value("updated_count", int(updated_count))
 set_task_value("unchanged_count", int(unchanged_count))
+set_task_value("repaired_count", int(repaired_count))
 set_task_value("skipped_count", int(skipped_count))
 set_task_value("failed_count", int(failed_count))
 
@@ -755,6 +864,7 @@ result_payload = {
     "materialized_count": int(materialized_count),
     "updated_count": int(updated_count),
     "unchanged_count": int(unchanged_count),
+    "repaired_count": int(repaired_count),
     "skipped_count": int(skipped_count),
     "failed_count": int(failed_count),
     "errors": errors[:20],
@@ -763,7 +873,7 @@ result_payload = {
 print(f"NB18 complete: status={status}, business_status={business_status}, "
       f"discovered={discovered_count}, materialized={materialized_count}, "
       f"updated={updated_count}, unchanged={unchanged_count}, "
-      f"skipped={skipped_count}, failed={failed_count}")
+      f"repaired={repaired_count}, skipped={skipped_count}, failed={failed_count}")
 
 if failed_count > 0:
     raise RuntimeError(f"NB18 materialization failed with {failed_count} error(s)")

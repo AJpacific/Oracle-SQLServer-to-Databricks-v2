@@ -40,15 +40,19 @@ dbutils.widgets.text("control_schema", "control")
 dbutils.widgets.text("max_connections", "0")
 dbutils.widgets.text("only_connection_ids", "")
 dbutils.widgets.text("exclude_connection_ids", "")
+dbutils.widgets.text("only_source_system", "")
 
 run_id = dbutils.widgets.get("run_id").strip() or get_run_id()
 catalog = dbutils.widgets.get("catalog").strip() or CATALOG
 control_schema = dbutils.widgets.get("control_schema").strip() or CONTROL_SCHEMA
+only_source_system = dbutils.widgets.get("only_source_system").strip().lower()
 
 if not run_id:
     raise ValueError("run_id is required")
 if not catalog or not control_schema:
     raise ValueError("catalog and control_schema are required")
+if only_source_system and only_source_system not in ("oracle", "sqlserver"):
+    raise ValueError(f"Invalid only_source_system '{only_source_system}'. Expected 'oracle', 'sqlserver', or blank.")
 
 try:
     max_connections = int(dbutils.widgets.get("max_connections").strip() or "0")
@@ -87,6 +91,9 @@ eligible = (
     .filter(F.coalesce(F.col("sc.is_active"), F.lit(False)) == F.lit(True))
     .filter(F.upper(F.trim(F.col("sc.connection_status"))) == F.lit("VALID"))
 )
+
+if only_source_system and only_source_system != SOURCE_SYSTEM:
+    eligible = eligible.filter(F.lit(False))
 
 if raw_only and not clean_only:
     eligible = eligible.filter(F.lit(False))

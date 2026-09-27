@@ -27,6 +27,28 @@ test_sizes_aggregated_once_before_join (test_assessment.TestSqlServerDiscovery.t
 test_system_schemas_excluded (test_assessment.TestSqlServerDiscovery.test_system_schemas_excluded) ... ok
 test_table_statistics_not_labelled_exact (test_assessment.TestSqlServerDiscovery.test_table_statistics_not_labelled_exact) ... ok
 test_zero_allocation_tables_are_not_null (test_assessment.TestSqlServerDiscovery.test_zero_allocation_tables_are_not_null) ... ok
+test_01_inactive_parent_plus_active_child_passes_nb00 (test_connection_kill_switch.TestConnectionKillSwitch.test_01_inactive_parent_plus_active_child_passes_nb00) ... ok
+test_02_inactive_parent_excluded_from_sqlserver_configured_worklist (test_connection_kill_switch.TestConnectionKillSwitch.test_02_inactive_parent_excluded_from_sqlserver_configured_worklist) ... ok
+test_03_inactive_parent_excluded_from_sqlserver_valid_worklist (test_connection_kill_switch.TestConnectionKillSwitch.test_03_inactive_parent_excluded_from_sqlserver_valid_worklist) ... ok
+test_04_inactive_parent_excluded_from_oracle_configured_and_valid_worklists (test_connection_kill_switch.TestConnectionKillSwitch.test_04_inactive_parent_excluded_from_oracle_configured_and_valid_worklists) ... ok
+test_05_inactive_parent_excluded_from_assessment_database_discovery (test_connection_kill_switch.TestConnectionKillSwitch.test_05_inactive_parent_excluded_from_assessment_database_discovery) ... ok
+test_06_inactive_parent_excluded_from_registered_connection_worklist (test_connection_kill_switch.TestConnectionKillSwitch.test_06_inactive_parent_excluded_from_registered_connection_worklist) ... ok
+test_07_inactive_parent_excluded_from_selected_assessment_worklist (test_connection_kill_switch.TestConnectionKillSwitch.test_07_inactive_parent_excluded_from_selected_assessment_worklist) ... ok
+test_08_inactive_parent_excluded_from_full_load_worklist (test_connection_kill_switch.TestConnectionKillSwitch.test_08_inactive_parent_excluded_from_full_load_worklist) ... ok
+test_09_inactive_parent_excluded_from_delta_preparation_and_worklists (test_connection_kill_switch.TestConnectionKillSwitch.test_09_inactive_parent_excluded_from_delta_preparation_and_worklists) ... ok
+test_10_direct_full_load_rejects_inactive_parent_before_source_access (test_connection_kill_switch.TestConnectionKillSwitch.test_10_direct_full_load_rejects_inactive_parent_before_source_access) ... ok
+test_11_direct_delta_rejects_inactive_parent_before_source_access (test_connection_kill_switch.TestConnectionKillSwitch.test_11_direct_delta_rejects_inactive_parent_before_source_access) ... ok
+test_12_sql_object_assessment_rejects_inactive_parent_before_source_access (test_connection_kill_switch.TestConnectionKillSwitch.test_12_sql_object_assessment_rejects_inactive_parent_before_source_access) ... ok
+test_13_artifact_materialization_does_not_initiate_fresh_source_access (test_connection_kill_switch.TestConnectionKillSwitch.test_13_artifact_materialization_does_not_initiate_fresh_source_access) ... ok
+test_14_retry_execution_cannot_access_source_through_inactive_parent (test_connection_kill_switch.TestConnectionKillSwitch.test_14_retry_execution_cannot_access_source_through_inactive_parent) ... ok
+test_15_inactive_parent_does_not_require_changing_child_is_active (test_connection_kill_switch.TestConnectionKillSwitch.test_15_inactive_parent_does_not_require_changing_child_is_active) ... ok
+test_16_reactivating_connection_restores_eligibility_without_recreating_registrations (test_connection_kill_switch.TestConnectionKillSwitch.test_16_reactivating_connection_restores_eligibility_without_recreating_registrations) ... ok
+test_17_active_parent_valid_passes_initialization (test_connection_kill_switch.TestConnectionKillSwitch.test_17_active_parent_valid_passes_initialization) ... ok
+test_18_active_parent_non_valid_status_flags_active_child (test_connection_kill_switch.TestConnectionKillSwitch.test_18_active_parent_non_valid_status_flags_active_child) ... ok
+test_19_active_parent_blank_secret_scope_fails (test_connection_kill_switch.TestConnectionKillSwitch.test_19_active_parent_blank_secret_scope_fails) ... ok
+test_20_orphan_child_registration_still_fails (test_connection_kill_switch.TestConnectionKillSwitch.test_20_orphan_child_registration_still_fails) ... ok
+test_21_source_system_and_endpoint_mismatches_still_fail (test_connection_kill_switch.TestConnectionKillSwitch.test_21_source_system_and_endpoint_mismatches_still_fail) ... ok
+test_22_duplicate_ownership_and_identity_v2_remain_unchanged (test_connection_kill_switch.TestConnectionKillSwitch.test_22_duplicate_ownership_and_identity_v2_remain_unchanged) ... ok
 test_invalid_source_system_fails (test_connection_registry.TestConnectionInput.test_invalid_source_system_fails) ... ok
 test_missing_required_fields_fail (test_connection_registry.TestConnectionInput.test_missing_required_fields_fail) ... ok
 test_missing_source_system_fails (test_connection_registry.TestConnectionInput.test_missing_source_system_fails) ... ok
@@ -248,6 +270,300 @@ test_blank_input_fails_before_sql (test_failure_retry.TestSqlSafety.test_blank_i
 test_independent_escaping_and_filter_format (test_failure_retry.TestSqlSafety.test_independent_escaping_and_filter_format) ... ok
 test_no_raw_widget_interpolation (test_failure_retry.TestSqlSafety.test_no_raw_widget_interpolation) ... ok
 test_twenty_one_ids_fail_before_sql (test_failure_retry.TestSqlSafety.test_twenty_one_ids_fail_before_sql) ... ok
+test_item01_nb22_never_executes_converted_sql_and_only_creates_schema_for_volume (test_final_blockers.TestConvertAndStorePipelineRequirements.test_item01_nb22_never_executes_converted_sql_and_only_creates_schema_for_volume)
+Item 1: NB22 removes every spark.sql call executing converted SQL; CREATE SCHEMA is used only for volume. ... ok
+test_item02_nb22_converts_stores_volume_atomic_not_deployed (test_final_blockers.TestConvertAndStorePipelineRequirements.test_item02_nb22_converts_stores_volume_atomic_not_deployed)
+Item 2: NB22 converts, writes .sql atomic file to volume, deployment_status=NOT_DEPLOYED. ... ok
+test_item02_nb22_write_failure_records_failed_and_partial_business_status (test_final_blockers.TestConvertAndStorePipelineRequirements.test_item02_nb22_write_failure_records_failed_and_partial_business_status)
+NB22: If writing converted .sql file fails, count row as FAILED (error_code ARTIFACT_WRITE_FAILED), keep converted text, business_status PARTIAL. ... ok
+test_item03_nb22_removed_ownership_and_deploy_retains_dedup (test_final_blockers.TestConvertAndStorePipelineRequirements.test_item03_nb22_removed_ownership_and_deploy_retains_dedup)
+Item 3: NB22 removed ownership and deploy logic, retains compute_artifact_id and same-run dedup. ... ok
+test_item04_docs_reflect_convert_and_store_only (test_final_blockers.TestConvertAndStorePipelineRequirements.test_item04_docs_reflect_convert_and_store_only)
+Item 4: Docs: say 'converts, classifies, and stores; does not deploy and does not connect to source databases'. ... ok
+test_item05_candidate_selection_driven_and_validations (test_final_blockers.TestConvertAndStorePipelineRequirements.test_item05_candidate_selection_driven_and_validations)
+Item 5: Selection-driven candidates, join on run_id, validations, definition missing, unusable connection. ... [_common] src location: D:\Visual Studio Code\Oracle-SQLServer-to-Databricks-v2\src
+[_common] bootstrap complete. CATALOG=dummy CONTROL_SCHEMA=dummy
+Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
+Distinct failed operations: 2
+Retry worklist: 2; manual review: 0
+Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
+Distinct failed operations: 2
+Retry worklist: 1; manual review: 1
+  MANUAL_REVIEW parent_run_id=run-a connection_id=c1 source_table_id=t1 operation=FULL_LOAD reason=MAX_RETRIES_REACHED
+Selecting retries for INGEST runs ['run-a', 'run-b', 'run-c']; child run_id=retry_001
+Distinct failed operations: 3
+Retry worklist: 3; manual review: 0
+Selecting retries for INGEST runs ['run-a', 'run-b', 'run-c']; child run_id=retry_001
+Distinct failed operations: 3
+Retry worklist: 3; manual review: 0
+Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
+Distinct failed operations: 2
+Retry worklist: 2; manual review: 0
+Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
+Distinct failed operations: 2
+Retry worklist: 2; manual review: 0
+Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
+Distinct failed operations: 2
+Retry worklist: 1; manual review: 1
+  MANUAL_REVIEW parent_run_id=run-a connection_id=c1 source_table_id=t1 operation=FULL_LOAD reason=MAX_RETRIES_REACHED
+Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
+Distinct failed operations: 2
+Retry worklist: 0; manual review: 2
+  MANUAL_REVIEW parent_run_id=run-a connection_id=c1 source_table_id=t1 operation=FULL_LOAD reason=MAX_RETRIES_REACHED
+  MANUAL_REVIEW parent_run_id=run-b connection_id=c1 source_table_id=t1 operation=FULL_LOAD reason=MAX_RETRIES_REACHED
+Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
+Distinct failed operations: 2
+Retry worklist: 2; manual review: 0
+Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
+Distinct failed operations: 2
+Retry worklist: 2; manual review: 0
+Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
+Distinct failed operations: 0
+Retry worklist: 0; manual review: 0
+Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
+Distinct failed operations: 2
+Retry worklist: 2; manual review: 0
+Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
+Distinct failed operations: 2
+Retry worklist: 1; manual review: 1
+  MANUAL_REVIEW parent_run_id=run-b connection_id=c2 source_table_id=t2 operation=FULL_LOAD reason=MAX_RETRIES_REACHED
+Selecting retries for INGEST runs ['run-a', 'run-b', 'run-c']; child run_id=retry_001
+Distinct failed operations: 2
+Retry worklist: 2; manual review: 0
+Selecting retries for INGEST runs ['run-a', "run'oops"]; child run_id=retry_001
+Distinct failed operations: 0
+Retry worklist: 0; manual review: 0
+Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
+Distinct failed operations: 0
+Retry worklist: 0; manual review: 0
+Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
+Distinct failed operations: 0
+Retry worklist: 0; manual review: 0
+=== Starting SQL Artifact Migration run_id=run-test-22 ===
+Control Catalog=da_accelerators, Control Schema=control
+Filter Connection='', Filter Database='', Max Artifacts=None
+Discovered 1 selected candidate artifact(s)
+Updated 1 record(s) in `da_accelerators`.`control`.`sql_artifact_control`
+Appended 1 log row(s) to `da_accelerators`.`control`.`sql_artifact_execution_log`
+Run Summary: {
+  "status": "SUCCEEDED",
+  "business_status": "COMPLETE",
+  "run_id": "run-test-22",
+  "total_candidates": 1,
+  "auto_count": 1,
+  "manual_review_count": 0,
+  "unsupported_count": 0,
+  "failed_count": 0,
+  "definition_missing_count": 0,
+  "artifact_write_failed_count": 0,
+  "skipped_duplicates_count": 0,
+  "skipped_connections_count": 0,
+  "classifications": {
+    "AUTO": 1,
+    "MANUAL_REVIEW": 0,
+    "UNSUPPORTED": 0
+  }
+}
+=== Starting SQL Artifact Migration run_id=run-test-22 ===
+Control Catalog=da_accelerators, Control Schema=control
+Filter Connection='', Filter Database='', Max Artifacts=None
+Discovered 2 selected candidate artifact(s)
+Updated 2 record(s) in `da_accelerators`.`control`.`sql_artifact_control`
+Appended 2 log row(s) to `da_accelerators`.`control`.`sql_artifact_execution_log`
+Run Summary: {
+  "status": "SUCCEEDED",
+  "business_status": "MANUAL_REVIEW_REQUIRED",
+  "run_id": "run-test-22",
+  "total_candidates": 2,
+  "auto_count": 1,
+  "manual_review_count": 1,
+  "unsupported_count": 0,
+  "failed_count": 0,
+  "definition_missing_count": 0,
+  "artifact_write_failed_count": 0,
+  "skipped_duplicates_count": 0,
+  "skipped_connections_count": 0,
+  "classifications": {
+    "AUTO": 1,
+    "MANUAL_REVIEW": 1,
+    "UNSUPPORTED": 0
+  }
+}
+=== Starting SQL Artifact Migration run_id=run-test-22 ===
+Control Catalog=da_accelerators, Control Schema=control
+Filter Connection='', Filter Database='', Max Artifacts=None
+Discovered 1 selected candidate artifact(s)
+Error: Failed to write converted artifact file: Simulated volume disk write I/O error
+Updated 1 record(s) in `da_accelerators`.`control`.`sql_artifact_control`
+Appended 1 log row(s) to `da_accelerators`.`control`.`sql_artifact_execution_log`
+Run Summary: {
+  "status": "SUCCEEDED",
+  "business_status": "PARTIAL",
+  "run_id": "run-test-22",
+  "total_candidates": 1,
+  "auto_count": 0,
+  "manual_review_count": 0,
+  "unsupported_count": 0,
+  "failed_count": 1,
+  "definition_missing_count": 0,
+  "artifact_write_failed_count": 1,
+  "skipped_duplicates_count": 0,
+  "skipped_connections_count": 0,
+  "classifications": {
+    "AUTO": 0,
+    "MANUAL_REVIEW": 0,
+    "UNSUPPORTED": 0
+  }
+}
+=== Starting SQL Artifact Migration run_id=run-test-22 ===
+Control Catalog=da_accelerators, Control Schema=control
+Filter Connection='', Filter Database='', Max Artifacts=None
+Discovered 2 selected candidate artifact(s)
+Updated 1 record(s) in `da_accelerators`.`control`.`sql_artifact_control`
+Appended 2 log row(s) to `da_accelerators`.`control`.`sql_artifact_execution_log`
+Run Summary: {
+  "status": "SUCCEEDED",
+  "business_status": "COMPLETE",
+  "run_id": "run-test-22",
+  "total_candidates": 2,
+  "auto_count": 1,
+  "manual_review_count": 0,
+  "unsupported_count": 0,
+  "failed_count": 0,
+  "definition_missing_count": 0,
+  "artifact_write_failed_count": 0,
+  "skipped_duplicates_count": 1,
+  "skipped_connections_count": 0,
+  "classifications": {
+    "AUTO": 1,
+    "MANUAL_REVIEW": 0,
+    "UNSUPPORTED": 0
+  }
+}
+=== Starting SQL Artifact Migration run_id=run-test-22 ===
+Control Catalog=da_accelerators, Control Schema=control
+Filter Connection='', Filter Database='', Max Artifacts=None
+Discovered 1 selected candidate artifact(s)
+Updated 1 record(s) in `da_accelerators`.`control`.`sql_artifact_control`
+Appended 1 log row(s) to `da_accelerators`.`control`.`sql_artifact_execution_log`
+Run Summary: {
+  "status": "SUCCEEDED",
+  "business_status": "PARTIAL",
+  "run_id": "run-test-22",
+  "total_candidates": 1,
+  "auto_count": 0,
+  "manual_review_count": 0,
+  "unsupported_count": 0,
+  "failed_count": 1,
+  "definition_missing_count": 1,
+  "artifact_write_failed_count": 0,
+  "skipped_duplicates_count": 0,
+  "skipped_connections_count": 0,
+  "classifications": {
+    "AUTO": 0,
+    "MANUAL_REVIEW": 0,
+    "UNSUPPORTED": 0
+  }
+}
+=== Starting SQL Artifact Migration run_id=run-test-22 ===
+Control Catalog=da_accelerators, Control Schema=control
+Filter Connection='', Filter Database='', Max Artifacts=None
+Discovered 1 selected candidate artifact(s)
+Appended 1 log row(s) to `da_accelerators`.`control`.`sql_artifact_execution_log`
+Run Summary: {
+  "status": "SUCCEEDED",
+  "business_status": "PARTIAL",
+  "run_id": "run-test-22",
+  "total_candidates": 1,
+  "auto_count": 0,
+  "manual_review_count": 0,
+  "unsupported_count": 0,
+  "failed_count": 0,
+  "definition_missing_count": 0,
+  "artifact_write_failed_count": 0,
+  "skipped_duplicates_count": 0,
+  "skipped_connections_count": 1,
+  "classifications": {
+    "AUTO": 0,
+    "MANUAL_REVIEW": 0,
+    "UNSUPPORTED": 0
+  }
+}ok
+test_item06_nb18_and_nb22_shared_candidate_query (test_final_blockers.TestConvertAndStorePipelineRequirements.test_item06_nb18_and_nb22_shared_candidate_query)
+Item 6: NB18 and NB22 use the same candidate query through shared helper in src/. ... ok
+test_item07_nb22_typing_imports (test_final_blockers.TestConvertAndStorePipelineRequirements.test_item07_nb22_typing_imports)
+Item 7: NB22 has 'from typing import Any, Dict, List, Optional, Tuple' fixing NameError. ... ok
+test_item08_oracle_view_wrapping (test_final_blockers.TestConvertAndStorePipelineRequirements.test_item08_oracle_view_wrapping)
+Item 8: Oracle views: wrap with CREATE OR REPLACE VIEW if not starting with CREATE. ... ok
+test_item09_converter_rules_code_spans_comment_mask_cte_comma_joins (test_final_blockers.TestConvertAndStorePipelineRequirements.test_item09_converter_rules_code_spans_comment_mask_cte_comma_joins)
+Item 9: Converter rules on CODE spans only, comment masking, CTE from masked code, comma-joins. ... ok
+test_item10_control_schema_and_merge_identity_version_2 (test_final_blockers.TestConvertAndStorePipelineRequirements.test_item10_control_schema_and_merge_identity_version_2)
+Item 10: NB22 control writes include identity_version = 2 and legacy_artifact_id. ... ok
+test_item11_plan_identity_migration_duplicate_old_aid_fails_closed (test_final_blockers.TestConvertAndStorePipelineRequirements.test_item11_plan_identity_migration_duplicate_old_aid_fails_closed)
+Item 11: plan_identity_migration: duplicate old artifact_id is a conflict; NB21 fails closed. ... ok
+test_item12_nb22_duplicate_historical_aid_raises (test_final_blockers.TestConvertAndStorePipelineRequirements.test_item12_nb22_duplicate_historical_aid_raises)
+Item 12: NB22 raises if historical control rows contain duplicate artifact_id. ... ok
+test_item13_build_object_map_source_db_and_conflict_dropping_and_stc_failure (test_final_blockers.TestConvertAndStorePipelineRequirements.test_item13_build_object_map_source_db_and_conflict_dropping_and_stc_failure)
+Item 13: build_object_map excludes blank-database rows when db given; drops conflicting 2-part keys; NB22 raises on STC failure. ... ok
+test_item14_shared_target_path_derivation (test_final_blockers.TestConvertAndStorePipelineRequirements.test_item14_shared_target_path_derivation)
+Item 14: NB18 and NB22 derive target catalog/schema with shared helper using normalize_target_identifier. ... ok
+test_item15_nb13_untouched (test_final_blockers.TestConvertAndStorePipelineRequirements.test_item15_nb13_untouched)
+Item 15: Do not change NB13 (Oracle or SQL Server). ... ok
+test_item16_yaml_task_graph (test_final_blockers.TestConvertAndStorePipelineRequirements.test_item16_yaml_task_graph)
+Item 16: YAML: exactly T00 -> T03 -> T04 -> T05 -> T06 with required dependencies and run_if. ... ok
+test_item17_yaml_parameters (test_final_blockers.TestConvertAndStorePipelineRequirements.test_item17_yaml_parameters)
+Item 17: YAML parameters: catalog, control_schema, connection_id, source_database, max_artifacts. ... ok
+test_item18_nb18_missing_definition_partial (test_final_blockers.TestConvertAndStorePipelineRequirements.test_item18_nb18_missing_definition_partial)
+Item 18: NB18: if any selected object was skipped for missing or blank definition, business_status = PARTIAL. ... ok
+test_item19_summary_notebook_t05_status_and_counts (test_final_blockers.TestConvertAndStorePipelineRequirements.test_item19_summary_notebook_t05_status_and_counts)
+Item 19: Summary: if T05's status is not SUCCEEDED, report FAILED and raise; report required counts. ... ok
+test_item20_no_jdbc_or_source_adapter_in_artifact_job (test_final_blockers.TestConvertAndStorePipelineRequirements.test_item20_no_jdbc_or_source_adapter_in_artifact_job)
+Item 20 Bullet: no JDBC or source adapter is created anywhere in the artifact job. ... ok
+test_alias_empty_has_no_soa_dot (test_final_blockers.TestDefect1CandidateWhereClauses.test_alias_empty_has_no_soa_dot) ... ok
+test_alias_soa_no_soa_dot_func_syntax (test_final_blockers.TestDefect1CandidateWhereClauses.test_alias_soa_no_soa_dot_func_syntax) ... ok
+test_alias_soa_qualifies_all_columns (test_final_blockers.TestDefect1CandidateWhereClauses.test_alias_soa_qualifies_all_columns) ... ok
+test_blank_run_id_raises_value_error (test_final_blockers.TestDefect1CandidateWhereClauses.test_blank_run_id_raises_value_error) ... ok
+test_run_id_always_present_when_not_global (test_final_blockers.TestDefect1CandidateWhereClauses.test_run_id_always_present_when_not_global) ... ok
+test_value_with_single_quote_escaped (test_final_blockers.TestDefect1CandidateWhereClauses.test_value_with_single_quote_escaped) ... ok
+test_casing_produces_different_ids (test_final_blockers.TestDefect2ArtifactIdentity.test_casing_produces_different_ids) ... ok
+test_docs_describe_v2_identity (test_final_blockers.TestDefect2ArtifactIdentity.test_docs_describe_v2_identity) ... ok
+test_missing_source_system_raises (test_final_blockers.TestDefect2ArtifactIdentity.test_missing_source_system_raises) ... ok
+test_oracle_source_database_none_and_empty_same_id (test_final_blockers.TestDefect2ArtifactIdentity.test_oracle_source_database_none_and_empty_same_id) ... ok
+test_plan_identity_migration_already_v2_row (test_final_blockers.TestDefect2ArtifactIdentity.test_plan_identity_migration_already_v2_row) ... ok
+test_plan_identity_migration_conflict_detected (test_final_blockers.TestDefect2ArtifactIdentity.test_plan_identity_migration_conflict_detected) ... ok
+test_plan_identity_migration_idempotent_on_output (test_final_blockers.TestDefect2ArtifactIdentity.test_plan_identity_migration_idempotent_on_output) ... ok
+test_plan_identity_migration_v1_row (test_final_blockers.TestDefect2ArtifactIdentity.test_plan_identity_migration_v1_row) ... ok
+test_same_inputs_twice_same_id (test_final_blockers.TestDefect2ArtifactIdentity.test_same_inputs_twice_same_id) ... ok
+test_build_object_map_excludes_inactive_and_not_loaded (test_final_blockers.TestDefect3AutoConversionTokenAwareAndObjectMap.test_build_object_map_excludes_inactive_and_not_loaded) ... ok
+test_build_object_map_excludes_other_connections (test_final_blockers.TestDefect3AutoConversionTokenAwareAndObjectMap.test_build_object_map_excludes_other_connections) ... ok
+test_comments_not_rewritten (test_final_blockers.TestDefect3AutoConversionTokenAwareAndObjectMap.test_comments_not_rewritten) ... ok
+test_join_reference_rewritten_when_mapped (test_final_blockers.TestDefect3AutoConversionTokenAwareAndObjectMap.test_join_reference_rewritten_when_mapped) ... ok
+test_literal_not_rewritten_from_rewritten (test_final_blockers.TestDefect3AutoConversionTokenAwareAndObjectMap.test_literal_not_rewritten_from_rewritten) ... ok
+test_unmapped_from_becomes_manual_review (test_final_blockers.TestDefect3AutoConversionTokenAwareAndObjectMap.test_unmapped_from_becomes_manual_review) ... ok
+test_fqn_comparison_case_insensitive (test_final_blockers.TestDefect4TargetOwnership.test_fqn_comparison_case_insensitive) ... ok
+test_in_run_deployment_conflict (test_final_blockers.TestDefect4TargetOwnership.test_in_run_deployment_conflict) ... ok
+test_ownership_states (test_final_blockers.TestDefect4TargetOwnership.test_ownership_states) ... ok
+test_two_historical_owners_is_ambiguous (test_final_blockers.TestDefect4TargetOwnership.test_two_historical_owners_is_ambiguous) ... ok
+test_is_connection_usable_parametrized (test_final_blockers.TestDefect5ConnectionUsable.test_is_connection_usable_parametrized) ... ok
+test_nb18_is_active_none_not_materialized (test_final_blockers.TestDefect5ConnectionUsable.test_nb18_is_active_none_not_materialized) ... ok
+test_create_builder_contains_not_null (test_final_blockers.TestDefect6SchemaInitAndUpgradeGaps.test_create_builder_contains_not_null) ... ok
+test_verify_schema (test_final_blockers.TestDefect6SchemaInitAndUpgradeGaps.test_verify_schema) ... ok
+test_yaml_capture_tasks_depend_on_init (test_final_blockers.TestDefect6SchemaInitAndUpgradeGaps.test_yaml_capture_tasks_depend_on_init) ... ok
+test_yaml_graph_acyclic (test_final_blockers.TestDefect6SchemaInitAndUpgradeGaps.test_yaml_graph_acyclic) ... ok
+test_summary_all_deployed_succeeded (test_final_blockers.TestDefect7SummaryDecisions.test_summary_all_deployed_succeeded) ... ok
+test_summary_ctrl_failed_returns_failed (test_final_blockers.TestDefect7SummaryDecisions.test_summary_ctrl_failed_returns_failed) ... ok
+test_summary_failed_log_stages_returns_failed (test_final_blockers.TestDefect7SummaryDecisions.test_summary_failed_log_stages_returns_failed) ... ok
+test_summary_manual_review_only_succeeded (test_final_blockers.TestDefect7SummaryDecisions.test_summary_manual_review_only_succeeded) ... ok
+test_summary_no_objects_succeeded (test_final_blockers.TestDefect7SummaryDecisions.test_summary_no_objects_succeeded) ... ok
+test_oracle_fractional_precision_scale_fails_closed (test_final_blockers.TestDefect8IntegralMetadataParsing.test_oracle_fractional_precision_scale_fails_closed) ... ok
+test_parse_integral_metadata_behavior (test_final_blockers.TestDefect8IntegralMetadataParsing.test_parse_integral_metadata_behavior) ... ok
+test_sqlserver_fractional_precision_scale_fails_closed (test_final_blockers.TestDefect8IntegralMetadataParsing.test_sqlserver_fractional_precision_scale_fails_closed) ... ok
+test_item1_nb22_ownership_decision_direct (test_final_blockers.TestItems123DirectExecutions.test_item1_nb22_ownership_decision_direct)
+Execute NB22's ownership decision directly for OWNED, FREE, CONFLICT, and AMBIGUOUS. ... ok
+test_item2_converter_quoted_ident_and_bare_name_and_validate_catalog_direct (test_final_blockers.TestItems123DirectExecutions.test_item2_converter_quoted_ident_and_bare_name_and_validate_catalog_direct)
+Execute converter directly for QUOTED_IDENT, undotted bare names, CTEs, and catalog validation. ... ok
+test_item3_nb22_passes_object_map_into_convert_artifact (test_final_blockers.TestItems123DirectExecutions.test_item3_nb22_passes_object_map_into_convert_artifact)
+Confirm NB22 passes object_map=build_object_map(...) into convert_artifact. ... ok
 test_batch_must_be_one_run_and_table (test_inventory_idempotency.TestInventoryKeys.test_batch_must_be_one_run_and_table) ... ok
 test_connection_and_identity_must_agree (test_inventory_idempotency.TestInventoryKeys.test_connection_and_identity_must_agree) ... ok
 test_distinct_columns_validate (test_inventory_idempotency.TestInventoryKeys.test_distinct_columns_validate) ... ok
@@ -282,6 +598,111 @@ test_oracle_database_required (test_job_1b_deduplication.TestScenarioJBackwardCo
 test_source_identity_algorithm_unchanged (test_job_1b_deduplication.TestScenarioJBackwardCompatibility.test_source_identity_algorithm_unchanged) ... ok
 test_job_1b_documented_task_graph (test_job_1b_deduplication.TestScenarioKArchitectureContract.test_job_1b_documented_task_graph) ... ok
 test_job_1b_yaml_not_in_repository (test_job_1b_deduplication.TestScenarioKArchitectureContract.test_job_1b_yaml_not_in_repository) ... ok
+test_candidates_filter_is_selected_true_and_view_procedure_only (test_lakebridge_artifact_migration.TestCandidateSelection.test_candidates_filter_is_selected_true_and_view_procedure_only) ... ok
+test_deterministic_ordering (test_lakebridge_artifact_migration.TestCandidateSelection.test_deterministic_ordering) ... ok
+test_joins_latest_assessment_per_connection_and_database (test_lakebridge_artifact_migration.TestCandidateSelection.test_joins_latest_assessment_per_connection_and_database) ... ok
+test_unselected_and_other_types_excluded (test_lakebridge_artifact_migration.TestCandidateSelection.test_unselected_and_other_types_excluded) ... ok
+test_validate_max_artifacts (test_lakebridge_artifact_migration.TestCandidateSelection.test_validate_max_artifacts) ... ok
+test_all_18_lakebridge_columns_present (test_lakebridge_artifact_migration.TestControlTable18LakebridgeColumns.test_all_18_lakebridge_columns_present) ... ok
+test_ddl_generation_and_upgrade (test_lakebridge_artifact_migration.TestControlTable18LakebridgeColumns.test_ddl_generation_and_upgrade) ... ok
+test_job_yaml_sequence_and_tasks (test_lakebridge_artifact_migration.TestJobGraphAndComputeRequirements.test_job_yaml_sequence_and_tasks) ... ok
+test_auto_candidate_classification (test_lakebridge_artifact_migration.TestLakebridgeClassification.test_auto_candidate_classification) ... ok
+test_manual_review_classification (test_lakebridge_artifact_migration.TestLakebridgeClassification.test_manual_review_classification) ... ok
+test_unsupported_classification (test_lakebridge_artifact_migration.TestLakebridgeClassification.test_unsupported_classification) ... ok
+test_construct_detection (test_lakebridge_artifact_migration.TestLakebridgeCommonParserAndWorkbook.test_construct_detection) ... ok
+test_fixme_and_dialect_syntax_detection (test_lakebridge_artifact_migration.TestLakebridgeCommonParserAndWorkbook.test_fixme_and_dialect_syntax_detection) ... ok
+test_referenced_objects_bounded_json (test_lakebridge_artifact_migration.TestLakebridgeCommonParserAndWorkbook.test_referenced_objects_bounded_json) ... ok
+test_workbook_parser_pure_python (test_lakebridge_artifact_migration.TestLakebridgeCommonParserAndWorkbook.test_workbook_parser_pure_python) ... ok
+test_baseline_manifest_integrity (test_lakebridge_artifact_migration.TestNonNegotiableIsolation.test_baseline_manifest_integrity)
+All 44 protected files must exist and match approved baseline hashes. ... ok
+test_both_nb13_notebooks_remain_unchanged (test_lakebridge_artifact_migration.TestNonNegotiableIsolation.test_both_nb13_notebooks_remain_unchanged)
+Both Oracle and SQL Server NB13 notebooks must match baseline. ... ok
+test_no_non_artifact_job_yaml_changes (test_lakebridge_artifact_migration.TestNonNegotiableIsolation.test_no_non_artifact_job_yaml_changes)
+No non-artifact job YAML files may be added or modified. ... ok
+test_protected_file_validation_fails_on_hash_mismatch (test_lakebridge_artifact_migration.TestNonNegotiableIsolation.test_protected_file_validation_fails_on_hash_mismatch)
+Validation must fail when a protected file differs from its approved baseline hash. ... ok
+test_protected_file_validation_fails_on_missing_file (test_lakebridge_artifact_migration.TestNonNegotiableIsolation.test_protected_file_validation_fails_on_missing_file)
+Validation must fail when an expected protected file is missing. ... ok
+test_protected_file_validation_fails_on_nonzero_git (test_lakebridge_artifact_migration.TestNonNegotiableIsolation.test_protected_file_validation_fails_on_nonzero_git)
+Validation must fail when git returns a nonzero exit code. ... ok
+test_protected_file_validation_never_passes_vacuously (test_lakebridge_artifact_migration.TestNonNegotiableIsolation.test_protected_file_validation_never_passes_vacuously)
+Validation must fail when baseline manifest is empty. ... ok
+test_restored_files_match_preceding_package (test_lakebridge_artifact_migration.TestNonNegotiableIsolation.test_restored_files_match_preceding_package)
+NB_GetDeltaWorklist.ipynb and NB00_ControlTableInit.py must match preceding package byte-for-byte. ... ok
+test_01_runtime_resolution_of_union_and_annotations (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_01_runtime_resolution_of_union_and_annotations) ... ok
+test_02_exact_lakebridge_availability_check_argv (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_02_exact_lakebridge_availability_check_argv) ... ok
+test_03_exact_analyzer_argv (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_03_exact_analyzer_argv) ... ok
+test_04_exact_transpile_argv (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_04_exact_transpile_argv) ... ok
+test_05_nonzero_cli_return_code_fails_artifact (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_05_nonzero_cli_return_code_fails_artifact) ... ok
+test_06_cli_stdout_and_stderr_sanitization (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_06_cli_stdout_and_stderr_sanitization) ... ok
+test_07_real_csv_analyzer_parsing (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_07_real_csv_analyzer_parsing) ... ok
+test_08_sparse_xlsx_row_with_blank_middle_cell (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_08_sparse_xlsx_row_with_blank_middle_cell) ... ok
+test_09_blank_leading_middle_and_trailing_xlsx_cells (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_09_blank_leading_middle_and_trailing_xlsx_cells) ... ok
+test_10_multi_letter_excel_coordinates (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_10_multi_letter_excel_coordinates) ... ok
+test_11_duplicate_required_xlsx_headers (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_11_duplicate_required_xlsx_headers) ... ok
+test_12_malformed_xlsx_archive (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_12_malformed_xlsx_archive) ... ok
+test_13_missing_required_analyzer_headers (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_13_missing_required_analyzer_headers) ... ok
+test_14_actual_lakebridge_analyzer_sheet_and_header_names (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_14_actual_lakebridge_analyzer_sheet_and_header_names) ... ok
+test_15_collision_resistant_filenames_for_slash_and_colon (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_15_collision_resistant_filenames_for_slash_and_colon) ... ok
+test_16_every_artifact_attempt_gets_a_unique_local_directory (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_16_every_artifact_attempt_gets_a_unique_local_directory) ... ok
+test_17_retry_cannot_consume_earlier_attempt_artifacts (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_17_retry_cannot_consume_earlier_attempt_artifacts) ... ok
+test_18_input_prep_failure_isolation (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_18_input_prep_failure_isolation) ... ok
+test_19_analyzer_failure_isolation (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_19_analyzer_failure_isolation) ... ok
+test_20_report_parsing_failure_isolation (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_20_report_parsing_failure_isolation) ... ok
+test_21_transpile_failure_isolation (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_21_transpile_failure_isolation) ... ok
+test_22_missing_transpile_output_fails_only_affected_artifact (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_22_missing_transpile_output_fails_only_affected_artifact) ... ok
+test_23_raw_artifact_persistence_failure_handling (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_23_raw_artifact_persistence_failure_handling) ... ok
+test_24_report_persistence_failure_handling (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_24_report_persistence_failure_handling) ... ok
+test_25_error_file_persistence_failure_handling (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_25_error_file_persistence_failure_handling) ... ok
+test_26_converted_sql_persistence_failure_handling (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_26_converted_sql_persistence_failure_handling) ... ok
+test_27_failed_persistence_retains_local_attempt_dir (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_27_failed_persistence_retains_local_attempt_dir) ... ok
+test_28_successful_persistence_permits_cleanup (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_28_successful_persistence_permits_cleanup) ... ok
+test_29_rerun_clears_every_stale_field (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_29_rerun_clears_every_stale_field) ... ok
+test_30_attempt_count_increments_once_per_reprocessing_attempt (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_30_attempt_count_increments_once_per_reprocessing_attempt) ... ok
+test_31_nb23_and_nb24_execution_logs_use_same_attempt_number (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_31_nb23_and_nb24_execution_logs_use_same_attempt_number) ... ok
+test_32_new_artifact_starts_with_attempt_1 (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_32_new_artifact_starts_with_attempt_1) ... ok
+test_33_first_seen_and_created_ts_preserved_on_rerun (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_33_first_seen_and_created_ts_preserved_on_rerun) ... ok
+test_34_candidate_source_system_mismatch_rejected (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_34_candidate_source_system_mismatch_rejected) ... ok
+test_35_sqlserver_database_identity_mismatch_rejected (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_35_sqlserver_database_identity_mismatch_rejected) ... ok
+test_36_oracle_connection_identity_validated_without_db_substitution (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_36_oracle_connection_identity_validated_without_db_substitution) ... ok
+test_37_successfully_converted_procedure_is_manual_review (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_37_successfully_converted_procedure_is_manual_review) ... ok
+test_38_successfully_converted_view_is_manual_review_while_object_map_false (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_38_successfully_converted_view_is_manual_review_while_object_map_false) ... ok
+test_39_view_with_unresolved_source_references_is_manual_review (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_39_view_with_unresolved_source_references_is_manual_review) ... ok
+test_40_no_artifact_is_auto_candidate_while_object_map_false (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_40_no_artifact_is_auto_candidate_while_object_map_false) ... ok
+test_41_missing_or_blank_source_def_is_unsupported (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_41_missing_or_blank_source_def_is_unsupported) ... ok
+test_42_analyzer_failure_is_unsupported (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_42_analyzer_failure_is_unsupported) ... ok
+test_43_parsing_or_generation_errors_are_unsupported (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_43_parsing_or_generation_errors_are_unsupported) ... ok
+test_44_missing_or_blank_converted_output_is_unsupported (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_44_missing_or_blank_converted_output_is_unsupported) ... ok
+test_45_missing_t24_status_causes_failed_summary (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_45_missing_t24_status_causes_failed_summary) ... ok
+test_46_failed_t24_status_causes_failed_summary (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_46_failed_t24_status_causes_failed_summary) ... ok
+test_47_fetched_but_not_analyzed_or_transpiled_causes_failed_summary (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_47_fetched_but_not_analyzed_or_transpiled_causes_failed_summary) ... ok
+test_48_one_completed_plus_one_failed_stage_returns_failed_partial (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_48_one_completed_plus_one_failed_stage_returns_failed_partial) ... ok
+test_49_no_candidates_no_failure_returns_succeeded_no_candidates (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_49_no_candidates_no_failure_returns_succeeded_no_candidates) ... ok
+test_50_summary_uses_t24_business_status (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_50_summary_uses_t24_business_status) ... ok
+test_51_summary_uses_shared_decide_summary (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_51_summary_uses_shared_decide_summary) ... ok
+test_52_failed_execution_log_stage_always_makes_status_failed (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_52_failed_execution_log_stage_always_makes_status_failed) ... ok
+test_53_failure_task_values_published_before_raising (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_53_failure_task_values_published_before_raising) ... ok
+test_54_failed_stage_log_appended_immediately (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_54_failed_stage_log_appended_immediately) ... ok
+test_55_failed_log_append_fails_artifact_and_retains_evidence (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_55_failed_log_append_fails_artifact_and_retains_evidence) ... ok
+test_56_default_pytest_collection_works_without_flags (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_56_default_pytest_collection_works_without_flags) ... ok
+test_57_default_unittest_discovery_works (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_57_default_unittest_discovery_works) ... ok
+test_58_protected_file_validation_fails_on_nonzero_git (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_58_protected_file_validation_fails_on_nonzero_git) ... ok
+test_59_protected_file_validation_fails_on_missing_file (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_59_protected_file_validation_fails_on_missing_file) ... ok
+test_60_protected_file_validation_fails_when_integrity_cannot_run (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_60_protected_file_validation_fails_when_integrity_cannot_run) ... ok
+test_61_protected_file_validation_fails_on_hash_mismatch (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_61_protected_file_validation_fails_on_hash_mismatch) ... ok
+test_62_restored_get_delta_worklist_matches_preceding_package (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_62_restored_get_delta_worklist_matches_preceding_package) ... ok
+test_63_restored_nb00_matches_preceding_package (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_63_restored_nb00_matches_preceding_package) ... ok
+test_64_both_nb13_notebooks_remain_unchanged (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_64_both_nb13_notebooks_remain_unchanged) ... ok
+test_65_assessment_onboarding_load_etl_retry_reconciliation_unchanged (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_65_assessment_onboarding_load_etl_retry_reconciliation_unchanged) ... ok
+test_66_no_non_artifact_job_yaml_changes (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_66_no_non_artifact_job_yaml_changes) ... ok
+test_67_no_converted_sql_passed_to_spark_sql (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_67_no_converted_sql_passed_to_spark_sql) ... ok
+test_68_no_converted_sql_passed_to_jdbc_execute (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_68_no_converted_sql_passed_to_jdbc_execute) ... ok
+test_69_no_create_view_or_create_procedure_executed (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_69_no_create_view_or_create_procedure_executed) ... ok
+test_70_no_local_regex_converter_or_object_map_rewriting (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_70_no_local_regex_converter_or_object_map_rewriting) ... ok
+test_71_no_secrets_or_credentials_in_logs_or_metadata (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_71_no_secrets_or_credentials_in_logs_or_metadata) ... ok
+test_connection_usable_requires_active_valid_and_secret_scope (test_lakebridge_artifact_migration.TestSourceConnectionAndFetchValidation.test_connection_usable_requires_active_valid_and_secret_scope) ... ok
+test_nb23_notebook_structure_and_fetch_isolation (test_lakebridge_artifact_migration.TestSourceConnectionAndFetchValidation.test_nb23_notebook_structure_and_fetch_isolation) ... ok
+test_nb23_partial_fetch_status_and_raise_behavior (test_lakebridge_artifact_migration.TestSourceConnectionAndFetchValidation.test_nb23_partial_fetch_status_and_raise_behavior) ... ok
 test_all_required_methods_present (test_modularity.TestAdapterContract.test_all_required_methods_present) ... ok
 test_object_type_normalization (test_modularity.TestAdapterContract.test_object_type_normalization) ... ok
 test_probe_queries_are_dialect_specific (test_modularity.TestAdapterContract.test_probe_queries_are_dialect_specific) ... ok
@@ -641,6 +1062,13 @@ test_runtime_checklist_rows_default_to_not_executed (test_release_documentation.
 test_sqlserver_and_oracle_policy_remain_source_documented (test_release_documentation.TestReleaseDocumentation.test_sqlserver_and_oracle_policy_remain_source_documented) ... ok
 test_targeted_safety_behavior_is_documented (test_release_documentation.TestReleaseDocumentation.test_targeted_safety_behavior_is_documented) ... ok
 test_test_evidence_paths_are_documented (test_release_documentation.TestReleaseDocumentation.test_test_evidence_paths_are_documented) ... ok
+test_classification_statuses_documented_consistently (test_release_documentation.TestSQLArtifactDocumentation.test_classification_statuses_documented_consistently) ... ok
+test_documentation_does_not_claim_live_validation_as_completed (test_release_documentation.TestSQLArtifactDocumentation.test_documentation_does_not_claim_live_validation_as_completed) ... ok
+test_documentation_task_names_match_executable_yaml (test_release_documentation.TestSQLArtifactDocumentation.test_documentation_task_names_match_executable_yaml) ... ok
+test_nb18_documented_as_raw_materialization_without_conversion (test_release_documentation.TestSQLArtifactDocumentation.test_nb18_documented_as_raw_materialization_without_conversion) ... ok
+test_nb22_documented_as_conversion_and_deployment_stage (test_release_documentation.TestSQLArtifactDocumentation.test_nb22_documented_as_conversion_and_deployment_stage) ... ok
+test_object_type_behavior_matches_converter_rules (test_release_documentation.TestSQLArtifactDocumentation.test_object_type_behavior_matches_converter_rules) ... ok
+test_prohibited_contradictions_are_absent (test_release_documentation.TestSQLArtifactDocumentation.test_prohibited_contradictions_are_absent) ... ok
 test_required_shared_descriptions_are_source_neutral (test_release_documentation.TestSharedNotebookDescriptions.test_required_shared_descriptions_are_source_neutral) ... ok
 test_dry_run_counters_and_prefixes (test_selection_lifecycle.TestAdministrativeRecoveryBehavior.test_dry_run_counters_and_prefixes) ... ok
 test_exact_deterministic_recovery_registration (test_selection_lifecycle.TestAdministrativeRecoveryBehavior.test_exact_deterministic_recovery_registration)
@@ -786,6 +1214,97 @@ test_select_includes_source_server_and_source_database (test_source_endpoint_pro
 8. NB07 SELECT includes source_server and source_database before calling assert_source_identity_match(). ... ok
 test_writes_both_fields_into_table_decisions_and_review_queue (test_source_endpoint_propagation.TestNB07TableDecisionEndpointPropagation.test_writes_both_fields_into_table_decisions_and_review_queue)
 9. NB07 writes both fields into table_load_decisions and review_queue. ... ok
+test_identifier_normalization (test_sql_artifact_migration.TestArtifactIdentityAndNormalization.test_identifier_normalization) ... ok
+test_oracle_identity_handling (test_sql_artifact_migration.TestArtifactIdentityAndNormalization.test_oracle_identity_handling) ... ok
+test_same_name_in_different_databases_connections_does_not_collide (test_sql_artifact_migration.TestArtifactIdentityAndNormalization.test_same_name_in_different_databases_connections_does_not_collide) ... ok
+test_same_name_in_different_object_types_does_not_collide (test_sql_artifact_migration.TestArtifactIdentityAndNormalization.test_same_name_in_different_object_types_does_not_collide) ... ok
+test_same_name_in_different_schemas_does_not_collide (test_sql_artifact_migration.TestArtifactIdentityAndNormalization.test_same_name_in_different_schemas_does_not_collide) ... ok
+test_sqlserver_identity_handling (test_sql_artifact_migration.TestArtifactIdentityAndNormalization.test_sqlserver_identity_handling) ... ok
+test_a_b_versus_a_slash_b (test_sql_artifact_migration.TestBlocker1SameRunArtifactPathCollisions.test_a_b_versus_a_slash_b) ... ok
+test_case_only_name_differences_in_same_batch (test_sql_artifact_migration.TestBlocker1SameRunArtifactPathCollisions.test_case_only_name_differences_in_same_batch) ... ok
+test_correct_same_owner_repair (test_sql_artifact_migration.TestBlocker1SameRunArtifactPathCollisions.test_correct_same_owner_repair) ... ok
+test_oracle_package_versus_package_body (test_sql_artifact_migration.TestBlocker1SameRunArtifactPathCollisions.test_oracle_package_versus_package_body) ... ok
+test_same_object_name_in_different_databases (test_sql_artifact_migration.TestBlocker1SameRunArtifactPathCollisions.test_same_object_name_in_different_databases) ... ok
+test_same_object_name_in_different_schemas (test_sql_artifact_migration.TestBlocker1SameRunArtifactPathCollisions.test_same_object_name_in_different_schemas) ... ok
+test_same_object_name_under_different_connections (test_sql_artifact_migration.TestBlocker1SameRunArtifactPathCollisions.test_same_object_name_under_different_connections) ... ok
+test_same_owner_rerun (test_sql_artifact_migration.TestBlocker1SameRunArtifactPathCollisions.test_same_owner_rerun) ... ok
+test_simulated_two_run_path_claim (test_sql_artifact_migration.TestBlocker1SameRunArtifactPathCollisions.test_simulated_two_run_path_claim) ... ok
+test_two_collisions_in_one_batch (test_sql_artifact_migration.TestBlocker1SameRunArtifactPathCollisions.test_two_collisions_in_one_batch) ... ok
+test_v_1_versus_v_at_1 (test_sql_artifact_migration.TestBlocker1SameRunArtifactPathCollisions.test_v_1_versus_v_at_1) ... ok
+test_correct_unchanged_file (test_sql_artifact_migration.TestBlocker2RepairMissingAndCorruptedFiles.test_correct_unchanged_file) ... ok
+test_corrupted_file_repaired (test_sql_artifact_migration.TestBlocker2RepairMissingAndCorruptedFiles.test_corrupted_file_repaired) ... ok
+test_empty_file_when_nonempty_content_expected (test_sql_artifact_migration.TestBlocker2RepairMissingAndCorruptedFiles.test_empty_file_when_nonempty_content_expected) ... ok
+test_failed_temporary_write_cleans_up (test_sql_artifact_migration.TestBlocker2RepairMissingAndCorruptedFiles.test_failed_temporary_write_cleans_up) ... ok
+test_missing_file_repaired (test_sql_artifact_migration.TestBlocker2RepairMissingAndCorruptedFiles.test_missing_file_repaired) ... ok
+test_blank_run_id_rejected_in_nb18 (test_sql_artifact_migration.TestBlocker3RunAndAssessmentScoping.test_blank_run_id_rejected_in_nb18) ... ok
+test_explicit_global_scope_accepted_in_nb18 (test_sql_artifact_migration.TestBlocker3RunAndAssessmentScoping.test_explicit_global_scope_accepted_in_nb18) ... ok
+test_shipped_yaml_defaults_accepted_by_nb18 (test_sql_artifact_migration.TestBlocker3RunAndAssessmentScoping.test_shipped_yaml_defaults_accepted_by_nb18) ... ok
+test_summary_excludes_other_runs (test_sql_artifact_migration.TestBlocker3RunAndAssessmentScoping.test_summary_excludes_other_runs) ... ok
+test_all_notebook_paths_exist_on_disk (test_sql_artifact_migration.TestBlocker5JobYamlValidation.test_all_notebook_paths_exist_on_disk) ... ok
+test_all_task_keys_are_unique (test_sql_artifact_migration.TestBlocker5JobYamlValidation.test_all_task_keys_are_unique) ... ok
+test_graph_is_acyclic (test_sql_artifact_migration.TestBlocker5JobYamlValidation.test_graph_is_acyclic) ... ok
+test_job_metadata (test_sql_artifact_migration.TestBlocker5JobYamlValidation.test_job_metadata) ... ok
+test_parameter_propagation_and_no_secrets (test_sql_artifact_migration.TestBlocker5JobYamlValidation.test_parameter_propagation_and_no_secrets) ... ok
+test_no_references_to_temporary_patch_scripts (test_sql_artifact_migration.TestBlocker6PackageCompleteness.test_no_references_to_temporary_patch_scripts) ... ok
+test_temporary_patch_scripts_do_not_exist (test_sql_artifact_migration.TestBlocker6PackageCompleteness.test_temporary_patch_scripts_do_not_exist) ... ok
+test_already_current_installation_is_idempotent (test_sql_artifact_migration.TestBlocker7LegacySchemaUpgrade.test_already_current_installation_is_idempotent) ... ok
+test_fresh_installation_creates_tables (test_sql_artifact_migration.TestBlocker7LegacySchemaUpgrade.test_fresh_installation_creates_tables) ... ok
+test_missing_column_upgrade_additive (test_sql_artifact_migration.TestBlocker7LegacySchemaUpgrade.test_missing_column_upgrade_additive) ... ok
+test_sql_object_artifact_manifest_additive_upgrade (test_sql_artifact_migration.TestBlocker7LegacySchemaUpgrade.test_sql_object_artifact_manifest_additive_upgrade) ... ok
+test_sql_object_assessment_additive_upgrade (test_sql_artifact_migration.TestBlocker7LegacySchemaUpgrade.test_sql_object_assessment_additive_upgrade) ... ok
+test_candidate_filtering_excludes_table_objects (test_sql_artifact_migration.TestCandidateDiscoveryAndFiltering.test_candidate_filtering_excludes_table_objects) ... ok
+test_candidate_filtering_requires_available_definition (test_sql_artifact_migration.TestCandidateDiscoveryAndFiltering.test_candidate_filtering_requires_available_definition) ... ok
+test_candidate_filtering_requires_identity_fields (test_sql_artifact_migration.TestCandidateDiscoveryAndFiltering.test_candidate_filtering_requires_identity_fields) ... ok
+test_auto_artifacts_can_reach_deployment (test_sql_artifact_migration.TestConversionAndClassification.test_auto_artifacts_can_reach_deployment) ... ok
+test_manual_review_artifacts_are_not_deployed (test_sql_artifact_migration.TestConversionAndClassification.test_manual_review_artifacts_are_not_deployed) ... ok
+test_original_and_converted_definitions_are_preserved (test_sql_artifact_migration.TestConversionAndClassification.test_original_and_converted_definitions_are_preserved) ... ok
+test_packages_are_classified_as_manual_review (test_sql_artifact_migration.TestConversionAndClassification.test_packages_are_classified_as_manual_review) ... ok
+test_triggers_are_classified_as_unsupported (test_sql_artifact_migration.TestConversionAndClassification.test_triggers_are_classified_as_unsupported) ... ok
+test_unsupported_artifacts_are_not_deployed (test_sql_artifact_migration.TestConversionAndClassification.test_unsupported_artifacts_are_not_deployed) ... ok
+test_changed_definition_creates_new_processing_attempt (test_sql_artifact_migration.TestDefinitionHashingAndReruns.test_changed_definition_creates_new_processing_attempt) ... ok
+test_source_hash_generation_is_deterministic (test_sql_artifact_migration.TestDefinitionHashingAndReruns.test_source_hash_generation_is_deterministic) ... ok
+test_unchanged_rerun_is_skipped (test_sql_artifact_migration.TestDefinitionHashingAndReruns.test_unchanged_rerun_is_skipped) ... ok
+test_existing_control_table_schemas_are_unchanged (test_sql_artifact_migration.TestExistingControlTablesSafety.test_existing_control_table_schemas_are_unchanged)
+Verify that existing control-table definitions in NB00 remain untouched. ... ok
+test_existing_control_tables_remain_read_only (test_sql_artifact_migration.TestExistingControlTablesSafety.test_existing_control_tables_remain_read_only)
+Verify the new workflow notebooks never write or MERGE into existing tables. ... ok
+test_yaml_task_dependencies_and_parameters_valid (test_sql_artifact_migration.TestJobDefinitionAndTaskGraph.test_yaml_task_dependencies_and_parameters_valid) ... ok
+test_ambiguous_positional_arguments_rejected (test_sql_artifact_migration.TestPathCollisionAndContract.test_ambiguous_positional_arguments_rejected) ... ok
+test_case_sensitivity_collision_prevention_foo_vs_FOO (test_sql_artifact_migration.TestPathCollisionAndContract.test_case_sensitivity_collision_prevention_foo_vs_FOO) ... ok
+test_distinct_names_normalizing_to_same_stem_do_not_collide (test_sql_artifact_migration.TestPathCollisionAndContract.test_distinct_names_normalizing_to_same_stem_do_not_collide) ... ok
+test_package_and_package_body_distinct_paths (test_sql_artifact_migration.TestPathCollisionAndContract.test_package_and_package_body_distinct_paths) ... ok
+test_same_object_across_connections_distinct_paths (test_sql_artifact_migration.TestPathCollisionAndContract.test_same_object_across_connections_distinct_paths) ... ok
+test_same_object_across_databases_distinct_paths (test_sql_artifact_migration.TestPathCollisionAndContract.test_same_object_across_databases_distinct_paths) ... ok
+test_same_run_colliding_candidates_rejected_foo_vs_FOO (test_sql_artifact_migration.TestPathCollisionAndContract.test_same_run_colliding_candidates_rejected_foo_vs_FOO) ... ok
+test_schemas_named_view_procedure_remain_schemas (test_sql_artifact_migration.TestPathCollisionAndContract.test_schemas_named_view_procedure_remain_schemas) ... ok
+test_01_default_yaml_parameters_accepted_and_current_run_scoped (test_sql_artifact_migration.TestSection12BlockerBehavioral.test_01_default_yaml_parameters_accepted_and_current_run_scoped) ... ok
+test_02_global_scope_never_implicit (test_sql_artifact_migration.TestSection12BlockerBehavioral.test_02_global_scope_never_implicit) ... ok
+test_03_converter_rejects_top_and_comments_before_as (test_sql_artifact_migration.TestSection12BlockerBehavioral.test_03_converter_rejects_top_and_comments_before_as) ... ok
+test_04_unresolved_source_references_cannot_become_auto (test_sql_artifact_migration.TestSection12BlockerBehavioral.test_04_unresolved_source_references_cannot_become_auto) ... ok
+test_05_distinct_source_owners_cannot_share_target_ownership (test_sql_artifact_migration.TestSection12BlockerBehavioral.test_05_distinct_source_owners_cannot_share_target_ownership) ... ok
+test_06_cross_run_target_takeover_is_blocked (test_sql_artifact_migration.TestSection12BlockerBehavioral.test_06_cross_run_target_takeover_is_blocked) ... ok
+test_07_legacy_upgrade_helpers_invoked_by_production_initialization (test_sql_artifact_migration.TestSection12BlockerBehavioral.test_07_legacy_upgrade_helpers_invoked_by_production_initialization) ... ok
+test_08_upgrade_failure_makes_nb21_fail (test_sql_artifact_migration.TestSection12BlockerBehavioral.test_08_upgrade_failure_makes_nb21_fail) ... ok
+test_09_execution_log_failure_makes_summary_non_complete (test_sql_artifact_migration.TestSection12BlockerBehavioral.test_09_execution_log_failure_makes_summary_non_complete) ... ok
+test_10_nb22_raises_after_durable_failures (test_sql_artifact_migration.TestSection12BlockerBehavioral.test_10_nb22_raises_after_durable_failures) ... ok
+test_11_oracle_unconstrained_number_fidelity (test_sql_artifact_migration.TestSection12BlockerBehavioral.test_11_oracle_unconstrained_number_fidelity) ... ok
+test_12_invalid_oracle_precision_scale_fails_closed (test_sql_artifact_migration.TestSection12BlockerBehavioral.test_12_invalid_oracle_precision_scale_fails_closed) ... ok
+test_13_invalid_sqlserver_decimal_fails_closed (test_sql_artifact_migration.TestSection12BlockerBehavioral.test_13_invalid_sqlserver_decimal_fails_closed) ... ok
+test_14_nb18_generic_lookup_failure_does_not_bypass_validation (test_sql_artifact_migration.TestSection12BlockerBehavioral.test_14_nb18_generic_lookup_failure_does_not_bypass_validation) ... ok
+test_15_trigger_is_not_advertised_by_normal_capture (test_sql_artifact_migration.TestSection12BlockerBehavioral.test_15_trigger_is_not_advertised_by_normal_capture) ... ok
+test_16_only_source_system_prevents_other_source_branch (test_sql_artifact_migration.TestSection12BlockerBehavioral.test_16_only_source_system_prevents_other_source_branch) ... ok
+test_canonical_owner_key_preserves_database (test_sql_artifact_migration.TestSqlServerMultiDatabaseIsolationAndDiscovery.test_canonical_owner_key_preserves_database) ... ok
+test_module_definition_query_filters_to_supported_module_types (test_sql_artifact_migration.TestSqlServerMultiDatabaseIsolationAndDiscovery.test_module_definition_query_filters_to_supported_module_types) ... ok
+test_sqlserver_source_database_in_artifact_id (test_sql_artifact_migration.TestSqlServerMultiDatabaseIsolationAndDiscovery.test_sqlserver_source_database_in_artifact_id) ... ok
+test_delta_sync_table_processing_is_unchanged (test_sql_artifact_migration.TestTableMigrationWorkflowsUntouched.test_delta_sync_table_processing_is_unchanged) ... ok
+test_full_load_table_processing_is_unchanged (test_sql_artifact_migration.TestTableMigrationWorkflowsUntouched.test_full_load_table_processing_is_unchanged) ... ok
+test_errors_are_sanitized (test_sql_artifact_migration.TestTargetSchemaAndDeploymentSafety.test_errors_are_sanitized) ... ok
+test_execution_log_is_append_only (test_sql_artifact_migration.TestTargetSchemaAndDeploymentSafety.test_execution_log_is_append_only) ... ok
+test_existing_target_object_not_destructively_overwritten (test_sql_artifact_migration.TestTargetSchemaAndDeploymentSafety.test_existing_target_object_not_destructively_overwritten) ... ok
+test_individual_artifact_failure_does_not_stop_unrelated_artifacts (test_sql_artifact_migration.TestTargetSchemaAndDeploymentSafety.test_individual_artifact_failure_does_not_stop_unrelated_artifacts) ... ok
+test_target_schema_created_only_when_missing (test_sql_artifact_migration.TestTargetSchemaAndDeploymentSafety.test_target_schema_created_only_when_missing) ... ok
+test_summary_invariant_formula (test_sql_artifact_migration.TestTruthfulSummaryAndClassification.test_summary_invariant_formula) ... ok
+test_summary_notebook_status_mapping (test_sql_artifact_migration.TestTruthfulSummaryAndClassification.test_summary_notebook_status_mapping) ... ok
 test_01_supported_object_type_normalization (test_sql_object_artifact_materialization.TestSqlObjectArtifactMaterialization.test_01_supported_object_type_normalization) ... ok
 test_02_unsupported_object_type_rejected (test_sql_object_artifact_materialization.TestSqlObjectArtifactMaterialization.test_02_unsupported_object_type_rejected) ... ok
 test_03_deterministic_connection_owned_artifact_path (test_sql_object_artifact_materialization.TestSqlObjectArtifactMaterialization.test_03_deterministic_connection_owned_artifact_path) ... ok
@@ -881,7 +1400,69 @@ test_h35_to_h39_file_write_failure (test_sql_object_artifact_materialization.Tes
 test_i40_unchanged_definition (test_sql_object_artifact_materialization.TestSqlObjectArtifactMaterialization.test_i40_unchanged_definition) ... ok
 test_j41_changed_definition (test_sql_object_artifact_materialization.TestSqlObjectArtifactMaterialization.test_j41_changed_definition) ... ok
 test_k42_to_k47_failure_ordering (test_sql_object_artifact_materialization.TestSqlObjectArtifactMaterialization.test_k42_to_k47_failure_ordering) ... ok
-test_l48_to_l55_content_integrity (test_sql_object_artifact_materialization.TestSqlObjectArtifactMaterialization.test_l48_to_l55_content_integrity) ... ok
+test_l48_to_l55_content_integrity (test_sql_object_artifact_materialization.TestSqlObjectArtifactMaterialization.test_l48_to_l55_content_integrity) ... 
+=== Starting SQL Artifact Migration run_id=run-test-22 ===
+Control Catalog=da_accelerators, Control Schema=control
+Filter Connection='', Filter Database='', Max Artifacts=None
+Discovered 1 selected candidate artifact(s)
+=== Starting SQL Artifact Migration run_id=run-test-22 ===
+Control Catalog=da_accelerators, Control Schema=control
+Filter Connection='', Filter Database='', Max Artifacts=None
+Discovered 0 selected candidate artifact(s)
+NB18 complete: status=SUCCEEDED, business_status=PARTIAL, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=1, failed=0
+NB18 complete: status=SUCCEEDED, business_status=NO_OBJECTS, discovered=0, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=FAILED, business_status=FAILED, discovered=2, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=2
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=0, repaired=1, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=1, repaired=0, skipped=0, failed=0
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=4, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=4
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=1, repaired=0, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=0, repaired=1, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=0, repaired=1, skipped=0, failed=0
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=0, repaired=1, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=FAILED, business_status=FAILED, discovered=2, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=2
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=PARTIAL, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=1, failed=0
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=1, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=1, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=1, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=SUCCEEDED, business_status=PARTIAL, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=1, failed=0
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=PARTIAL, discovered=2, materialized=0, updated=0, unchanged=1, repaired=0, skipped=1, failed=0
+NB18 complete: status=SUCCEEDED, business_status=PARTIAL, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=1, failed=0
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=SUCCEEDED, business_status=PARTIAL, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=1, failed=0
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=1, repaired=0, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=1, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=FAILED, business_status=PARTIAL, discovered=2, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=SUCCEEDED, business_status=NO_OBJECTS, discovered=0, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0ok
 test_static_safety_active_conflict_does_not_mutate_manifest (test_sql_object_artifact_materialization.TestSqlObjectArtifactMaterialization.test_static_safety_active_conflict_does_not_mutate_manifest) ... ok
 test_static_safety_conditional_in_progress_claim_and_verification (test_sql_object_artifact_materialization.TestSqlObjectArtifactMaterialization.test_static_safety_conditional_in_progress_claim_and_verification) ... ok
 test_static_safety_general_merge_sql_conditioned (test_sql_object_artifact_materialization.TestSqlObjectArtifactMaterialization.test_static_safety_general_merge_sql_conditioned) ... ok
@@ -1054,6 +1635,14 @@ test_oracle_does_not_define_standalone_time_rule (test_type_mappers.TestOracleMa
 test_oracle_timestamp_metadata_pipeline_integration (test_type_mappers.TestOracleMappingRegression.test_oracle_timestamp_metadata_pipeline_integration) ... ok
 test_oracle_type_matrix (test_type_mappers.TestOracleMappingRegression.test_oracle_type_matrix) ... ok
 test_timestamp_precision_mapping_regression (test_type_mappers.TestOracleMappingRegression.test_timestamp_precision_mapping_regression) ... ok
+test_unconstrained_number_table_compatibility_is_review (test_type_mappers.TestOracleMappingRegression.test_unconstrained_number_table_compatibility_is_review) ... ok
+test_both_oracle_yaml_files_exist_and_declare_oracle (test_type_mappers.TestOracleRuleFileConsistency.test_both_oracle_yaml_files_exist_and_declare_oracle) ... ok
+test_every_overlapping_rule_matches_delta_status_fidelity (test_type_mappers.TestOracleRuleFileConsistency.test_every_overlapping_rule_matches_delta_status_fidelity) ... ok
+test_generic_oracle_timestamp_fallback_in_both_files (test_type_mappers.TestOracleRuleFileConsistency.test_generic_oracle_timestamp_fallback_in_both_files) ... ok
+test_legacy_fallback_not_more_permissive_than_authoritative (test_type_mappers.TestOracleRuleFileConsistency.test_legacy_fallback_not_more_permissive_than_authoritative) ... ok
+test_oracle_rule_selection_uses_source_qualified_file (test_type_mappers.TestOracleRuleFileConsistency.test_oracle_rule_selection_uses_source_qualified_file) ... ok
+test_sqlserver_type_rules_remain_unchanged (test_type_mappers.TestOracleRuleFileConsistency.test_sqlserver_type_rules_remain_unchanged) ... ok
+test_timestamp_precision_aware_mapper_logic (test_type_mappers.TestOracleRuleFileConsistency.test_timestamp_precision_aware_mapper_logic) ... ok
 test_decimal_precision_scale_regression (test_type_mappers.TestSqlServerMappingRegression.test_decimal_precision_scale_regression) ... ok
 test_every_yaml_rule_outcome_and_notes (test_type_mappers.TestSqlServerMappingRegression.test_every_yaml_rule_outcome_and_notes) ... ok
 test_sqlserver_type_matrix (test_type_mappers.TestSqlServerMappingRegression.test_sqlserver_type_matrix) ... ok
@@ -1065,101 +1654,7 @@ test_source_mismatch_fails (test_type_mappers.TestYamlValidation.test_source_mis
 test_target_mismatch_fails (test_type_mappers.TestYamlValidation.test_target_mismatch_fails) ... ok
 
 ----------------------------------------------------------------------
-Ran 1020 tests in 1.271s
+Ran 1306 tests in 2.392s
 
 OK
-[_common] src location: D:\Visual Studio Code\Oracle-SQLServer-to-Databricks-v2\src
-[_common] bootstrap complete. CATALOG=dummy CONTROL_SCHEMA=dummy
-Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
-Distinct failed operations: 2
-Retry worklist: 2; manual review: 0
-Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
-Distinct failed operations: 2
-Retry worklist: 1; manual review: 1
-  MANUAL_REVIEW parent_run_id=run-a connection_id=c1 source_table_id=t1 operation=FULL_LOAD reason=MAX_RETRIES_REACHED
-Selecting retries for INGEST runs ['run-a', 'run-b', 'run-c']; child run_id=retry_001
-Distinct failed operations: 3
-Retry worklist: 3; manual review: 0
-Selecting retries for INGEST runs ['run-a', 'run-b', 'run-c']; child run_id=retry_001
-Distinct failed operations: 3
-Retry worklist: 3; manual review: 0
-Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
-Distinct failed operations: 2
-Retry worklist: 2; manual review: 0
-Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
-Distinct failed operations: 2
-Retry worklist: 2; manual review: 0
-Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
-Distinct failed operations: 2
-Retry worklist: 1; manual review: 1
-  MANUAL_REVIEW parent_run_id=run-a connection_id=c1 source_table_id=t1 operation=FULL_LOAD reason=MAX_RETRIES_REACHED
-Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
-Distinct failed operations: 2
-Retry worklist: 0; manual review: 2
-  MANUAL_REVIEW parent_run_id=run-a connection_id=c1 source_table_id=t1 operation=FULL_LOAD reason=MAX_RETRIES_REACHED
-  MANUAL_REVIEW parent_run_id=run-b connection_id=c1 source_table_id=t1 operation=FULL_LOAD reason=MAX_RETRIES_REACHED
-Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
-Distinct failed operations: 2
-Retry worklist: 2; manual review: 0
-Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
-Distinct failed operations: 2
-Retry worklist: 2; manual review: 0
-Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
-Distinct failed operations: 0
-Retry worklist: 0; manual review: 0
-Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
-Distinct failed operations: 2
-Retry worklist: 2; manual review: 0
-Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
-Distinct failed operations: 2
-Retry worklist: 1; manual review: 1
-  MANUAL_REVIEW parent_run_id=run-b connection_id=c2 source_table_id=t2 operation=FULL_LOAD reason=MAX_RETRIES_REACHED
-Selecting retries for INGEST runs ['run-a', 'run-b', 'run-c']; child run_id=retry_001
-Distinct failed operations: 2
-Retry worklist: 2; manual review: 0
-Selecting retries for INGEST runs ['run-a', "run'oops"]; child run_id=retry_001
-Distinct failed operations: 0
-Retry worklist: 0; manual review: 0
-Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
-Distinct failed operations: 0
-Retry worklist: 0; manual review: 0
-Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
-Distinct failed operations: 0
-Retry worklist: 0; manual review: 0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=0, skipped=1, failed=0
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=1, unchanged=0, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=1, unchanged=0, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=1, unchanged=0, skipped=0, failed=0
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, skipped=0, failed=0
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=0, skipped=1, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=2, materialized=0, updated=0, unchanged=1, skipped=1, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=0, skipped=1, failed=0
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=0, skipped=1, failed=0
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=1, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=1, unchanged=0, skipped=0, failed=0
-NB18 complete: status=FAILED, business_status=PARTIAL, discovered=2, materialized=1, updated=0, unchanged=0, skipped=0, failed=1
-NB18 complete: status=SUCCEEDED, business_status=NO_OBJECTS, discovered=0, materialized=0, updated=0, unchanged=0, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, skipped=0, failed=0
+

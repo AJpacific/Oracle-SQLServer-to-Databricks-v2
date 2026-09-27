@@ -11,9 +11,16 @@ test_runtime_checklist_rows_default_to_not_executed (tests.test_release_document
 test_sqlserver_and_oracle_policy_remain_source_documented (tests.test_release_documentation.TestReleaseDocumentation.test_sqlserver_and_oracle_policy_remain_source_documented) ... ok
 test_targeted_safety_behavior_is_documented (tests.test_release_documentation.TestReleaseDocumentation.test_targeted_safety_behavior_is_documented) ... ok
 test_test_evidence_paths_are_documented (tests.test_release_documentation.TestReleaseDocumentation.test_test_evidence_paths_are_documented) ... ok
+test_classification_statuses_documented_consistently (tests.test_release_documentation.TestSQLArtifactDocumentation.test_classification_statuses_documented_consistently) ... ok
+test_documentation_does_not_claim_live_validation_as_completed (tests.test_release_documentation.TestSQLArtifactDocumentation.test_documentation_does_not_claim_live_validation_as_completed) ... ok
+test_documentation_task_names_match_executable_yaml (tests.test_release_documentation.TestSQLArtifactDocumentation.test_documentation_task_names_match_executable_yaml) ... ok
+test_nb18_documented_as_raw_materialization_without_conversion (tests.test_release_documentation.TestSQLArtifactDocumentation.test_nb18_documented_as_raw_materialization_without_conversion) ... ok
+test_nb22_documented_as_conversion_and_deployment_stage (tests.test_release_documentation.TestSQLArtifactDocumentation.test_nb22_documented_as_conversion_and_deployment_stage) ... ok
+test_object_type_behavior_matches_converter_rules (tests.test_release_documentation.TestSQLArtifactDocumentation.test_object_type_behavior_matches_converter_rules) ... ok
+test_prohibited_contradictions_are_absent (tests.test_release_documentation.TestSQLArtifactDocumentation.test_prohibited_contradictions_are_absent) ... ok
 test_required_shared_descriptions_are_source_neutral (tests.test_release_documentation.TestSharedNotebookDescriptions.test_required_shared_descriptions_are_source_neutral) ... ok
 
 ----------------------------------------------------------------------
-Ran 14 tests in 0.006s
+Ran 21 tests in 0.035s
 
 OK

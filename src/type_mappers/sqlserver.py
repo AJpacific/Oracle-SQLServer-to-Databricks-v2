@@ -9,14 +9,14 @@ try:
     from src.type_mappers.base import (
         AUTO, BLOCKED, EXACT, LOSSY, REVIEW, UNKNOWN, WIDENED,
         ColumnMappingResult, SourceTypeMapper, load_rules_from_yaml,
-        validate_rule_overrides,
+        validate_rule_overrides, parse_integral_metadata,
     )
 except ModuleNotFoundError:
     from source_identity import normalize_source_system
     from type_mappers.base import (
         AUTO, BLOCKED, EXACT, LOSSY, REVIEW, UNKNOWN, WIDENED,
         ColumnMappingResult, SourceTypeMapper, load_rules_from_yaml,
-        validate_rule_overrides,
+        validate_rule_overrides, parse_integral_metadata,
     )
 
 
@@ -206,37 +206,48 @@ class SqlServerTypeMapper(SourceTypeMapper):
         )
 
     def _map_decimal(self, source_type, precision, scale, is_nullable):
-        precision_value = precision if precision is not None else 18
-        scale_value = scale if scale is not None else 0
-        try:
-            precision_value = int(precision_value)
-            scale_value = int(scale_value)
-        except (TypeError, ValueError):
+        precision_value = 18
+        scale_value = 0
+        if precision is not None:
+            precision_value = parse_integral_metadata(precision)
+            if precision_value is None:
+                return ColumnMappingResult(
+                    source_type=source_type or "DECIMAL",
+                    databricks_delta_type=None, status=BLOCKED,
+                    fidelity=UNKNOWN,
+                    notes=f"decimal/numeric with non-integer precision ({precision!r})",
+                    is_nullable=bool(is_nullable))
+        if scale is not None:
+            scale_value = parse_integral_metadata(scale)
+            if scale_value is None:
+                return ColumnMappingResult(
+                    source_type=source_type or "DECIMAL",
+                    databricks_delta_type=None, status=BLOCKED,
+                    fidelity=UNKNOWN,
+                    notes=f"decimal/numeric with non-integer scale ({scale!r})",
+                    is_nullable=bool(is_nullable))
+
+        if precision_value < 1 or precision_value > MAX_DELTA_DECIMAL_PRECISION:
             return ColumnMappingResult(
                 source_type=source_type or "DECIMAL",
                 databricks_delta_type=None, status=BLOCKED,
                 fidelity=UNKNOWN,
-                notes=("decimal/numeric with non-integer precision/scale "
-                       f"({precision!r},{scale!r})"),
+                notes=(f"DECIMAL precision {precision_value} is invalid; "
+                       f"must be between 1 and {MAX_DELTA_DECIMAL_PRECISION}"),
                 is_nullable=bool(is_nullable))
-        if precision_value > MAX_DELTA_DECIMAL_PRECISION:
+
+        if scale_value < 0 or scale_value > precision_value:
             return ColumnMappingResult(
                 source_type=source_type or "DECIMAL",
                 databricks_delta_type=None, status=BLOCKED,
                 fidelity=UNKNOWN,
-                notes=(f"DECIMAL({precision_value},{scale_value}) exceeds "
-                       "Delta DECIMAL precision 38"),
+                notes=(f"DECIMAL scale {scale_value} is invalid for precision {precision_value}; "
+                       "scale must be between 0 and precision"),
                 is_nullable=bool(is_nullable))
-        notes = ""
-        if scale_value < 0:
-            scale_value = 0
-            notes = "negative scale coerced to 0"
-        if scale_value > precision_value:
-            scale_value = precision_value
-            notes = f"scale > precision; clamped scale to {scale_value}"
+
         return ColumnMappingResult(
             source_type=source_type or "DECIMAL",
             databricks_delta_type=(
                 f"DECIMAL({precision_value},{scale_value})"),
-            status=AUTO, fidelity=EXACT, notes=notes,
+            status=AUTO, fidelity=EXACT, notes="",
             is_nullable=bool(is_nullable))

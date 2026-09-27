@@ -258,21 +258,34 @@ class TestOracleMappingRegression(unittest.TestCase):
 
     def test_number_precision_scale_regression(self):
         cases = (
-            ((None, None), ("DECIMAL(38,0)", "AUTO", "EXACT")),
+            ((None, None), ("DECIMAL(38,0)", "REVIEW", "UNKNOWN")),
             ((4, 0), ("SMALLINT", "AUTO", "EXACT")),
             ((9, 0), ("INT", "AUTO", "EXACT")),
+            ((10, 0), ("BIGINT", "AUTO", "EXACT")),
             ((18, 0), ("BIGINT", "AUTO", "EXACT")),
             ((19, 0), ("DECIMAL(19,0)", "AUTO", "EXACT")),
             ((10, 2), ("DECIMAL(10,2)", "AUTO", "EXACT")),
             ((None, 2), ("DECIMAL(38,10)", "REVIEW", "WIDENED")),
             ((10, -2), ("DECIMAL(12,0)", "REVIEW", "WIDENED")),
+            ((4, 5), ("DECIMAL(5,5)", "REVIEW", "LOSSY")),
             ((40, 0), ("STRING", "BLOCKED", "UNKNOWN")),
+            ((0, 0), (None, "BLOCKED", "UNKNOWN")),
+            ((-5, 0), (None, "BLOCKED", "UNKNOWN")),
+            (("abc", 2), (None, "BLOCKED", "UNKNOWN")),
         )
         for (precision, scale), expected in cases:
             with self.subTest(precision=precision, scale=scale):
                 self.assertEqual(
                     _outcome(self.mapper.map_column(
                         "NUMBER", precision=precision, scale=scale)), expected)
+
+    def test_unconstrained_number_table_compatibility_is_review(self):
+        res = self.mapper.map_column("NUMBER")
+        self.assertNotEqual((res.status, res.fidelity), ("AUTO", "EXACT"))
+        self.assertEqual(res.status, "REVIEW")
+        self.assertEqual(res.fidelity, "UNKNOWN")
+        compat = classify_table_compatibility([res.status])
+        self.assertEqual(compat, "REVIEW")
 
     def test_every_yaml_rule_outcome_and_notes(self):
         for source_type, rule in _yaml_types(ORACLE_RULES).items():
@@ -369,11 +382,15 @@ class TestSqlServerMappingRegression(unittest.TestCase):
     def test_decimal_precision_scale_regression(self):
         cases = (
             ((None, None), ("DECIMAL(18,0)", "AUTO", "EXACT")),
+            ((18, 2), ("DECIMAL(18,2)", "AUTO", "EXACT")),
             ((10, 2), ("DECIMAL(10,2)", "AUTO", "EXACT")),
-            ((10, -1), ("DECIMAL(10,0)", "AUTO", "EXACT")),
-            ((4, 7), ("DECIMAL(4,4)", "AUTO", "EXACT")),
+            ((38, 38), ("DECIMAL(38,38)", "AUTO", "EXACT")),
+            ((0, 0), (None, "BLOCKED", "UNKNOWN")),
+            ((10, -1), (None, "BLOCKED", "UNKNOWN")),
+            ((4, 7), (None, "BLOCKED", "UNKNOWN")),
             ((39, 0), (None, "BLOCKED", "UNKNOWN")),
             (("bad", 2), (None, "BLOCKED", "UNKNOWN")),
+            ((10, "bad"), (None, "BLOCKED", "UNKNOWN")),
         )
         for (precision, scale), expected in cases:
             with self.subTest(precision=precision, scale=scale):
@@ -508,6 +525,92 @@ class TestFutureSourceMapper(unittest.TestCase):
         self.assertIsInstance(mapper, SourceTypeMapper)
         self.assertEqual(_outcome(mapper.map_column("future_text")),
                          ("STRING", "AUTO", "EXACT"))
+
+
+class TestOracleRuleFileConsistency(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.oracle_legacy = os.path.join(ROOT, "config", "type_rules.yaml")
+        cls.oracle_authoritative = os.path.join(ROOT, "config", "type_rules_oracle.yaml")
+        cls.sqlserver_rules = os.path.join(ROOT, "config", "type_rules_sqlserver.yaml")
+        import yaml
+        with open(cls.oracle_legacy, encoding="utf-8") as f:
+            cls.legacy_data = yaml.safe_load(f)
+        with open(cls.oracle_authoritative, encoding="utf-8") as f:
+            cls.auth_data = yaml.safe_load(f)
+        with open(cls.sqlserver_rules, encoding="utf-8") as f:
+            cls.sqlserver_data = yaml.safe_load(f)
+
+    def test_both_oracle_yaml_files_exist_and_declare_oracle(self):
+        self.assertTrue(os.path.isfile(self.oracle_legacy))
+        self.assertTrue(os.path.isfile(self.oracle_authoritative))
+        self.assertEqual(self.legacy_data.get("source_dialect"), "oracle")
+        self.assertEqual(self.auth_data.get("source_dialect"), "oracle")
+        self.assertEqual(self.legacy_data.get("target"), "databricks_delta")
+        self.assertEqual(self.auth_data.get("target"), "databricks_delta")
+
+    def test_every_overlapping_rule_matches_delta_status_fidelity(self):
+        legacy_types = self.legacy_data.get("types", {})
+        auth_types = self.auth_data.get("types", {})
+        common_types = set(legacy_types.keys()) & set(auth_types.keys())
+        self.assertGreater(len(common_types), 0)
+        for t in common_types:
+            with self.subTest(datatype=t):
+                leg = legacy_types[t]
+                auth = auth_types[t]
+                self.assertEqual(leg.get("databricks_delta"), auth.get("databricks_delta"))
+                self.assertEqual(leg.get("status"), auth.get("status"))
+                self.assertEqual(leg.get("fidelity"), auth.get("fidelity"))
+
+    def test_generic_oracle_timestamp_fallback_in_both_files(self):
+        for name, data in [("legacy", self.legacy_data), ("authoritative", self.auth_data)]:
+            rule = data["types"]["timestamp"]
+            self.assertEqual(rule["databricks_delta"], "TIMESTAMP", f"{name} timestamp target")
+            self.assertEqual(rule["status"], "REVIEW", f"{name} timestamp status")
+            self.assertEqual(rule["fidelity"], "UNKNOWN", f"{name} timestamp fidelity")
+
+    def test_timestamp_precision_aware_mapper_logic(self):
+        for yaml_path in (self.oracle_authoritative, self.oracle_legacy):
+            mapper = OracleTypeMapper.from_yaml_path(yaml_path)
+            res6 = mapper.map_column("TIMESTAMP", scale=6)
+            self.assertEqual((res6.databricks_delta_type, res6.status, res6.fidelity),
+                             ("TIMESTAMP", "AUTO", "EXACT"))
+            res7 = mapper.map_column("TIMESTAMP", scale=7)
+            self.assertEqual((res7.databricks_delta_type, res7.status, res7.fidelity),
+                             ("TIMESTAMP", "REVIEW", "LOSSY"))
+            res9 = mapper.map_column("TIMESTAMP", scale=9)
+            self.assertEqual((res9.databricks_delta_type, res9.status, res9.fidelity),
+                             ("TIMESTAMP", "REVIEW", "LOSSY"))
+            res_none = mapper.map_column("TIMESTAMP", scale=None)
+            self.assertEqual((res_none.databricks_delta_type, res_none.status, res_none.fidelity),
+                             ("TIMESTAMP", "REVIEW", "UNKNOWN"))
+
+    def test_sqlserver_type_rules_remain_unchanged(self):
+        self.assertTrue(os.path.isfile(self.sqlserver_rules))
+        self.assertEqual(self.sqlserver_data.get("source_dialect"), "sqlserver")
+        self.assertEqual(self.sqlserver_data.get("target"), "databricks_delta")
+        types = self.sqlserver_data.get("types", {})
+        self.assertIn("datetime2", types)
+        self.assertIn("int", types)
+        self.assertIn("bit", types)
+
+    def test_oracle_rule_selection_uses_source_qualified_file(self):
+        adapter = get_source_adapter("oracle")
+        self.assertEqual(adapter.type_rules_file(), "type_rules_oracle.yaml")
+        resolved_path = adapter._type_rules_path()
+        self.assertTrue(resolved_path.endswith("type_rules_oracle.yaml"))
+
+    def test_legacy_fallback_not_more_permissive_than_authoritative(self):
+        legacy_types = self.legacy_data.get("types", {})
+        auth_types = self.auth_data.get("types", {})
+        status_rank = {"AUTO": 1, "REVIEW": 2, "BLOCKED": 3}
+        for t, auth_rule in auth_types.items():
+            if t in legacy_types:
+                leg_rule = legacy_types[t]
+                leg_s = status_rank.get(leg_rule.get("status"), 99)
+                auth_s = status_rank.get(auth_rule.get("status"), 99)
+                self.assertGreaterEqual(leg_s, auth_s,
+                    f"Legacy rule {t} status {leg_rule.get('status')} is more permissive than authoritative {auth_rule.get('status')}")
 
 
 if __name__ == "__main__":

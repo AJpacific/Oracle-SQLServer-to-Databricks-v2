@@ -171,9 +171,8 @@ T05 ForEach Assessment (NB01A)        T06 ForEach SQL Object (NB13)
 - Configured and valid connection worklists emit strictly `[{"connection_id": "..."}]`.
 - For SQL Server, `T04a_Get_Assessment_Database_Worklist` defensively requires `coalesce(is_active, false) = true AND connection_status = 'VALID'`. When `source_database` is populated, it emits 1 work item without querying sys.databases. When blank, it discovers all accessible online non-system databases via a temporary `master` bootstrap connection and emits one item per database.
 - Assessment (`T05`) and SQL Object extraction (`T06`) run concurrently for each database work item and pass `source_database` explicitly.
-- Original non-table SQL object definitions (Views, Procedures, Functions, Packages, Package Bodies) extracted by `NB13` are stored in `da_accelerators.control.sql_object_assessment`.
 - `NB18_MaterializeSourceArtifacts` materializes these exact raw source definitions into governed Unity Catalog Volumes (`_source_artifacts`) under `/Volumes/<target_catalog>/<target_schema>/_source_artifacts/<safe_connection_id>/<safe_source_database>/<safe_source_schema>/<type_directory>/<safe_object_name>.sql`.
-- Raw source definitions are stored unchanged. They are never converted, rewritten, executed, or deployed.
+- Raw source definitions materialized by NB18 are preserved unchanged without conversion. Downstream, the independent SQL Artifact Migration pipeline (Pipeline 5: T00 -> T03 -> T23 -> T24 -> T06) analyzes, transpiles, and stores artifacts into Unity Catalog Volumes; it does not deploy and never executes converted SQL.
 - No notification task is included.
 
 ---
@@ -494,6 +493,87 @@ deployed Databricks Job.
 The repository changes do not update Databricks Job YAML. Existing deployments
 must separately replace any global `connection_id` run context with the global
 Full Load/Delta worklist tasks and pass each three-field item into its ForEach.
+
+---
+
+## SQL Artifact Migration Workflow (Independent Architecture)
+
+The SQL Artifact Migration workflow (`ACCELERATOR_SQL_ARTIFACT_MIGRATION`) is a completely separate, independent pipeline dedicated to non-table database objects:
+- `VIEW`
+- `PROCEDURE`
+- `FUNCTION`
+- `PACKAGE`
+- `PACKAGE BODY`
+- `TRIGGER`
+
+It is logically separated as Pipeline 5:
+1. Assessment
+2. Table Onboarding
+3. Full Load
+4. Delta Sync
+5. SQL Artifact Migration (Job: ACCELERATOR_SQL_ARTIFACT_MIGRATION)
+
+### Architecture and Isolation Guarantees:
+- **Workflow Separation of Responsibilities:**
+  - **Raw Materialization (`NB18` in Delta Sync):** Writes exact raw source definitions into governed Unity Catalog Volumes (`_source_artifacts`). Preserves source SQL text without conversion. Does not execute source SQL, does not classify source SQL for deployment, and does not deploy converted SQL objects.
+  - **Control Initialization (`NB21`):** Initializes only dedicated SQL Artifact Migration control structures (`sql_artifact_control`, `sql_artifact_execution_log`) and run scope. Does not modify existing Full Load or Delta Sync processing state.
+  - **Source Definition Fetch (`NB23`):** Performs selected-only Oracle and SQL Server JDBC definition fetches from registered source databases. Stores raw definitions under `_source_artifacts` Volumes. Validates connection ownership and source system before any JDBC connection is opened.
+  - **Lakebridge Analyze & Transpile (`NB24`):** Runs Databricks Labs Lakebridge CLI (`databricks labs lakebridge analyze` and `databricks labs lakebridge transpile`). Stores reports and converted SQL in `_lakebridge_reports` and `_converted_artifacts` Volumes. Staging uses isolated unique attempt directories (`/local_disk0/sql_artifact_lakebridge/<run_id>/<artifact_id>/<attempt>/<uuid>/`). Cleans up attempt directory only on complete success; retains on failure for diagnostics. Never executes or deploys converted SQL.
+  - **Summary & Audit (`NB_SQLArtifactSummary`):** Run-scoped aggregation and audit reporting; operates under `run_if: ALL_DONE` to capture final counts. Uses shared `decide_summary()` to evaluate both `t24_status` and `t24_business_status`. Fails closed if any execution-log stage failed. Publishes summary task values before raising for failures.
+  - **Legacy Prototype References (`NB22` / `NB18`):** Legacy prototype `NB22_SQLArtifactMigrate` converts, classifies, and stores; does not deploy and does not connect to source databases. `NB18_MaterializeSourceArtifacts` remains documented as a raw materialization reference.
+- **Workflow Independence:**
+  - SQL Artifact Migration is an independent workflow.
+  - Full Load and Delta Sync pipelines do not invoke SQL Artifact Migration.
+  - Failures in SQL Artifact Migration do not alter successful Full Load or Delta Sync state.
+  - Candidates come strictly from selected non-table rows in `source_assessment` for `VIEW` and `PROCEDURE` only. `FUNCTION`, Oracle `PACKAGE`, `PACKAGE_BODY`, and `TRIGGER` are out of scope.
+  - Only dedicated artifact-owned control/audit structures (`sql_artifact_control`, `sql_artifact_execution_log`, `/Volumes/...`) are written by the artifact workflow.
+- **Deterministic Business Key:** Identity v2: `artifact_id = SHA-256("v2|" + "|".join([connection_id, source_system, source_database, source_schema, object_type, object_name]))` preserving exact original object name, schema, and database casing (never case-folded), where `source_system` is required (lowercased canonical system name), Oracle `source_database` is empty string, and `object_type` is uppercased canonical.
+- **Selection-Driven Candidate Discovery:**
+  - Candidates come strictly from non-table rows in `source_assessment` where `is_selected = true`, using the latest assessment per connection (per connection + source_database for SQL Server).
+  - Normalizes `object_type` on both sides. Scope is VIEW and PROCEDURE only.
+  - Unusable connections are skipped and reported without opening any JDBC connection.
+  - Selected objects with missing or blank definitions are recorded as `FAILED` with reason `DEFINITION_MISSING` and `business_status = PARTIAL`.
+- **Classification Categories & Object Type Rules:**
+  - `AUTO` / `AUTO_CANDIDATE`: Allowed only for `VIEW` objects where transpilation is deterministic, passes static structural validation, contains no external unresolved references, no unsupported construct remains, and `object_map_applied = true`. Stored in volume; `deployment_status = NOT_DEPLOYED`. Because `object_map_applied` is false in this release, no artifact is classified `AUTO`.
+  - `MANUAL_REVIEW`: Successfully converted `PROCEDURE`; successfully converted `VIEW` while `object_map_applied = false`; or objects with high complexity, unknown statements, fixmes, risk constructs, or validation errors. Stored if converted; never auto-deployed; `deployment_status = NOT_DEPLOYED`.
+  - `UNSUPPORTED`: Non-migratable constructs (dynamic SQL, linked servers, proprietary lock hints); empty/missing definitions; out-of-scope objects such as `TRIGGER`; Analyzer failures or transpile failures. Stored if converted; never auto-deployed; `deployment_status = NOT_DEPLOYED`.
+- **Convert and Store Only (No Deployment):**
+  - Converted SQL is written to `/Volumes/<catalog>/<schema>/_converted_artifacts/<relative_path>` using atomic `temp-file + os.replace`.
+  - `CREATE SCHEMA IF NOT EXISTS` may be used only to support required Volumes. `CREATE VOLUME IF NOT EXISTS` is supported.
+  - No target schemas for deployed views or procedures are created.
+  - No converted SQL DDL/DML (`CREATE OR REPLACE VIEW`, `CREATE PROCEDURE`) is executed (`spark.sql` on converted SQL removed).
+  - `deployment_status = NOT_DEPLOYED` for every row.
+- **Job Parameters:**
+  - `catalog`, `control_schema`, `connection_id` (optional filter), `source_database` (optional filter), `max_artifacts` (optional limit; invalid or negative raises).
+  - `catalog` and `control_schema` are passed to every task.
+
+### Task Graph:
+```text
+T00_Create_Run_Context (NB_CreateRunContext)
+    |
+    v
+T03_Init_SQL_Artifact_Control (NB21_SQLArtifactInit)
+    |
+    v (run_if: ALL_SUCCESS)
+T23_Fetch_Selected_SQL_Artifacts (NB23_FetchSelectedSQLArtifacts)
+    |
+    v (run_if: ALL_SUCCESS)
+T24_Lakebridge_Analyze_And_Transpile (NB24_LakebridgeAnalyzeAndTranspile)
+    |
+    v (run_if: ALL_DONE)
+T06_SQL_Artifact_Summary (NB_SQLArtifactSummary)
+```
+
+| Task key | Execution Scope | Notebook | Parameters | Output Task Values |
+|---|---|---|---|---|
+| `T00_Create_Run_Context` | Run-level | `deployment/NB_CreateRunContext` | `catalog`, `control_schema`, `run_prefix: sql_artifact` | `run_id` |
+| `T03_Init_SQL_Artifact_Control` | Run-level | `shared/NB21_SQLArtifactInit` | `run_id`, `catalog`, `control_schema` | `run_id`, `status` |
+| `T23_Fetch_Selected_SQL_Artifacts` | Run-level (run_if: ALL_SUCCESS) | `shared/NB23_FetchSelectedSQLArtifacts` | `run_id`, `catalog`, `control_schema`, `connection_id`, `source_database`, `max_artifacts` | `run_id`, `status`, `selected_candidate_count`, `fetched_definition_count`, `definition_missing_count`, `source_fetch_failure_count` |
+| `T24_Lakebridge_Analyze_And_Transpile` | Run-level (run_if: ALL_SUCCESS) | `shared/NB24_LakebridgeAnalyzeAndTranspile` | `run_id`, `catalog`, `control_schema`, `connection_id`, `source_database`, `max_artifacts` | `run_id`, `status`, `business_status`, `analyzed_count`, `transpiled_count`, `auto_candidate_count`, `manual_review_count`, `unsupported_count` |
+| `T06_SQL_Artifact_Summary` | Run-level (run_if: ALL_DONE) | `deployment/NB_SQLArtifactSummary` | `run_id`, `catalog`, `control_schema`, `t24_status: {{tasks.T24_Lakebridge_Analyze_And_Transpile.values.status}}`, `t24_business_status: {{tasks.T24_Lakebridge_Analyze_And_Transpile.values.business_status}}` | `run_id`, `status`, `business_status`, `selected_candidate_count`, `fetched_definition_count`, `definition_missing_count`, `analyzed_count`, `transpiled_count` |
+| `T04_Materialize_Source_Artifacts` | Run-level (legacy reference) | `shared/NB18_MaterializeSourceArtifacts` | `run_id`, `catalog`, `control_schema` | `run_id`, `status` |
+| `T05_Migrate_SQL_Artifacts` | Run-level (legacy reference) | `shared/NB22_SQLArtifactMigrate` | `run_id`, `catalog`, `control_schema` | `run_id`, `status` |
+
 
 ---
 

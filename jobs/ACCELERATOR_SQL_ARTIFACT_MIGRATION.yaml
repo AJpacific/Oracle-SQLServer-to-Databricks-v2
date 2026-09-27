@@ -1,0 +1,100 @@
+# ==============================================================================
+# ACCELERATOR_SQL_ARTIFACT_MIGRATION
+# Databricks Job definition for independent SQL Artifact Migration workflow.
+# Operates on selected VIEW and PROCEDURE database objects discovered during assessment.
+# Completely separate from Full Load and Delta Sync.
+# Fetches raw definitions, runs Lakebridge Analyzer and BladeBridge transpilation,
+# stores converted SQL in Unity Catalog Volumes, and maintains sql_artifact_control.
+# Never executes or deploys converted SQL.
+#
+# Compute Requirements for T24 (Lakebridge):
+# - dedicated/single-user compatible compute
+# - Databricks Labs Lakebridge preinstalled
+# - BladeBridge preinstalled
+# - compatible Java (JRE/JDK) and Python prerequisites preinstalled
+# - cluster egress/package access where required during bootstrap
+# - secure Databricks CLI authentication provided at runtime
+# - source JDBC access for T23
+# - Unity Catalog Volume read/write access
+# - no credentials in YAML
+# ==============================================================================
+
+name: ACCELERATOR_SQL_ARTIFACT_MIGRATION
+description: "Data Modernization Accelerator V2 - SQL Artifact Migration Workflow (VIEW and PROCEDURE via Lakebridge BladeBridge)"
+
+parameters:
+  - name: catalog
+    default: "da_accelerators"
+  - name: control_schema
+    default: "control"
+  - name: connection_id
+    default: ""
+  - name: source_database
+    default: ""
+  - name: max_artifacts
+    default: "0"
+
+tasks:
+  - task_key: T00_Create_Run_Context
+    description: "Initializes unique run_id for the SQL artifact migration workflow."
+    notebook_task:
+      notebook_path: notebooks/deployment/NB_CreateRunContext
+      base_parameters:
+        catalog: "{{job.parameters.catalog}}"
+        control_schema: "{{job.parameters.control_schema}}"
+        run_prefix: "sql_artifact"
+
+  - task_key: T03_Init_SQL_Artifact_Control
+    description: "Initializes and additively upgrades dedicated sql_artifact_control and sql_artifact_execution_log tables."
+    depends_on:
+      - task_key: T00_Create_Run_Context
+    notebook_task:
+      notebook_path: notebooks/shared/NB21_SQLArtifactInit
+      base_parameters:
+        run_id: "{{tasks.T00_Create_Run_Context.values.run_id}}"
+        catalog: "{{job.parameters.catalog}}"
+        control_schema: "{{job.parameters.control_schema}}"
+
+  - task_key: T23_Fetch_Selected_SQL_Artifacts
+    description: "Fetches selected VIEW and PROCEDURE source definitions and stores raw SQL in _source_artifacts Volume."
+    depends_on:
+      - task_key: T03_Init_SQL_Artifact_Control
+    run_if: ALL_SUCCESS
+    notebook_task:
+      notebook_path: notebooks/shared/NB23_FetchSelectedSQLArtifacts
+      base_parameters:
+        run_id: "{{tasks.T00_Create_Run_Context.values.run_id}}"
+        catalog: "{{job.parameters.catalog}}"
+        control_schema: "{{job.parameters.control_schema}}"
+        connection_id: "{{job.parameters.connection_id}}"
+        source_database: "{{job.parameters.source_database}}"
+        max_artifacts: "{{job.parameters.max_artifacts}}"
+
+  - task_key: T24_Lakebridge_Analyze_And_Transpile
+    description: "Runs Databricks Labs Lakebridge Analyzer & BladeBridge transpilation, persists reports and converted SQL in Volumes."
+    depends_on:
+      - task_key: T23_Fetch_Selected_SQL_Artifacts
+    run_if: ALL_SUCCESS
+    notebook_task:
+      notebook_path: notebooks/shared/NB24_LakebridgeAnalyzeAndTranspile
+      base_parameters:
+        run_id: "{{tasks.T00_Create_Run_Context.values.run_id}}"
+        catalog: "{{job.parameters.catalog}}"
+        control_schema: "{{job.parameters.control_schema}}"
+        connection_id: "{{job.parameters.connection_id}}"
+        source_database: "{{job.parameters.source_database}}"
+        max_artifacts: "{{job.parameters.max_artifacts}}"
+
+  - task_key: T06_SQL_Artifact_Summary
+    description: "Collects execution and persistence metrics across the run and publishes summary task values."
+    depends_on:
+      - task_key: T24_Lakebridge_Analyze_And_Transpile
+    run_if: ALL_DONE
+    notebook_task:
+      notebook_path: notebooks/deployment/NB_SQLArtifactSummary
+      base_parameters:
+        run_id: "{{tasks.T00_Create_Run_Context.values.run_id}}"
+        catalog: "{{job.parameters.catalog}}"
+        control_schema: "{{job.parameters.control_schema}}"
+        t24_status: "{{tasks.T24_Lakebridge_Analyze_And_Transpile.values.status}}"
+        t24_business_status: "{{tasks.T24_Lakebridge_Analyze_And_Transpile.values.business_status}}"

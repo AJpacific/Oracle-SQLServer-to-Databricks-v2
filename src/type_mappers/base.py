@@ -127,3 +127,48 @@ def load_rules_from_yaml(path, expected_source, normalize_source,
         raise ValueError(
             f"Type-rules YAML {display_path!r} requires a types object")
     return validate_rule_overrides(raw_rules, normalize_family)
+
+
+def parse_integral_metadata(value: Any) -> int | None:
+    """Parse integer precision/scale metadata safely.
+
+    Accepts:
+      - int (excluding bool)
+      - float or Decimal with integral value (e.g. 18.0, Decimal("18.0"))
+      - string of digits (optionally with whitespace or negative sign e.g. "-2" or "18")
+    Rejects:
+      - bool (True, False)
+      - float("nan"), float("inf"), float("-inf")
+      - fractional floats/Decimals (18.9, Decimal("18.5"))
+      - strings containing decimal points or non-digits ("18.5", "abc")
+      - None or other non-numeric types
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        import math
+        if math.isnan(value) or math.isinf(value):
+            return None
+        if value.is_integer():
+            return int(value)
+        return None
+    from decimal import Decimal
+    if isinstance(value, Decimal):
+        import math
+        if value.is_nan() or value.is_infinite():
+            return None
+        if value == value.to_integral_value():
+            return int(value)
+        return None
+    if isinstance(value, str):
+        import re
+        s = value.strip()
+        if re.fullmatch(r"-?\d+", s):
+            try:
+                return int(s)
+            except ValueError:
+                return None
+        return None
+    return None

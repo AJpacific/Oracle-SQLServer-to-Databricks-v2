@@ -20,9 +20,9 @@ cannot be `READY` while required live checks remain `NOT_EXECUTED`.
 
 | Check | Environment | Expected result | Actual result | Evidence | Status | Owner or reviewer | Notes |
 |---|---|---|---|---|---|---|---|
-| Compile source and tests | Windows 11 Enterprise build 26200, Python 3.12.10 | `python -m compileall -q src tests notebooks` exits 0 | Exit 0 | `artifacts/test-results/compileall-output.txt` | PASSED | Release reviewer | Quiet mode produced no diagnostic output |
-| Run pytest suite | Windows 11 Enterprise build 26200, Python 3.12.10, pytest 9.0.2 | `python -m pytest tests -q` exits 0 with runner-reported counts | pytest: Exit 0, 1020 passed, 248 subtests passed | `artifacts/test-results/pytest-output.txt` | PASSED | Release reviewer | Runner emitted no failed, skipped, or warning count |
-| Run unittest discovery | Windows 11 Enterprise build 26200, Python 3.12.10 | `python -m unittest discover -s tests -v` exits 0 with runner-reported total | unittest: Exit 0, 1020 tests passed, OK | `artifacts/test-results/unittest-output.txt` | PASSED | Release reviewer | No failures or errors reported |
+| Compile source and tests | Windows 11 Enterprise build 26200, Python 3.12.10 | `python -m compileall -f -q src tests notebooks` exits 0 | Exit 0 | `artifacts/test-results/compileall-output.txt` | PASSED | Release reviewer | Quiet mode produced no diagnostic output |
+| Run pytest suite | Windows 11 Enterprise build 26200, Python 3.12.10, pytest 9.0.2 | `python -m pytest -q` exits 0 with runner-reported counts | pytest: Exit 0, 1306 passed, 292 subtests passed | `artifacts/test-results/pytest-output.txt` | PASSED | Release reviewer | Runner emitted no failed, skipped, or warning count |
+| Run unittest discovery | Windows 11 Enterprise build 26200, Python 3.12.10 | `python -m unittest discover -s tests -p "test_*.py" -v` exits 0 with runner-reported total | unittest: Exit 0, 1306 tests passed, OK | `artifacts/test-results/unittest-output.txt` | PASSED | Release reviewer | No failures or errors reported |
 | Review test summary | Windows 11 Enterprise build 26200 | JSON records UTC timestamp, commands, exits, counts, and overall status | Summary records all exits as 0 and overall status PASSED | `artifacts/test-results/test-summary.json` | PASSED | Release reviewer | Unreported pytest zero categories remain null rather than inferred |
 | Run modularity scan | Repository source review and pytest | Shared code has no source branches, defaults, dialect SQL, credentials, or concrete adapter construction | Executable AST, text, and ownership scans passed | `artifacts/test-results/pytest-output.txt` and release delivery report | PASSED | Release reviewer | Compatibility facade and concrete mappers classified separately |
 | Run secret and raw-error scan | Repository source review | No committed secret and no unsanitized exception print/persistence | No raw exception print/persistence or credential value found; approved source keys and sanitizer patterns remain | Release delivery report | PASSED | Release reviewer | Synthetic test fixtures classified separately |
@@ -194,3 +194,24 @@ cannot be `READY` while required live checks remain `NOT_EXECUTED`.
 | MAX LOB columns | Live SQL Server | varchar(max), nvarchar(max), or varbinary(max) LOB allocation agrees | Not recorded | Comparison output | NOT_EXECUTED | TBD | Include LOB_DATA |
 | Row-overflow table | Live SQL Server | ROW_OVERFLOW_DATA allocation is included once | Not recorded | Comparison output | NOT_EXECUTED | TBD | Verify container relationship |
 | Partitioned table | Live SQL Server | Every supported partition is aggregated correctly | Not recorded | Comparison output | NOT_EXECUTED | TBD | Use NOT_APPLICABLE only if unsupported |
+
+## H. Live Lakebridge SQL artifact workflow checks
+
+| Check | Environment | Expected result | Actual result | Evidence | Status | Owner or reviewer | Notes |
+|---|---|---|---|---|---|---|---|
+| T23 Oracle selected VIEW fetch | Live Oracle and Databricks | Selected Oracle VIEW text fetched via JDBC without error | Not recorded | Raw SQL in Volume and control row | NOT_EXECUTED | TBD | Reads ALL_VIEWS |
+| T23 Oracle selected PROCEDURE fetch | Live Oracle and Databricks | Selected Oracle PROCEDURE text fetched via JDBC in line order | Not recorded | Raw SQL in Volume and control row | NOT_EXECUTED | TBD | Reads ALL_SOURCE |
+| T23 SQL Server selected VIEW fetch | Live SQL Server and Databricks | Selected SQL Server VIEW definition fetched via JDBC without error | Not recorded | Raw SQL in Volume and control row | NOT_EXECUTED | TBD | Reads sys.sql_modules |
+| T23 SQL Server selected PROCEDURE fetch | Live SQL Server and Databricks | Selected SQL Server PROCEDURE definition fetched via JDBC without error | Not recorded | Raw SQL in Volume and control row | NOT_EXECUTED | TBD | Reads sys.sql_modules |
+| Lakebridge availability | Live Databricks compute | `databricks labs lakebridge --help` exits 0 on target cluster | Not recorded | Command exit code and help output | NOT_EXECUTED | TBD | Requires Databricks Labs CLI |
+| BladeBridge configuration | Live Databricks compute | BladeBridge transpiler plugin is configured and discoverable | Not recorded | Lakebridge config/diagnostic output | NOT_EXECUTED | TBD | Invoked via lakebridge transpile |
+| Actual Analyzer workbook format | Live Databricks compute | Analyzer produces parseable XLSX report with expected sheets and headers | Not recorded | Stored XLSX in _lakebridge_reports Volume | NOT_EXECUTED | TBD | Verified against parser schema |
+| Actual transpile output layout | Live Databricks compute | Transpile output directory contains expected .sql files | Not recorded | Transpile output file listing | NOT_EXECUTED | TBD | Isolated per artifact attempt |
+| Task-value propagation | Live Databricks Workflow | T00, T03, T23, T24 task values propagate accurately to T06 | Not recorded | Workflow task values in run UI | NOT_EXECUTED | TBD | Run-level context |
+| Delta MERGE and append behavior | Live Databricks | sql_artifact_control MERGE and execution_log append succeed atomically | Not recorded | Delta table history and row counts | NOT_EXECUTED | TBD | Concurrent-safe |
+| Unity Catalog schema/Volume permissions | Live Databricks | CREATE SCHEMA IF NOT EXISTS and CREATE VOLUME succeed with governed access | Not recorded | Catalog/schema/volume grants in UC | NOT_EXECUTED | TBD | UC governance verified |
+| /Volumes file persistence | Live Databricks | Converted SQL, reports, and error logs persist under /Volumes | Not recorded | File existence and size in Volume path | NOT_EXECUTED | TBD | Atomic tmp-rename write |
+| Local attempt-directory cleanup | Live Databricks compute | Local attempt staging dir deleted on success, retained on failure | Not recorded | /local_disk0 staging directory inspection | NOT_EXECUTED | TBD | Unique attempt path |
+| Repeated-run behavior | Live Databricks | Rerun clears stale fields, increments attempt_count, resets to PENDING | Not recorded | Control row history across runs | NOT_EXECUTED | TBD | Idempotent reprocessing |
+| Concurrent runs | Live Databricks | Concurrent runs on disjoint artifact sets do not lock or collide | Not recorded | Run logs and control timestamps | NOT_EXECUTED | TBD | Attempt-safe staging |
+| Credential redaction | Live Databricks compute | Logs, metadata, and task values contain no PAT, secret, password, or JDBC token | Not recorded | Execution logs, driver logs, workflow values | NOT_EXECUTED | TBD | Verified against credential patterns |
