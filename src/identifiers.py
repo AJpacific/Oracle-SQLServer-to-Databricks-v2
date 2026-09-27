@@ -36,7 +36,8 @@ def normalize_target_identifier(name: str, identifier_type: str = "column") -> s
     if not trimmed:
         raise IdentifierError("Target identifier input is empty or blank")
 
-    lower_val = trimmed.lower()
+    ws_normalized = re.sub(r"\s+", "_", trimmed)
+    lower_val = ws_normalized.lower()
     replaced = re.sub(r"[^a-z0-9_]+", "_", lower_val)
     collapsed = re.sub(r"_+", "_", replaced)
     cleaned = collapsed.strip("_")
@@ -52,6 +53,10 @@ def normalize_target_identifier(name: str, identifier_type: str = "column") -> s
             "table": "table_",
             "schema": "schema_",
             "stage": "stage_",
+            "view": "view_",
+            "procedure": "procedure_",
+            "function": "function_",
+            "trigger": "trigger_",
         }
         prefix = prefix_map.get(prefix_type, f"{prefix_type.rstrip('_')}_")
         cleaned = f"{prefix}{cleaned}"

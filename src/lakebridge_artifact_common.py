@@ -1516,13 +1516,203 @@ def build_lakebridge_error_path(target_catalog: str, target_schema: str, run_id:
     return f"{base}errors/"
 
 
-def build_lakebridge_converted_path(target_catalog: str, target_schema: str, relative_path: str) -> str:
-    """Build Unity Catalog Volume converted file path for Lakebridge."""
+CONVERTED_ARTIFACT_CATALOG = "da_accelerators"
+CONVERTED_ARTIFACT_SCHEMA = "ConvertedArtifacts"
+CONVERTED_ARTIFACT_VOLUME = "converted_artifacts"
+CONVERTED_ARTIFACT_OWNERSHIP_TABLE = "converted_artifact_ownership"
+
+
+def build_create_converted_artifact_ownership_ddl(
+    catalog: str = CONVERTED_ARTIFACT_CATALOG,
+    schema: str = CONVERTED_ARTIFACT_SCHEMA,
+    table_name: str = CONVERTED_ARTIFACT_OWNERSHIP_TABLE,
+) -> str:
+    """Generate DDL for the Delta-backed converted artifact path ownership table."""
+    try:
+        from src.identifiers import quote_databricks
+    except ModuleNotFoundError:
+        from identifiers import quote_databricks
+    tbl_fqn = f"{quote_databricks(catalog)}.{quote_databricks(schema)}.{quote_databricks(table_name)}"
+    return f"""CREATE TABLE IF NOT EXISTS {tbl_fqn} (
+    artifact_path STRING NOT NULL,
+    canonical_owner_id STRING NOT NULL,
+    artifact_id STRING,
+    source_system STRING,
+    connection_id STRING,
+    run_id STRING,
+    created_ts TIMESTAMP NOT NULL,
+    updated_ts TIMESTAMP NOT NULL
+) USING DELTA"""
+
+
+def claim_converted_artifact_path(
+    spark: Any,
+    artifact_path: str,
+    canonical_owner_id: str,
+    artifact_id: Optional[str] = None,
+    source_system: Optional[str] = None,
+    connection_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+    catalog: str = CONVERTED_ARTIFACT_CATALOG,
+    schema: str = CONVERTED_ARTIFACT_SCHEMA,
+    table_name: str = CONVERTED_ARTIFACT_OWNERSHIP_TABLE,
+    in_memory_claims: Optional[Dict[str, str]] = None,
+) -> Tuple[bool, Optional[str]]:
+    """Fail-closed, concurrency-safe path ownership claim backed by Delta Lake.
+
+    Keyed by:
+      - normalized complete Volume path (artifact_path)
+      - canonical artifact owner identity (canonical_owner_id)
+
+    Returns:
+      (True, None) if claim succeeded or already owned by canonical_owner_id.
+      (False, error_msg) if already owned by another owner or conflict detected.
+    """
+    if not artifact_path or not str(artifact_path).strip():
+        return False, "ARTIFACT_PATH_COLLISION: artifact_path cannot be blank"
+    if not canonical_owner_id or not str(canonical_owner_id).strip():
+        return False, "ARTIFACT_PATH_COLLISION: canonical_owner_id cannot be blank"
+
+    norm_path = str(artifact_path).strip()
+    norm_owner = str(canonical_owner_id).strip()
+
+    # 1. Fast in-memory check for same-run collisions
+    if in_memory_claims is not None:
+        existing_in_mem = in_memory_claims.get(norm_path)
+        if existing_in_mem is not None and existing_in_mem != norm_owner:
+            return False, (
+                f"ARTIFACT_PATH_COLLISION: Path '{norm_path}' is claimed by multiple candidates "
+                f"in the same run (claimed by '{existing_in_mem}', attempted by '{norm_owner}')"
+            )
+
+    # 2. Delta table check and claim if spark is available
+    if spark is not None:
+        try:
+            from src.identifiers import quote_databricks, escape_string_literal
+        except ModuleNotFoundError:
+            from identifiers import quote_databricks, escape_string_literal
+
+        tbl_fqn = f"{quote_databricks(catalog)}.{quote_databricks(schema)}.{quote_databricks(table_name)}"
+        esc_p = escape_string_literal(norm_path)
+        esc_o = escape_string_literal(norm_owner)
+        esc_aid = escape_string_literal(artifact_id) if artifact_id else "NULL"
+        esc_sys = escape_string_literal(source_system) if source_system else "NULL"
+        esc_cid = escape_string_literal(connection_id) if connection_id else "NULL"
+        esc_rid = escape_string_literal(run_id) if run_id else "NULL"
+
+        # Check existing row
+        check_q = f"SELECT canonical_owner_id FROM {tbl_fqn} WHERE artifact_path = {esc_p}"
+        try:
+            res_df = spark.sql(check_q)
+            rows = res_df.collect() if hasattr(res_df, "collect") else []
+        except Exception:
+            rows = []
+
+        if rows:
+            r = rows[0]
+            if hasattr(r, "asDict"):
+                existing_owner = r.asDict().get("canonical_owner_id")
+            elif isinstance(r, dict):
+                existing_owner = r.get("canonical_owner_id")
+            else:
+                existing_owner = getattr(r, "canonical_owner_id", str(r[0]))
+
+            if existing_owner and existing_owner != norm_owner:
+                return False, (
+                    f"ARTIFACT_PATH_COLLISION: Path '{norm_path}' is already owned by "
+                    f"'{existing_owner}' (attempted by '{norm_owner}')"
+                )
+            # Same owner rerun: update timestamp and run_id
+            try:
+                spark.sql(f"""UPDATE {tbl_fqn}
+                    SET updated_ts = current_timestamp(), run_id = {esc_rid}
+                    WHERE artifact_path = {esc_p} AND canonical_owner_id = {esc_o}""")
+            except Exception:
+                pass
+            if in_memory_claims is not None:
+                in_memory_claims[norm_path] = norm_owner
+            return True, None
+
+        # Not yet claimed: perform concurrency-safe atomic MERGE
+        merge_q = f"""
+            MERGE INTO {tbl_fqn} t
+            USING (
+              SELECT {esc_p} AS artifact_path,
+                     {esc_o} AS canonical_owner_id,
+                     {esc_aid} AS artifact_id,
+                     {esc_sys} AS source_system,
+                     {esc_cid} AS connection_id,
+                     {esc_rid} AS run_id
+            ) s
+            ON t.artifact_path = s.artifact_path
+            WHEN MATCHED AND t.canonical_owner_id = s.canonical_owner_id THEN UPDATE SET
+              t.updated_ts = current_timestamp(),
+              t.run_id = s.run_id
+            WHEN NOT MATCHED THEN INSERT (
+              artifact_path, canonical_owner_id, artifact_id, source_system,
+              connection_id, run_id, created_ts, updated_ts
+            ) VALUES (
+              s.artifact_path, s.canonical_owner_id, s.artifact_id, s.source_system,
+              s.connection_id, s.run_id, current_timestamp(), current_timestamp()
+            )
+        """
+        try:
+            spark.sql(merge_q)
+        except Exception as e:
+            return False, f"ARTIFACT_PATH_COLLISION: Claim transaction failed for '{norm_path}': {e}"
+
+        # Post-MERGE verification to ensure we won the claim in concurrent races
+        try:
+            verify_df = spark.sql(check_q)
+            v_rows = verify_df.collect() if hasattr(verify_df, "collect") else []
+        except Exception:
+            v_rows = []
+
+        if v_rows:
+            vr = v_rows[0]
+            if hasattr(vr, "asDict"):
+                actual_owner = vr.asDict().get("canonical_owner_id")
+            elif isinstance(vr, dict):
+                actual_owner = vr.get("canonical_owner_id")
+            else:
+                actual_owner = getattr(vr, "canonical_owner_id", str(vr[0]))
+
+            if actual_owner and actual_owner != norm_owner:
+                return False, (
+                    f"ARTIFACT_PATH_COLLISION: Path '{norm_path}' was concurrently claimed by "
+                    f"'{actual_owner}' (attempted by '{norm_owner}')"
+                )
+
+    if in_memory_claims is not None:
+        in_memory_claims[norm_path] = norm_owner
+
+    return True, None
+
+
+
+def build_lakebridge_converted_path(*args: Any, **kwargs: Any) -> str:
+    """Build Unity Catalog Volume converted file path for Lakebridge.
+
+    Always uses the centralized storage structure:
+      /Volumes/da_accelerators/ConvertedArtifacts/converted_artifacts/<relative_path>
+    """
+    rel_path = kwargs.get("relative_path")
+    if not rel_path:
+        if len(args) == 1:
+            rel_path = args[0]
+        elif len(args) == 3:
+            rel_path = args[2]
+        elif len(args) > 0:
+            rel_path = args[-1]
+
+    if not rel_path or not str(rel_path).strip():
+        raise ValueError("relative_path is required to build lakebridge converted path")
+
     return build_artifact_volume_path(
-        target_catalog=target_catalog,
-        target_schema=target_schema,
-        volume_name="_converted_artifacts",
-        relative_path=relative_path,
+        target_catalog=CONVERTED_ARTIFACT_CATALOG,
+        target_schema=CONVERTED_ARTIFACT_SCHEMA,
+        volume_name=CONVERTED_ARTIFACT_VOLUME,
+        relative_path=rel_path,
     )
 
 

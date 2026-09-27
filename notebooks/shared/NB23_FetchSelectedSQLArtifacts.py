@@ -261,6 +261,7 @@ def persist_control_row(row_entry: Dict[str, Any]) -> None:
           t.run_id = s.run_id,
           t.converted_definition = NULL,
           t.converted_definition_hash = NULL,
+          t.converted_artifact_path = NULL,
           t.conversion_ts = NULL,
           t.lakebridge_analyzed_ts = NULL,
           t.lakebridge_complexity = NULL,
@@ -286,6 +287,7 @@ def persist_control_row(row_entry: Dict[str, Any]) -> None:
           source_schema, object_name, object_type, target_catalog,
           target_schema, target_object_name, source_definition,
           converted_definition, source_definition_hash, converted_definition_hash,
+          converted_artifact_path,
           conversion_classification, conversion_status, deployment_status,
           manual_review_required, manual_review_reason, unsupported_features,
           error_code, error_message, attempt_count, first_seen_ts,
@@ -303,6 +305,7 @@ def persist_control_row(row_entry: Dict[str, Any]) -> None:
           s.source_schema, s.object_name, s.object_type, s.target_catalog,
           s.target_schema, s.target_object_name, s.source_definition,
           s.converted_definition, s.source_definition_hash, s.converted_definition_hash,
+          s.converted_artifact_path,
           s.conversion_classification, s.conversion_status, s.deployment_status,
           s.manual_review_required, s.manual_review_reason, s.unsupported_features,
           s.error_code, s.error_message, s.attempt_count, s.first_seen_ts,
@@ -563,6 +566,7 @@ for (conn_id, src_sys, src_db), group_candidates in groups.items():
                 source_schema=sch,
                 object_type=otype,
                 object_name=oname,
+                include_connection_id=True,
             )
             vol_path = build_artifact_volume_path(
                 target_catalog=target_cat,

@@ -1202,10 +1202,10 @@ class TestConvertAndStorePipelineRequirements(unittest.TestCase):
         self.assertIsNone(res["error_raised"])
         self.assertEqual(res["exit_payload"]["status"], "SUCCEEDED")
 
-        # Converted SQL written as .sql files under /Volumes/
+        # Converted SQL written as .sql files under /Volumes/da_accelerators/ConvertedArtifacts/converted_artifacts/
         files = res["fs"].files
-        self.assertIn("/Volumes/da_accelerators/hr/_converted_artifacts/conn1/hr/views/v_auto.sql", files)
-        self.assertIn("/Volumes/da_accelerators/hr/_converted_artifacts/conn1/hr/views/v_manual.sql", files)
+        self.assertIn("/Volumes/da_accelerators/ConvertedArtifacts/converted_artifacts/_no_database/HR/views/V_AUTO.sql", files)
+        self.assertIn("/Volumes/da_accelerators/ConvertedArtifacts/converted_artifacts/_no_database/HR/views/V_MANUAL.sql", files)
         self.assertGreaterEqual(res["fs"].replace_count, 2, "Atomic replace must be used for file writes")
 
         # CREATE SCHEMA IF NOT EXISTS and CREATE VOLUME are executed before writing
@@ -1222,6 +1222,7 @@ class TestConvertAndStorePipelineRequirements(unittest.TestCase):
         self.assertEqual(len(all_merged_rows), 2)
         for r in all_merged_rows:
             self.assertEqual(r["deployment_status"], "NOT_DEPLOYED")
+            self.assertIsNotNone(r["converted_artifact_path"])
             self.assertIsNotNone(r["converted_definition"])
             self.assertIsNotNone(r["converted_definition_hash"])
             self.assertIn(r["conversion_classification"], ["AUTO", "MANUAL_REVIEW"])

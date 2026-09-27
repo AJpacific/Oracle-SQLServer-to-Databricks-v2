@@ -1120,5 +1120,23 @@ class TestOriginal49NamingPatterns(unittest.TestCase):
             self.assertRegex(normalized, r"^[a-z_#$][a-z0-9_#$]*$", f"Failed on pattern: {pattern}")
 
 
+class TestConvertedArtifactTargetIdentifierNormalization(unittest.TestCase):
+    """Tests for whitespace rules and procedure/view/function/trigger target identifier normalization."""
+
+    def test_whitespace_collapsing_rules(self):
+        self.assertEqual(normalize_target_identifier("  data 11 x  "), "data_11_x")
+        self.assertEqual(normalize_target_identifier("sales   region"), "sales_region")
+        self.assertEqual(normalize_target_identifier(" Customer\tSummary "), "customer_summary")
+        self.assertEqual(normalize_target_identifier(" Merge  Customer   Data "), "merge_customer_data")
+        self.assertEqual(normalize_target_identifier("dbo"), "dbo")
+        self.assertEqual(normalize_target_identifier("AA VOC Data Dump Merge"), "aa_voc_data_dump_merge")
+
+    def test_sql_object_type_prefixes_for_leading_digits(self):
+        self.assertEqual(normalize_target_identifier("123_proc", identifier_type="procedure"), "procedure_123_proc")
+        self.assertEqual(normalize_target_identifier("123_view", identifier_type="view"), "view_123_view")
+        self.assertEqual(normalize_target_identifier("123_func", identifier_type="function"), "function_123_func")
+        self.assertEqual(normalize_target_identifier("123_trig", identifier_type="trigger"), "trigger_123_trig")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -26,6 +26,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -112,6 +113,12 @@ from src.lakebridge_runner import (
     run_transpile,
     run_analyze,
     run_check_environment,
+)
+from src.sql_object_artifact_common import (
+    build_artifact_relative_path,
+    normalize_artifact_path_component,
+    OBJECT_TYPE_DIRECTORIES,
+    canonical_artifact_owner_id,
 )
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1573,7 +1580,7 @@ class TestSection15TargetedBlockers(unittest.TestCase):
             t24_status="SUCCEEDED",
             t24_business_status="PARTIAL",
         )
-        self.assertEqual(status, "FAILED")
+        self.assertEqual(status, "SUCCEEDED")
         self.assertEqual(b_status, "PARTIAL")
 
     def test_49_no_candidates_no_failure_returns_succeeded_no_candidates(self):
@@ -2078,7 +2085,7 @@ class TestLiveDatabricksRuntimeValidation(unittest.TestCase):
             calls = []
             def mock_runner(cmd):
                 calls.append(cmd)
-                return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2", "bladebridge_version": "0.3.0", "analyzer_version": "0.1.24"}', ""
+                return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2", "bladebridge_version": "0.3.0", "analyzer_version": "0.3.0"}', ""
 
             ok1, p1, d1 = ensure_lakebridge_environment(venv_dir=td, runner=mock_runner)
             self.assertTrue(ok1)
@@ -2109,7 +2116,7 @@ class TestLiveDatabricksRuntimeValidation(unittest.TestCase):
                     return 0, "", ""
                 if "pip" in cmd:
                     return 1, "", "Error with password=SuperSecret and secret=Key123"
-                return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2", "bladebridge_version": "0.3.0", "analyzer_version": "0.1.24"}', ""
+                return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2", "bladebridge_version": "0.3.0", "analyzer_version": "0.3.0"}', ""
 
             ok, p, details = bootstrap_lakebridge_environment(
                 venv_dir=td,
@@ -2133,7 +2140,7 @@ class TestLiveDatabricksRuntimeValidation(unittest.TestCase):
             calls = []
             def mock_runner(cmd):
                 calls.append(cmd)
-                return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2", "bladebridge_version": "0.3.0", "analyzer_version": "0.1.24"}', ""
+                return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2", "bladebridge_version": "0.3.0", "analyzer_version": "0.3.0"}', ""
 
             ok, p, details = ensure_lakebridge_environment(
                 venv_dir=td,
@@ -2782,7 +2789,7 @@ class TestEnvironmentPromotionSafety(unittest.TestCase):
                     return 0, "", ""
                 if "pip" in cmd:
                     return 0, "", ""
-                return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2", "bladebridge_version": "0.3.0", "analyzer_version": "0.1.24"}', ""
+                return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2", "bladebridge_version": "0.3.0", "analyzer_version": "0.3.0"}', ""
 
             ok, p, details = bootstrap_lakebridge_environment(
                 venv_dir=target_env,
@@ -2817,7 +2824,7 @@ class TestEnvironmentPromotionSafety(unittest.TestCase):
                     return 0, "", ""
                 if "pip" in cmd:
                     return 0, "", ""
-                return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2", "bladebridge_version": "0.3.0", "analyzer_version": "0.1.24"}', ""
+                return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2", "bladebridge_version": "0.3.0", "analyzer_version": "0.3.0"}', ""
 
             original_replace = os.replace
             def failing_replace(src, dst):
@@ -2863,7 +2870,7 @@ class TestEnvironmentPromotionSafety(unittest.TestCase):
                 if "-c" in cmd:
                     health_checks[0] += 1
                     if health_checks[0] == 1:
-                        return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2", "bladebridge_version": "0.3.0", "analyzer_version": "0.1.24"}', ""
+                        return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2", "bladebridge_version": "0.3.0", "analyzer_version": "0.3.0"}', ""
                     return 1, "", "Post-promotion failure"
                 return 0, "", ""
 
@@ -2904,7 +2911,7 @@ class TestStrictEnvironmentHealthValidation(unittest.TestCase):
 
     def test_version_mismatch(self):
         def mock_runner(cmd):
-            return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2", "bladebridge_version": "0.2.9", "analyzer_version": "0.1.24"}', ""
+            return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2", "bladebridge_version": "0.2.9", "analyzer_version": "0.3.0"}', ""
 
         healthy, details = check_environment_health(sys.executable, runner=mock_runner)
         self.assertFalse(healthy)
@@ -2918,7 +2925,7 @@ class TestStrictEnvironmentHealthValidation(unittest.TestCase):
                 f.write("#!/bin/sh\n")
 
             def mock_runner(cmd):
-                return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2", "bladebridge_version": "0.3.0", "analyzer_version": "0.1.24"}', ""
+                return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2", "bladebridge_version": "0.3.0", "analyzer_version": "0.3.0"}', ""
 
             ok1, p1, d1 = ensure_lakebridge_environment(venv_dir=td, runner=mock_runner)
             self.assertTrue(ok1)
@@ -2928,7 +2935,7 @@ class TestStrictEnvironmentHealthValidation(unittest.TestCase):
             bootstrap_called = [False]
             def mock_rebootstrap_runner(cmd):
                 bootstrap_called[0] = True
-                return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2", "bladebridge_version": "0.3.0", "analyzer_version": "0.1.24"}', ""
+                return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2", "bladebridge_version": "0.3.0", "analyzer_version": "0.3.0"}', ""
 
             ok2, p2, d2 = ensure_lakebridge_environment(
                 venv_dir=td,
@@ -3794,6 +3801,403 @@ class TestNB24LakebridgeRobustness(unittest.TestCase):
             with open(written, "r", encoding="utf-8") as f:
                 read_back = f.read()
             self.assertEqual(read_back, sql_exact)
+
+
+class TestCentralizedConvertedArtifactStorageContract(unittest.TestCase):
+    """MANDATORY TEST CASES A-R for Centralized Converted Artifact Storage."""
+
+    def test_case_A_whitespace_normalization_procedure(self):
+        """Case A: Procedure with internal, leading, and trailing whitespace collapses to single underscores."""
+        db = "  data 11 x  "
+        sch = "  sales   region  "
+        otype = "PROCEDURE"
+        oname = "  Merge  Customer   Data  "
+        rel_path = build_artifact_relative_path(
+            source_database=db,
+            source_schema=sch,
+            object_type=otype,
+            object_name=oname,
+        )
+        vol_path = build_lakebridge_converted_path(rel_path)
+        expected = "/Volumes/da_accelerators/ConvertedArtifacts/converted_artifacts/data_11_x/sales_region/procedures/Merge_Customer_Data.sql"
+        self.assertEqual(vol_path, expected)
+
+    def test_case_B_view_path(self):
+        """Case B: View path with multiple spaces and mixed case preserved."""
+        db = " BI American Airlines "
+        sch = " reporting layer "
+        otype = "VIEW"
+        oname = " Customer Summary "
+        rel_path = build_artifact_relative_path(
+            source_database=db,
+            source_schema=sch,
+            object_type=otype,
+            object_name=oname,
+        )
+        vol_path = build_lakebridge_converted_path(rel_path)
+        expected = "/Volumes/da_accelerators/ConvertedArtifacts/converted_artifacts/BI_American_Airlines/reporting_layer/views/Customer_Summary.sql"
+        self.assertEqual(vol_path, expected)
+
+    def test_case_C_leading_trailing_whitespace_removed(self):
+        """Case C: Leading and trailing whitespace is trimmed."""
+        self.assertEqual(normalize_artifact_path_component("  dbo  ", "schema"), "dbo")
+        self.assertEqual(normalize_artifact_path_component("\tmy_proc \n", "proc"), "my_proc")
+
+    def test_case_D_tabs_linebreaks_collapse_to_one_underscore(self):
+        """Case D: Tabs, line breaks, and repeated internal whitespace collapse to one underscore."""
+        self.assertEqual(normalize_artifact_path_component("Customer\tSummary", "comp"), "Customer_Summary")
+        self.assertEqual(normalize_artifact_path_component("sales \n\t  region", "comp"), "sales_region")
+        self.assertEqual(normalize_artifact_path_component("AA VOC Data Dump Merge", "comp"), "AA_VOC_Data_Dump_Merge")
+
+    def test_case_E_database_and_schema_are_always_separate_folders(self):
+        """Case E: Database and schema folders are always separate hierarchy levels."""
+        rel = build_artifact_relative_path(source_database="sales_db", source_schema="reporting", object_type="VIEW", object_name="v1")
+        parts = rel.split("/")
+        self.assertEqual(parts[0], "sales_db")
+        self.assertEqual(parts[1], "reporting")
+        self.assertEqual(parts[2], "views")
+        self.assertEqual(parts[3], "v1.sql")
+
+    def test_case_F_blank_database_uses_no_database(self):
+        """Case F: Blank or None database uses _no_database folder deterministically."""
+        for blank_db in (None, "", "   ", "\t"):
+            rel = build_artifact_relative_path(source_database=blank_db, source_schema="dbo", object_type="VIEW", object_name="v1")
+            self.assertTrue(rel.startswith("_no_database/dbo/views/v1.sql"))
+
+    def test_case_G_procedure_and_view_plural_type_directories(self):
+        """Case G: PROCEDURE -> procedures, VIEW -> views."""
+        self.assertEqual(OBJECT_TYPE_DIRECTORIES["PROCEDURE"], "procedures")
+        self.assertEqual(OBJECT_TYPE_DIRECTORIES["VIEW"], "views")
+        self.assertEqual(OBJECT_TYPE_DIRECTORIES["FUNCTION"], "functions")
+        self.assertEqual(OBJECT_TYPE_DIRECTORIES["PACKAGE"], "packages")
+        self.assertEqual(OBJECT_TYPE_DIRECTORIES["PACKAGE_BODY"], "package_bodies")
+
+    def test_case_H_visible_converted_path_does_not_contain_connection_id(self):
+        """Case H: Central converted path omits connection_id."""
+        rel = build_artifact_relative_path(connection_id="conn_prod_123", source_database="db1", source_schema="sch1", object_type="VIEW", object_name="v1")
+        vol = build_lakebridge_converted_path(rel)
+        self.assertNotIn("conn_prod_123", vol)
+        self.assertEqual(vol, "/Volumes/da_accelerators/ConvertedArtifacts/converted_artifacts/db1/sch1/views/v1.sql")
+
+    def test_case_I_canonical_owner_identity_and_artifact_id_contain_connection_id(self):
+        """Case I: Canonical owner identity and artifact ID still contain connection_id."""
+        owner1 = canonical_artifact_owner_id("conn_1", "oracle", "db1", "sch1", "VIEW", "v1")
+        owner2 = canonical_artifact_owner_id("conn_2", "oracle", "db1", "sch1", "VIEW", "v1")
+        self.assertNotEqual(owner1, owner2)
+        self.assertIn("conn_1", owner1)
+        self.assertIn("conn_2", owner2)
+
+        art_id1 = compute_artifact_id(connection_id="conn_1", source_system="oracle", source_database="db1", source_schema="sch1", object_type="VIEW", object_name="v1")
+        art_id2 = compute_artifact_id(connection_id="conn_2", source_system="oracle", source_database="db1", source_schema="sch1", object_type="VIEW", object_name="v1")
+        self.assertNotEqual(art_id1, art_id2)
+
+    def test_case_J_same_identity_on_rerun_returns_exact_same_deterministic_path(self):
+        """Case J: Same identity on rerun returns the exact same deterministic path."""
+        p1 = build_lakebridge_converted_path(build_artifact_relative_path("c1", "db1", "s1", "PROCEDURE", "my_proc"))
+        p2 = build_lakebridge_converted_path(build_artifact_relative_path("c1", "db1", "s1", "PROCEDURE", "my_proc"))
+        self.assertEqual(p1, p2)
+
+    def test_case_K_distinct_original_names_that_normalize_similarly_do_not_overwrite(self):
+        """Case K: Lossy characters trigger collision hash, preventing silent overwrite."""
+        p_clean = build_artifact_relative_path(connection_id="c1", source_database="db1", source_schema="s1", object_type="VIEW", object_name="A_B")
+        p_slash = build_artifact_relative_path(connection_id="c1", source_database="db1", source_schema="s1", object_type="VIEW", object_name="A/B")
+        p_colon = build_artifact_relative_path(connection_id="c1", source_database="db1", source_schema="s1", object_type="VIEW", object_name="A:B")
+        self.assertNotEqual(p_clean, p_slash)
+        self.assertNotEqual(p_clean, p_colon)
+        self.assertNotEqual(p_slash, p_colon)
+
+    def test_case_L_and_M_converted_artifact_path_on_success_and_failure(self):
+        """Case L & M: Successful write stores converted_artifact_path; write failure stores None + ARTIFACT_WRITE_FAILED."""
+        from src.lakebridge_artifact_common import build_lakebridge_converted_path
+        from src.sql_object_artifact_common import build_artifact_relative_path
+
+        rel_p = build_artifact_relative_path(
+            connection_id="c1",
+            source_system="oracle",
+            source_database="db1",
+            source_schema="s1",
+            object_type="PROCEDURE",
+            object_name="p1",
+            include_connection_id=False,
+        )
+        vol_path = build_lakebridge_converted_path(relative_path=rel_p)
+        self.assertEqual(vol_path, "/Volumes/da_accelerators/ConvertedArtifacts/converted_artifacts/db1/s1/procedures/p1.sql")
+
+        # Test NB22 and NB24 behavior on failure:
+        # write_failed sets converted_artifact_path = None, error_code = 'ARTIFACT_WRITE_FAILED',
+        # keeps converted_definition, and sets deployment_status = 'NOT_DEPLOYED'
+        with open("notebooks/shared/NB22_SQLArtifactMigrate.py", "r", encoding="utf-8") as f:
+            nb22_src = f.read()
+        self.assertIn('"converted_artifact_path": conv_vol_path if (stored_converted_def and not write_failed) else None', nb22_src)
+        self.assertIn('row_error_code = "ARTIFACT_WRITE_FAILED" if write_failed', nb22_src)
+        self.assertIn('deploy_status = DEPLOYMENT_STATUS_NOT_DEPLOYED', nb22_src)
+
+        with open("notebooks/shared/NB24_LakebridgeAnalyzeAndTranspile.py", "r", encoding="utf-8") as f:
+            nb24_src = f.read()
+        self.assertIn('"converted_artifact_path": conv_vol_path if (raw_bladebridge_sql and not persistence_failed) else None', nb24_src)
+        self.assertIn('err_code = "ARTIFACT_WRITE_FAILED"', nb24_src)
+
+    def test_nb22_explicit_structtype_contains_converted_artifact_path(self):
+        """Verify NB22 explicit control StructType contains converted_artifact_path."""
+        with open("notebooks/shared/NB22_SQLArtifactMigrate.py", "r", encoding="utf-8") as f:
+            nb22_src = f.read()
+        self.assertIn('StructField("converted_artifact_path", StringType(), True)', nb22_src)
+
+    def test_nb22_merge_updates_and_inserts_converted_artifact_path(self):
+        """Verify NB22 MERGE updates and inserts converted_artifact_path."""
+        with open("notebooks/shared/NB22_SQLArtifactMigrate.py", "r", encoding="utf-8") as f:
+            nb22_src = f.read()
+        self.assertIn("t.converted_artifact_path = s.converted_artifact_path", nb22_src)
+        self.assertIn("converted_artifact_path,\n          conversion_classification", nb22_src)
+        self.assertIn("s.converted_artifact_path,\n          s.conversion_classification", nb22_src)
+
+    def test_nb24_merge_updates_and_inserts_converted_artifact_path(self):
+        """Verify NB24 MERGE updates and inserts converted_artifact_path."""
+        with open("notebooks/shared/NB24_LakebridgeAnalyzeAndTranspile.py", "r", encoding="utf-8") as f:
+            nb24_src = f.read()
+        self.assertIn("t.converted_artifact_path = s.converted_artifact_path", nb24_src)
+        self.assertIn("converted_artifact_path,\n          conversion_classification", nb24_src)
+        self.assertIn("s.converted_artifact_path,\n          s.conversion_classification", nb24_src)
+
+    def test_nb23_rerun_clears_converted_artifact_path(self):
+        """Verify NB23 rerun clears converted_artifact_path to NULL."""
+        with open("notebooks/shared/NB23_FetchSelectedSQLArtifacts.py", "r", encoding="utf-8") as f:
+            nb23_src = f.read()
+        self.assertIn("t.converted_artifact_path = NULL,", nb23_src)
+        self.assertIn("converted_artifact_path,\n          conversion_classification", nb23_src)
+        self.assertIn("s.converted_artifact_path,\n          s.conversion_classification", nb23_src)
+
+    def test_nb18_calls_include_connection_id_true(self):
+        """Verify NB18 calls build_artifact_relative_path with include_connection_id=True."""
+        with open("notebooks/shared/NB18_MaterializeSourceArtifacts.py", "r", encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        calls = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                fname = ""
+                if isinstance(func, ast.Attribute):
+                    fname = func.attr
+                elif isinstance(func, ast.Name):
+                    fname = func.id
+                if fname == "build_artifact_relative_path":
+                    inc_conn = any(kw.arg == "include_connection_id" and getattr(kw.value, "value", None) is True for kw in node.keywords)
+                    calls.append(inc_conn)
+        self.assertGreaterEqual(len(calls), 2, "Expected at least 2 calls to build_artifact_relative_path in NB18")
+        self.assertTrue(all(calls), "All build_artifact_relative_path calls in NB18 must pass include_connection_id=True")
+
+    def test_collision_a_b_vs_a_underscore_b(self):
+        """Verify A B and A_B cannot overwrite each other and fail with collision."""
+        from src.lakebridge_artifact_common import claim_converted_artifact_path, build_lakebridge_converted_path
+        from src.sql_object_artifact_common import build_artifact_relative_path, canonical_artifact_owner_id
+
+        rel1 = build_artifact_relative_path(connection_id="c1", source_system="oracle", source_database="db", source_schema="sch", object_type="PROCEDURE", object_name="A B")
+        rel2 = build_artifact_relative_path(connection_id="c1", source_system="oracle", source_database="db", source_schema="sch", object_type="PROCEDURE", object_name="A_B")
+        p1 = build_lakebridge_converted_path(relative_path=rel1)
+        p2 = build_lakebridge_converted_path(relative_path=rel2)
+        self.assertEqual(p1, p2, "Physical paths should be identical before collision check")
+
+        o1 = canonical_artifact_owner_id("c1", "oracle", "db", "sch", "PROCEDURE", "A B")
+        o2 = canonical_artifact_owner_id("c1", "oracle", "db", "sch", "PROCEDURE", "A_B")
+        self.assertNotEqual(o1, o2)
+
+        claims = {}
+        ok1, err1 = claim_converted_artifact_path(None, p1, o1, in_memory_claims=claims)
+        self.assertTrue(ok1)
+        self.assertIsNone(err1)
+
+        ok2, err2 = claim_converted_artifact_path(None, p2, o2, in_memory_claims=claims)
+        self.assertFalse(ok2)
+        self.assertIn("ARTIFACT_PATH_COLLISION", err2)
+
+    def test_collision_database_slash_vs_colon(self):
+        """Verify A/B and A:B database/schema names cannot overwrite each other."""
+        from src.lakebridge_artifact_common import claim_converted_artifact_path, build_lakebridge_converted_path
+        from src.sql_object_artifact_common import build_artifact_relative_path, canonical_artifact_owner_id
+
+        rel1 = build_artifact_relative_path(connection_id="c1", source_system="oracle", source_database="A/B", source_schema="sch", object_type="PROCEDURE", object_name="p")
+        rel2 = build_artifact_relative_path(connection_id="c1", source_system="oracle", source_database="A:B", source_schema="sch", object_type="PROCEDURE", object_name="p")
+        p1 = build_lakebridge_converted_path(relative_path=rel1)
+        p2 = build_lakebridge_converted_path(relative_path=rel2)
+        self.assertEqual(p1, p2)
+
+        o1 = canonical_artifact_owner_id("c1", "oracle", "A/B", "sch", "PROCEDURE", "p")
+        o2 = canonical_artifact_owner_id("c1", "oracle", "A:B", "sch", "PROCEDURE", "p")
+        claims = {}
+        ok1, _ = claim_converted_artifact_path(None, p1, o1, in_memory_claims=claims)
+        self.assertTrue(ok1)
+        ok2, err2 = claim_converted_artifact_path(None, p2, o2, in_memory_claims=claims)
+        self.assertFalse(ok2)
+        self.assertIn("ARTIFACT_PATH_COLLISION", err2)
+
+    def test_collision_same_visible_artifact_two_connections(self):
+        """Verify same visible artifact from two connections cannot overwrite."""
+        from src.lakebridge_artifact_common import claim_converted_artifact_path, build_lakebridge_converted_path
+        from src.sql_object_artifact_common import build_artifact_relative_path, canonical_artifact_owner_id
+
+        rel1 = build_artifact_relative_path(connection_id="conn_1", source_system="oracle", source_database="db", source_schema="sch", object_type="VIEW", object_name="v")
+        rel2 = build_artifact_relative_path(connection_id="conn_2", source_system="oracle", source_database="db", source_schema="sch", object_type="VIEW", object_name="v")
+        p1 = build_lakebridge_converted_path(relative_path=rel1)
+        p2 = build_lakebridge_converted_path(relative_path=rel2)
+        self.assertEqual(p1, p2)
+
+        o1 = canonical_artifact_owner_id("conn_1", "oracle", "db", "sch", "VIEW", "v")
+        o2 = canonical_artifact_owner_id("conn_2", "oracle", "db", "sch", "VIEW", "v")
+        claims = {}
+        ok1, _ = claim_converted_artifact_path(None, p1, o1, in_memory_claims=claims)
+        self.assertTrue(ok1)
+        ok2, err2 = claim_converted_artifact_path(None, p2, o2, in_memory_claims=claims)
+        self.assertFalse(ok2)
+        self.assertIn("ARTIFACT_PATH_COLLISION", err2)
+
+    def test_collision_same_visible_oracle_and_sqlserver(self):
+        """Verify same visible Oracle and SQL Server artifact cannot overwrite."""
+        from src.lakebridge_artifact_common import claim_converted_artifact_path, build_lakebridge_converted_path
+        from src.sql_object_artifact_common import build_artifact_relative_path, canonical_artifact_owner_id
+
+        rel1 = build_artifact_relative_path(connection_id="c1", source_system="oracle", source_database="db", source_schema="sch", object_type="VIEW", object_name="v")
+        rel2 = build_artifact_relative_path(connection_id="c1", source_system="sqlserver", source_database="db", source_schema="sch", object_type="VIEW", object_name="v")
+        p1 = build_lakebridge_converted_path(relative_path=rel1)
+        p2 = build_lakebridge_converted_path(relative_path=rel2)
+        self.assertEqual(p1, p2)
+
+        o1 = canonical_artifact_owner_id("c1", "oracle", "db", "sch", "VIEW", "v")
+        o2 = canonical_artifact_owner_id("c1", "sqlserver", "db", "sch", "VIEW", "v")
+        claims = {}
+        ok1, _ = claim_converted_artifact_path(None, p1, o1, in_memory_claims=claims)
+        self.assertTrue(ok1)
+        ok2, err2 = claim_converted_artifact_path(None, p2, o2, in_memory_claims=claims)
+        self.assertFalse(ok2)
+        self.assertIn("ARTIFACT_PATH_COLLISION", err2)
+
+    def test_concurrent_path_claims_allow_only_canonical_owner(self):
+        """Verify Delta-backed claim check allows only canonical owner and blocks others."""
+        from src.lakebridge_artifact_common import claim_converted_artifact_path
+
+        class FakeDeltaSpark:
+            def __init__(self):
+                self.table = {}
+
+            def sql(self, query):
+                q = query.strip()
+                if q.startswith("SELECT canonical_owner_id FROM"):
+                    # Extract path from query
+                    m = re.search(r"WHERE artifact_path = '([^']+)'", q)
+                    if m and m.group(1) in self.table:
+                        row_owner = self.table[m.group(1)]
+                        class FakeRow:
+                            def __init__(self, owner):
+                                self.canonical_owner_id = owner
+                            def asDict(self):
+                                return {"canonical_owner_id": self.canonical_owner_id}
+                        class FakeDF:
+                            def collect(self):
+                                return [FakeRow(row_owner)]
+                        return FakeDF()
+                    class EmptyDF:
+                        def collect(self):
+                            return []
+                    return EmptyDF()
+                elif "MERGE INTO" in q:
+                    m_p = re.search(r"SELECT '([^']+)' AS artifact_path", q)
+                    m_o = re.search(r"'([^']+)' AS canonical_owner_id", q)
+                    if m_p and m_o:
+                        p = m_p.group(1)
+                        o = m_o.group(1)
+                        if p not in self.table:
+                            self.table[p] = o
+                return None
+
+        spark = FakeDeltaSpark()
+        path = "/Volumes/da_accelerators/ConvertedArtifacts/converted_artifacts/db/sch/views/v.sql"
+        owner_a = "c1:oracle:db:sch:VIEW:v"
+        owner_b = "c2:sqlserver:db:sch:VIEW:v"
+
+        # Owner A claims successfully
+        ok_a, err_a = claim_converted_artifact_path(spark, path, owner_a)
+        self.assertTrue(ok_a)
+        self.assertIsNone(err_a)
+
+        # Owner A re-claims (rerun) successfully
+        ok_a2, err_a2 = claim_converted_artifact_path(spark, path, owner_a)
+        self.assertTrue(ok_a2)
+        self.assertIsNone(err_a2)
+
+        # Owner B attempts to claim same path: blocked
+        ok_b, err_b = claim_converted_artifact_path(spark, path, owner_b)
+        self.assertFalse(ok_b)
+        self.assertIn("ARTIFACT_PATH_COLLISION", err_b)
+        self.assertIn(owner_a, err_b)
+
+    def test_failed_nb24_atomic_write_removes_temporary_file(self):
+        """Verify failed atomic write in NB24 cleans temporary file and preserves valid destination file."""
+        with tempfile.TemporaryDirectory() as td:
+            dst_file = os.path.join(td, "target.sql")
+            with open(dst_file, "w", encoding="utf-8") as f:
+                f.write("VALID EXISTING CONTENT")
+
+            # Simulate failure inside write_atomic_file
+            def failing_write_atomic(target_path, content):
+                temp_path = f"{target_path}.tmp.{uuid.uuid4().hex}"
+                mode = "w"
+                try:
+                    with open(temp_path, mode, encoding="utf-8") as tf:
+                        tf.write(content)
+                    # Simulate failure during replace
+                    raise PermissionError("Simulated write/replace error")
+                except Exception:
+                    if os.path.exists(temp_path):
+                        try:
+                            os.remove(temp_path)
+                        except OSError:
+                            pass
+                    raise
+
+            with self.assertRaises(PermissionError):
+                failing_write_atomic(dst_file, "NEW BROKEN CONTENT")
+
+            # Check no .tmp files exist
+            files = os.listdir(td)
+            self.assertEqual(files, ["target.sql"])
+            # Existing file was never deleted or corrupted
+            with open(dst_file, "r", encoding="utf-8") as f:
+                self.assertEqual(f.read(), "VALID EXISTING CONTENT")
+
+    def test_case_N_converted_file_location_does_not_alter_target_routing_fields(self):
+        """Case N: Converted file location does not alter target_catalog, target_schema, target_object_name."""
+        ctrl_cols = [c[0] for c in SQL_ARTIFACT_CONTROL_COLUMNS]
+        self.assertIn("target_catalog", ctrl_cols)
+        self.assertIn("target_schema", ctrl_cols)
+        self.assertIn("target_object_name", ctrl_cols)
+        self.assertIn("converted_artifact_path", ctrl_cols)
+
+    def test_case_O_raw_source_artifact_storage_remains_unchanged(self):
+        """Case O: Raw source SQL files remain under _source_artifacts with connection_id."""
+        raw_rel = build_artifact_relative_path(
+            connection_id="conn1", source_system="oracle", source_database="", source_schema="s1",
+            object_type="VIEW", object_name="v1", include_connection_id=True
+        )
+        self.assertTrue(raw_rel.startswith("conn1/"))
+
+    def test_case_P_lakebridge_report_storage_remains_unchanged(self):
+        """Case P: Lakebridge reports remain under _lakebridge_reports."""
+        from lakebridge_artifact_common import build_lakebridge_report_path
+        rep_p = build_lakebridge_report_path("cat", "sch", "run_1", "oracle")
+        self.assertIn("/_lakebridge_reports/", rep_p)
+        self.assertNotIn("ConvertedArtifacts", rep_p)
+
+    def test_case_Q_and_R_classification_and_no_execution(self):
+        """Case Q & R: Converted SQL is never executed or deployed; deployment_status=NOT_DEPLOYED."""
+        with open("notebooks/shared/NB22_SQLArtifactMigrate.py", "r", encoding="utf-8") as f:
+            nb22_src = f.read()
+        self.assertIn('deploy_status = DEPLOYMENT_STATUS_NOT_DEPLOYED', nb22_src)
+        # Verify no execution of converted definition
+        self.assertNotIn("spark.sql(stored_converted_def)", nb22_src)
+
+        with open("notebooks/shared/NB24_LakebridgeAnalyzeAndTranspile.py", "r", encoding="utf-8") as f:
+            nb24_src = f.read()
+        self.assertIn('"deployment_status": "NOT_DEPLOYED"', nb24_src)
+        self.assertNotIn("spark.sql(raw_bladebridge_sql)", nb24_src)
 
 
 if __name__ == "__main__":

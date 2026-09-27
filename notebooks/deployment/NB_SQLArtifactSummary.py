@@ -171,6 +171,39 @@ set_task_value("fixme_artifact_count", fixme_artifact_count)
 set_task_value("source_fetch_failure_count", source_fetch_failure_count)
 set_task_value("persistent_store_failure_count", persistent_store_failure_count)
 
+# Engineering-level per-artifact result output
+artifact_rows = spark.sql(f"""
+    SELECT
+        object_name,
+        object_type,
+        source_database,
+        source_schema,
+        conversion_status,
+        coalesce(lakebridge_classification, conversion_classification) as lakebridge_classification,
+        manual_review_required,
+        converted_artifact_path,
+        error_code,
+        error_message
+    FROM {control_fqn}
+    WHERE run_id = {escape_string_literal(run_id)}
+    ORDER BY source_schema, object_type, object_name
+""").collect()
+
+artifact_summaries = []
+print("\n--- Engineering Artifact Summary ---")
+for r in artifact_rows:
+    d = r.asDict()
+    artifact_summaries.append(d)
+    print(
+        f"  [{d.get('object_type')}] {d.get('source_schema')}.{d.get('object_name')} "
+        f"status={d.get('conversion_status')} "
+        f"classification={d.get('lakebridge_classification')} "
+        f"manual_review={d.get('manual_review_required')} "
+        f"path={d.get('converted_artifact_path')} "
+        f"error={d.get('error_code') or 'NONE'}"
+    )
+print("------------------------------------\n")
+
 final_result = {
     "status": status,
     "business_status": business_status,
@@ -190,6 +223,7 @@ final_result = {
     "source_fetch_failure_count": source_fetch_failure_count,
     "persistent_store_failure_count": persistent_store_failure_count,
     "log_summary": log_counts,
+    "artifacts": artifact_summaries,
 }
 
 if status == "FAILED":

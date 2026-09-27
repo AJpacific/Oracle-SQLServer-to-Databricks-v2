@@ -10,7 +10,7 @@
 # MAGIC Discovers candidate artifacts from `source_assessment` where `is_selected = true`,
 # MAGIC joined to `sql_object_assessment`, resolves target routing from `accelerator_target_config`,
 # MAGIC transpiles to Databricks SQL, classifies into AUTO / MANUAL_REVIEW / UNSUPPORTED,
-# MAGIC writes converted SQL to Unity Catalog Volumes under `_converted_artifacts`,
+# MAGIC writes converted SQL to Unity Catalog Volumes under `converted_artifacts`,
 # MAGIC and records state strictly in `sql_artifact_control` and `sql_artifact_execution_log`.
 # MAGIC Never executes converted SQL. Creates target schema IF NOT EXISTS only to hold the volume. Never connects to source databases.
 
@@ -87,6 +87,16 @@ try:
         build_artifact_relative_path,
         build_artifact_volume_path,
         write_atomic_file,
+        canonical_artifact_owner_id,
+    )
+    from src.lakebridge_artifact_common import (
+        CONVERTED_ARTIFACT_CATALOG,
+        CONVERTED_ARTIFACT_SCHEMA,
+        CONVERTED_ARTIFACT_VOLUME,
+        CONVERTED_ARTIFACT_OWNERSHIP_TABLE,
+        build_lakebridge_converted_path,
+        build_create_converted_artifact_ownership_ddl,
+        claim_converted_artifact_path,
     )
 except ModuleNotFoundError:
     from identifiers import (
@@ -140,6 +150,16 @@ except ModuleNotFoundError:
         build_artifact_relative_path,
         build_artifact_volume_path,
         write_atomic_file,
+        canonical_artifact_owner_id,
+    )
+    from lakebridge_artifact_common import (
+        CONVERTED_ARTIFACT_CATALOG,
+        CONVERTED_ARTIFACT_SCHEMA,
+        CONVERTED_ARTIFACT_VOLUME,
+        CONVERTED_ARTIFACT_OWNERSHIP_TABLE,
+        build_lakebridge_converted_path,
+        build_create_converted_artifact_ownership_ddl,
+        claim_converted_artifact_path,
     )
 
 # COMMAND ----------
@@ -230,6 +250,7 @@ except Exception as e:
 
 # Cache for verified volumes
 verified_volumes = set()
+run_claimed_converted_paths: Dict[str, str] = {}
 
 converter = SQLArtifactConverter()
 
@@ -406,6 +427,7 @@ for artifact_id, norm_type, cand in candidates_to_process:
             "converted_definition": None,
             "source_definition_hash": "0" * 64,
             "converted_definition_hash": None,
+            "converted_artifact_path": None,
             "conversion_classification": CLASSIFICATION_UNSUPPORTED,
             "conversion_status": CONVERSION_STATUS_FAILED,
             "deployment_status": DEPLOYMENT_STATUS_NOT_DEPLOYED,
@@ -468,6 +490,7 @@ for artifact_id, norm_type, cand in candidates_to_process:
             "converted_definition": None,
             "source_definition_hash": "0" * 64,
             "converted_definition_hash": None,
+            "converted_artifact_path": None,
             "conversion_classification": CLASSIFICATION_MANUAL_REVIEW,
             "conversion_status": CONVERSION_STATUS_FAILED,
             "deployment_status": DEPLOYMENT_STATUS_NOT_DEPLOYED,
@@ -539,11 +562,20 @@ for artifact_id, norm_type, cand in candidates_to_process:
     stored_converted_def = conv_res.converted_definition if conv_res.converted_definition else None
     converted_hash = compute_definition_hash(stored_converted_def) if stored_converted_def else None
 
-    # Write converted SQL as a .sql file under /Volumes/<catalog>/<schema>/_converted_artifacts/<relative_path>
+    # Write converted SQL as a .sql file under /Volumes/da_accelerators/ConvertedArtifacts/converted_artifacts/<relative_path>
     write_failed = False
     write_err_msg = None
+    conv_vol_path = None
     if stored_converted_def:
         try:
+            owner_id = canonical_artifact_owner_id(
+                connection_id=conn_id,
+                source_system=src_sys,
+                source_database=src_db,
+                source_schema=src_sch,
+                object_type=norm_type,
+                object_name=obj_name,
+            )
             rel_path = build_artifact_relative_path(
                 connection_id=conn_id,
                 source_system=src_sys,
@@ -552,23 +584,33 @@ for artifact_id, norm_type, cand in candidates_to_process:
                 object_type=norm_type,
                 object_name=obj_name,
             )
-            conv_vol_path = build_artifact_volume_path(
-                target_catalog=target_cat,
-                target_schema=target_sch,
-                volume_name="_converted_artifacts",
-                relative_path=rel_path,
+            conv_vol_path = build_lakebridge_converted_path(relative_path=rel_path)
+            central_vol_key = (CONVERTED_ARTIFACT_CATALOG, CONVERTED_ARTIFACT_SCHEMA, CONVERTED_ARTIFACT_VOLUME)
+            if central_vol_key not in verified_volumes:
+                spark.sql(f"CREATE SCHEMA IF NOT EXISTS {quote_databricks(CONVERTED_ARTIFACT_CATALOG)}.{quote_databricks(CONVERTED_ARTIFACT_SCHEMA)}")
+                spark.sql(f"CREATE VOLUME IF NOT EXISTS {quote_databricks(CONVERTED_ARTIFACT_CATALOG)}.{quote_databricks(CONVERTED_ARTIFACT_SCHEMA)}.{quote_databricks(CONVERTED_ARTIFACT_VOLUME)}")
+                verified_volumes.add(central_vol_key)
+
+            claim_ok, claim_err = claim_converted_artifact_path(
+                spark=spark,
+                artifact_path=conv_vol_path,
+                canonical_owner_id=owner_id,
+                artifact_id=artifact_id,
+                source_system=src_sys,
+                connection_id=conn_id,
+                run_id=run_id,
+                in_memory_claims=run_claimed_converted_paths,
             )
-            vol_key = (target_cat, target_sch, "_converted_artifacts")
-            if vol_key not in verified_volumes:
-                spark.sql(f"CREATE SCHEMA IF NOT EXISTS {quote_databricks(target_cat)}.{quote_databricks(target_sch)}")
-                spark.sql(f"CREATE VOLUME IF NOT EXISTS {quote_databricks(target_cat)}.{quote_databricks(target_sch)}.`_converted_artifacts`")
-                verified_volumes.add(vol_key)
+            if not claim_ok:
+                raise RuntimeError(claim_err)
+
             write_atomic_file(conv_vol_path, stored_converted_def)
         except Exception as e:
             write_failed = True
             write_err_msg = sanitize_error(e)
             failed_count += 1
             artifact_write_failed_count += 1
+            conv_vol_path = None
             print(f"Error: Failed to write converted artifact file: {write_err_msg}")
 
     # Track classification counts
@@ -605,6 +647,7 @@ for artifact_id, norm_type, cand in candidates_to_process:
         "converted_definition": stored_converted_def,
         "source_definition_hash": source_hash,
         "converted_definition_hash": converted_hash,
+        "converted_artifact_path": conv_vol_path if (stored_converted_def and not write_failed) else None,
         "conversion_classification": conv_res.classification,
         "conversion_status": row_conversion_status,
         "deployment_status": deploy_status,
@@ -668,6 +711,7 @@ control_schema_struct = StructType([
     StructField("converted_definition", StringType(), True),
     StructField("source_definition_hash", StringType(), False),
     StructField("converted_definition_hash", StringType(), True),
+    StructField("converted_artifact_path", StringType(), True),
     StructField("conversion_classification", StringType(), False),
     StructField("conversion_status", StringType(), False),
     StructField("deployment_status", StringType(), False),
@@ -730,6 +774,7 @@ if control_updates:
           t.converted_definition = s.converted_definition,
           t.source_definition_hash = s.source_definition_hash,
           t.converted_definition_hash = s.converted_definition_hash,
+          t.converted_artifact_path = s.converted_artifact_path,
           t.conversion_classification = s.conversion_classification,
           t.conversion_status = s.conversion_status,
           t.deployment_status = s.deployment_status,
@@ -752,6 +797,7 @@ if control_updates:
           source_schema, object_name, object_type, target_catalog,
           target_schema, target_object_name, source_definition,
           converted_definition, source_definition_hash, converted_definition_hash,
+          converted_artifact_path,
           conversion_classification, conversion_status, deployment_status,
           manual_review_required, manual_review_reason, unsupported_features,
           error_code, error_message, attempt_count, first_seen_ts,
@@ -762,6 +808,7 @@ if control_updates:
           s.source_schema, s.object_name, s.object_type, s.target_catalog,
           s.target_schema, s.target_object_name, s.source_definition,
           s.converted_definition, s.source_definition_hash, s.converted_definition_hash,
+          s.converted_artifact_path,
           s.conversion_classification, s.conversion_status, s.deployment_status,
           s.manual_review_required, s.manual_review_reason, s.unsupported_features,
           s.error_code, s.error_message, s.attempt_count, s.first_seen_ts,

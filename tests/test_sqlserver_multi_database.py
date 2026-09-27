@@ -250,9 +250,13 @@ class TestAssessmentIsolationAcrossDatabases(unittest.TestCase):
         path_b = sqlobj_art.build_artifact_relative_path(
             "c1", "dbo", "PROCEDURE", "usp_Load", source_database="DB_B"
         )
-        self.assertEqual(path_a, "c1/db_a/dbo/procedures/usp_load.sql")
-        self.assertEqual(path_b, "c1/db_b/dbo/procedures/usp_load.sql")
+        self.assertEqual(path_a, "DB_A/dbo/procedures/usp_Load.sql")
+        self.assertEqual(path_b, "DB_B/dbo/procedures/usp_Load.sql")
         self.assertNotEqual(path_a, path_b)
+        path_a_conn = sqlobj_art.build_artifact_relative_path(
+            "c1", "dbo", "PROCEDURE", "usp_Load", source_database="DB_A", include_connection_id=True
+        )
+        self.assertEqual(path_a_conn, "c1/DB_A/dbo/procedures/usp_Load.sql")
 
     def test_artifact_owner_key_includes_source_database(self):
         row_a = {"connection_id": "c1", "source_database": "DB_A", "source_schema": "dbo", "object_type": "VIEW", "object_name": "v1"}

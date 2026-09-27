@@ -80,10 +80,17 @@ try:
         build_lakebridge_converted_path,
         build_lakebridge_error_path,
         has_usable_analyzer_results,
+        CONVERTED_ARTIFACT_CATALOG,
+        CONVERTED_ARTIFACT_SCHEMA,
+        CONVERTED_ARTIFACT_VOLUME,
+        CONVERTED_ARTIFACT_OWNERSHIP_TABLE,
+        build_create_converted_artifact_ownership_ddl,
+        claim_converted_artifact_path,
     )
     from src.sql_object_artifact_common import (
         build_artifact_relative_path,
         build_artifact_volume_path,
+        canonical_artifact_owner_id,
     )
     from src.lakebridge_environment import ensure_lakebridge_environment
     import src.lakebridge_runner as _lb_runner_module
@@ -137,10 +144,17 @@ except ModuleNotFoundError:
         build_lakebridge_converted_path,
         build_lakebridge_error_path,
         has_usable_analyzer_results,
+        CONVERTED_ARTIFACT_CATALOG,
+        CONVERTED_ARTIFACT_SCHEMA,
+        CONVERTED_ARTIFACT_VOLUME,
+        CONVERTED_ARTIFACT_OWNERSHIP_TABLE,
+        build_create_converted_artifact_ownership_ddl,
+        claim_converted_artifact_path,
     )
     from sql_object_artifact_common import (
         build_artifact_relative_path,
         build_artifact_volume_path,
+        canonical_artifact_owner_id,
     )
     from lakebridge_environment import ensure_lakebridge_environment
     import lakebridge_runner as _lb_runner_module
@@ -217,9 +231,17 @@ def write_atomic_file(target_path: str, content: Union[str, bytes]) -> None:
     os.makedirs(os.path.dirname(target_path), exist_ok=True)
     mode = "wb" if isinstance(content, bytes) else "w"
     encoding = None if isinstance(content, bytes) else "utf-8"
-    with open(temp_path, mode, encoding=encoding) as f:
-        f.write(content)
-    os.replace(temp_path, target_path)
+    try:
+        with open(temp_path, mode, encoding=encoding) as f:
+            f.write(content)
+        os.replace(temp_path, target_path)
+    except Exception:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+        raise
 
 # Optional custom runner for testing or dependency injection
 custom_lakebridge_runner: Optional[Callable[[Dict[str, Any], str, str], Dict[str, Any]]] = None
@@ -297,6 +319,7 @@ def execute_lakebridge_runner(
 
 verified_schemas: Set[Tuple[str, str]] = set()
 verified_volumes: Set[Tuple[str, str, str]] = set()
+run_claimed_converted_paths: Dict[str, str] = {}
 
 analyzed_count = 0
 transpiled_count = 0
@@ -356,6 +379,7 @@ def persist_control_row(row_entry: Dict[str, Any]) -> None:
         WHEN MATCHED THEN UPDATE SET
           t.converted_definition = s.converted_definition,
           t.converted_definition_hash = s.converted_definition_hash,
+          t.converted_artifact_path = s.converted_artifact_path,
           t.conversion_classification = s.conversion_classification,
           t.conversion_status = s.conversion_status,
           t.deployment_status = s.deployment_status,
@@ -391,6 +415,7 @@ def persist_control_row(row_entry: Dict[str, Any]) -> None:
           source_schema, object_name, object_type, target_catalog,
           target_schema, target_object_name, source_definition,
           converted_definition, source_definition_hash, converted_definition_hash,
+          converted_artifact_path,
           conversion_classification, conversion_status, deployment_status,
           manual_review_required, manual_review_reason, unsupported_features,
           error_code, error_message, attempt_count, first_seen_ts,
@@ -408,6 +433,7 @@ def persist_control_row(row_entry: Dict[str, Any]) -> None:
           s.source_schema, s.object_name, s.object_type, s.target_catalog,
           s.target_schema, s.target_object_name, s.source_definition,
           s.converted_definition, s.source_definition_hash, s.converted_definition_hash,
+          s.converted_artifact_path,
           s.conversion_classification, s.conversion_status, s.deployment_status,
           s.manual_review_required, s.manual_review_reason, s.unsupported_features,
           s.error_code, s.error_message, s.attempt_count, s.first_seen_ts,
@@ -672,8 +698,17 @@ for cand in candidates_to_process:
         store_start_ts = datetime.now(timezone.utc)
 
         # 7a. Persist converted SQL if produced
+        conv_vol_path: Optional[str] = None
         if raw_bladebridge_sql:
             try:
+                owner_id = canonical_artifact_owner_id(
+                    connection_id=conn_id,
+                    source_system=src_sys,
+                    source_database=src_db,
+                    source_schema=sch,
+                    object_type=otype,
+                    object_name=oname,
+                )
                 rel_path = build_artifact_relative_path(
                     connection_id=conn_id,
                     source_system=src_sys,
@@ -682,21 +717,32 @@ for cand in candidates_to_process:
                     object_type=otype,
                     object_name=oname,
                 )
-                conv_vol_path = build_artifact_volume_path(
-                    target_catalog=target_cat,
-                    target_schema=target_sch,
-                    volume_name="_converted_artifacts",
-                    relative_path=rel_path,
+                conv_vol_path = build_lakebridge_converted_path(relative_path=rel_path)
+                central_vol_key = (CONVERTED_ARTIFACT_CATALOG, CONVERTED_ARTIFACT_SCHEMA, CONVERTED_ARTIFACT_VOLUME)
+                if central_vol_key not in verified_volumes:
+                    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {quote_databricks(CONVERTED_ARTIFACT_CATALOG)}.{quote_databricks(CONVERTED_ARTIFACT_SCHEMA)}")
+                    spark.sql(f"CREATE VOLUME IF NOT EXISTS {quote_databricks(CONVERTED_ARTIFACT_CATALOG)}.{quote_databricks(CONVERTED_ARTIFACT_SCHEMA)}.{quote_databricks(CONVERTED_ARTIFACT_VOLUME)}")
+                    spark.sql(build_create_converted_artifact_ownership_ddl())
+                    verified_volumes.add(central_vol_key)
+
+                claim_ok, claim_err = claim_converted_artifact_path(
+                    spark=spark,
+                    artifact_path=conv_vol_path,
+                    canonical_owner_id=owner_id,
+                    artifact_id=art_id,
+                    source_system=src_sys,
+                    connection_id=conn_id,
+                    run_id=run_id,
+                    in_memory_claims=run_claimed_converted_paths,
                 )
-                vol_key = (target_cat, target_sch, "_converted_artifacts")
-                if vol_key not in verified_volumes:
-                    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {quote_databricks(target_cat)}.{quote_databricks(target_sch)}")
-                    spark.sql(f"CREATE VOLUME IF NOT EXISTS {quote_databricks(target_cat)}.{quote_databricks(target_sch)}.`_converted_artifacts`")
-                    verified_volumes.add(vol_key)
+                if not claim_ok:
+                    raise RuntimeError(claim_err)
+
                 write_atomic_file(conv_vol_path, raw_bladebridge_sql)
             except Exception as exc_p:
                 persistence_failed = True
                 persistence_err = f"Failed to persist converted SQL: {sanitize_error(exc_p)}"
+                conv_vol_path = None
 
         # 7b. Persist report file if produced
         for r_file in (report_file, report_json_file):
@@ -741,10 +787,11 @@ for cand in candidates_to_process:
             store_failure_count += 1
             cls_res = LAKEBRIDGE_CLASSIFICATION_UNSUPPORTED
             conv_status = "FAILED"
-            err_code = "PERSISTENT_STORE_FAILED"
+            err_code = "ARTIFACT_WRITE_FAILED"
             err_msg = persistence_err
             man_req = True
             man_reason = persistence_err
+            conv_vol_path = None
 
         # Increment classification counters only from the final stored classification
         if cls_res == LAKEBRIDGE_CLASSIFICATION_AUTO_CANDIDATE:
@@ -771,9 +818,10 @@ for cand in candidates_to_process:
                 or normalize_target_identifier(oname)
             ),
             "source_definition": src_def,
-            "converted_definition": raw_bladebridge_sql if not persistence_failed else None,
+            "converted_definition": raw_bladebridge_sql,
             "source_definition_hash": src_hash,
-            "converted_definition_hash": conv_hash if not persistence_failed else None,
+            "converted_definition_hash": conv_hash,
+            "converted_artifact_path": conv_vol_path if (raw_bladebridge_sql and not persistence_failed) else None,
             "conversion_classification": cls_res,
             "conversion_status": conv_status,
             "deployment_status": "NOT_DEPLOYED",
@@ -808,7 +856,7 @@ for cand in candidates_to_process:
             "lakebridge_validation_error_count": v_err,
             "lakebridge_generation_error_count": g_err,
             "lakebridge_fixme_count": fixme_count,
-            "lakebridge_transpiled_definition": raw_bladebridge_sql if not persistence_failed else None,
+            "lakebridge_transpiled_definition": raw_bladebridge_sql,
             "object_map_applied": False,
             "lakebridge_classification": cls_res,
         }
@@ -818,6 +866,11 @@ for cand in candidates_to_process:
         log_meta = {
             "source_system": src_sys,
             "connection_id": conn_id,
+            "source_database": src_db,
+            "source_schema": sch,
+            "object_name": oname,
+            "object_type": otype,
+            "converted_artifact_path": conv_vol_path if (raw_bladebridge_sql and not persistence_failed) else None,
             "complexity": complexity,
             "statement_count": stmt_count,
             "unknown_statement_count": unk_stmt_count,
@@ -949,6 +1002,7 @@ for cand in candidates_to_process:
                 "converted_definition": None,
                 "source_definition_hash": c_shash,
                 "converted_definition_hash": None,
+                "converted_artifact_path": None,
                 "conversion_classification": LAKEBRIDGE_CLASSIFICATION_UNSUPPORTED,
                 "conversion_status": "FAILED",
                 "deployment_status": "NOT_DEPLOYED",

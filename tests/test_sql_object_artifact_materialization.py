@@ -628,10 +628,13 @@ class TestSqlObjectArtifactMaterialization(unittest.TestCase):
         with self.assertRaises(ValueError):
             sqlobj_art.normalize_object_type("SEQUENCE")
 
-    # 3. Deterministic connection-owned artifact path.
+    # 3. Deterministic artifact path without connection_id, with mandatory database folder.
     def test_03_deterministic_connection_owned_artifact_path(self):
         path = sqlobj_art.build_artifact_relative_path("oracle_hr_prod", "hr", "VIEW", "employee_summary")
-        self.assertEqual(path, "oracle_hr_prod/hr/views/employee_summary.sql")
+        self.assertEqual(path, "_no_database/hr/views/employee_summary.sql")
+        # With include_connection_id=True
+        path_conn = sqlobj_art.build_artifact_relative_path("oracle_hr_prod", "hr", "VIEW", "employee_summary", include_connection_id=True)
+        self.assertEqual(path_conn, "oracle_hr_prod/_no_database/hr/views/employee_summary.sql")
 
     # 4. Source schema included in artifact path.
     def test_04_source_schema_included_in_artifact_path(self):
@@ -748,11 +751,15 @@ class TestSqlObjectArtifactMaterialization(unittest.TestCase):
         p_sales = sqlobj_art.build_artifact_relative_path("c1", "sales", "VIEW", "summary")
         self.assertNotEqual(p_hr, p_sales)
 
-    # 25. Different connections with same object do not collide.
+    # 25. Different connections with same object do not collide when connection_id included.
     def test_25_different_connections_do_not_collide(self):
-        p1 = sqlobj_art.build_artifact_relative_path("conn1", "hr", "VIEW", "summary")
-        p2 = sqlobj_art.build_artifact_relative_path("conn2", "hr", "VIEW", "summary")
+        p1 = sqlobj_art.build_artifact_relative_path("conn1", "hr", "VIEW", "summary", include_connection_id=True)
+        p2 = sqlobj_art.build_artifact_relative_path("conn2", "hr", "VIEW", "summary", include_connection_id=True)
         self.assertNotEqual(p1, p2)
+        # Canonical owner identity differentiates them
+        o1 = sqlobj_art.canonical_artifact_owner_id("conn1", "oracle", None, "hr", "VIEW", "summary")
+        o2 = sqlobj_art.canonical_artifact_owner_id("conn2", "oracle", None, "hr", "VIEW", "summary")
+        self.assertNotEqual(o1, o2)
 
     # 26. PACKAGE and PACKAGE_BODY do not collide.
     def test_26_package_and_package_body_do_not_collide(self):
@@ -1094,7 +1101,7 @@ class TestSqlObjectArtifactMaterialization(unittest.TestCase):
     def test_i40_unchanged_definition(self):
         source_def = "SELECT 1 FROM dual;"
         def_hash = sqlobj_art.definition_sha256(source_def)
-        vol_path = sqlobj_art.build_artifact_volume_path("da_accelerators", "s1", "_source_artifacts", sqlobj_art.build_artifact_relative_path("c1", "s1", "VIEW", "v1", source_database="db1"))
+        vol_path = sqlobj_art.build_artifact_volume_path("da_accelerators", "s1", "_source_artifacts", sqlobj_art.build_artifact_relative_path("c1", "s1", "VIEW", "v1", source_database="db1", include_connection_id=True))
         upd_ts = datetime(2026, 9, 20, 10, 0, 0, tzinfo=timezone.utc)
         crt_ts = datetime(2026, 9, 19, 10, 0, 0, tzinfo=timezone.utc)
         manifest_row = FakeRow(
@@ -1130,7 +1137,7 @@ class TestSqlObjectArtifactMaterialization(unittest.TestCase):
 
     # J. Changed definition
     def test_j41_changed_definition(self):
-        vol_path = sqlobj_art.build_artifact_volume_path("da_accelerators", "s1", "_source_artifacts", sqlobj_art.build_artifact_relative_path("c1", "s1", "VIEW", "v1", source_database="db1"))
+        vol_path = sqlobj_art.build_artifact_volume_path("da_accelerators", "s1", "_source_artifacts", sqlobj_art.build_artifact_relative_path("c1", "s1", "VIEW", "v1", source_database="db1", include_connection_id=True))
         manifest_row = FakeRow(
             connection_id="c1", source_database="db1", source_schema="s1", object_type="VIEW", object_name="v1",
             artifact_path=vol_path, source_definition_hash="old_hash", materialization_status="SUCCEEDED"
@@ -1394,7 +1401,7 @@ class TestSqlObjectArtifactMaterialization(unittest.TestCase):
     def test_concurrency_15_unchanged_result_cannot_overwrite_active_claim(self):
         source_def = "SELECT 1 FROM dual;"
         def_hash = sqlobj_art.definition_sha256(source_def)
-        vol_path = sqlobj_art.build_artifact_volume_path("da_accelerators", "s1", "_source_artifacts", sqlobj_art.build_artifact_relative_path("c1", "s1", "VIEW", "v1", source_database="db1"))
+        vol_path = sqlobj_art.build_artifact_volume_path("da_accelerators", "s1", "_source_artifacts", sqlobj_art.build_artifact_relative_path("c1", "s1", "VIEW", "v1", source_database="db1", include_connection_id=True))
         manifest_row = FakeRow(
             connection_id="c1", source_database="db1", source_schema="s1", object_type="VIEW", object_name="v1",
             artifact_path=vol_path, source_definition_hash=def_hash, materialization_status="SUCCEEDED",
@@ -1636,15 +1643,15 @@ class TestSqlObjectArtifactMaterialization(unittest.TestCase):
             ("TARGET_CONFIG_CHANGED", {"source_definition": "SELECT 1"}, {"manifest_rows": [FakeRow(connection_id="c1", source_schema="s1", object_type="VIEW", object_name="v1", artifact_path="/other/path.sql", materialization_status="SUCCEEDED", source_definition_hash="h1")]}),
             ("ARTIFACT_PATH_COLLISION", {"source_definition": "SELECT 1"}, {"manifest_rows": [FakeRow(connection_id="c1", source_database="db1", source_schema="s1", object_type="VIEW", object_name="v_other", artifact_path="/Volumes/da_accelerators/s1/_source_artifacts/c1/db1/s1/views/v1.sql", materialization_status="SUCCEEDED", source_definition_hash="h1")]}),
             ("FAILED", {"source_definition": "SELECT 1"}, {"manifest_rows": [
-                FakeRow(connection_id="c1", source_schema="s1", object_type="VIEW", object_name="v1", artifact_path="/Volumes/da_accelerators/s1/_source_artifacts/c1/s1/views/v1.sql", materialization_status="SUCCEEDED", source_definition_hash="h1"),
-                FakeRow(connection_id="c1", source_schema="s1", object_type="VIEW", object_name="v1", artifact_path="/Volumes/da_accelerators/s1/_source_artifacts/c1/s1/views/v1.sql", materialization_status="SUCCEEDED", source_definition_hash="h1"),
+                FakeRow(connection_id="c1", source_database="db1", source_schema="s1", object_type="VIEW", object_name="v1", artifact_path="/Volumes/da_accelerators/s1/_source_artifacts/c1/db1/s1/views/v1.sql", materialization_status="SUCCEEDED", source_definition_hash="h1"),
+                FakeRow(connection_id="c1", source_database="db1", source_schema="s1", object_type="VIEW", object_name="v1", artifact_path="/Volumes/da_accelerators/s1/_source_artifacts/c1/db1/s1/views/v1.sql", materialization_status="SUCCEEDED", source_definition_hash="h1"),
             ]}),
         ]
         for status_name, cand_kwargs, harness_kwargs in statuses_to_test:
             with self.subTest(status=status_name):
                 winner_upd = datetime(2026, 9, 21, 11, 55, 0, tzinfo=timezone.utc)
                 winner_crt = datetime(2026, 9, 21, 11, 50, 0, tzinfo=timezone.utc)
-                vol_path = "/Volumes/cat/s1/_source_artifacts/c1/s1/views/v1.sql"
+                vol_path = "/Volumes/cat/s1/_source_artifacts/c1/db1/s1/views/v1.sql"
 
                 def pre_general_merge_hook(spark_sess):
                     spark_sess.manifest_table[("c1", "s1", "VIEW", "v1")] = {

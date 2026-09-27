@@ -518,7 +518,7 @@ It is logically separated as Pipeline 5:
   - **Raw Materialization (`NB18` in Delta Sync):** Writes exact raw source definitions into governed Unity Catalog Volumes (`_source_artifacts`). Preserves source SQL text without conversion. Does not execute source SQL, does not classify source SQL for deployment, and does not deploy converted SQL objects.
   - **Control Initialization (`NB21`):** Initializes only dedicated SQL Artifact Migration control structures (`sql_artifact_control`, `sql_artifact_execution_log`) and run scope. Does not modify existing Full Load or Delta Sync processing state.
   - **Source Definition Fetch (`NB23`):** Performs selected-only Oracle and SQL Server JDBC definition fetches from registered source databases. Stores raw definitions under `_source_artifacts` Volumes. Validates connection ownership and source system before any JDBC connection is opened.
-  - **Lakebridge Analyze & Transpile (`NB24`):** Executes Databricks Labs Lakebridge Analyzer and BladeBridge transpilation via an isolated Python environment bootstrapped with uv (`Analyzer.analyze` and `Transpiler.transpile`). Stores reports and clean converted SQL (with MIME headers and boundaries stripped) in `_lakebridge_reports` and `_converted_artifacts` Volumes. Staging uses isolated unique attempt directories (`/local_disk0/sql_artifact_lakebridge/<run_id>/<artifact_id>/<attempt>/<uuid>/`). Cleans up attempt directory only on complete success; retains on failure for diagnostics. Never executes or deploys converted SQL.
+  - **Lakebridge Analyze & Transpile (`NB24`):** Executes Databricks Labs Lakebridge Analyzer and BladeBridge transpilation via an isolated Python environment bootstrapped with uv (`Analyzer.analyze` and `Transpiler.transpile`). Stores reports in `_lakebridge_reports` Volumes and clean converted SQL (with MIME headers and boundaries stripped) in the centralized Unity Catalog Volume `/Volumes/da_accelerators/ConvertedArtifacts/converted_artifacts/<database>/<schema>/<object_type>/<object>.sql`. Staging uses isolated unique attempt directories (`/local_disk0/sql_artifact_lakebridge/<run_id>/<artifact_id>/<attempt>/<uuid>/`). Cleans up attempt directory only on complete success; retains on failure for diagnostics. Never executes or deploys converted SQL.
   - **Summary & Audit (`NB_SQLArtifactSummary`):** Run-scoped aggregation and audit reporting; operates under `run_if: ALL_DONE` to capture final counts. Uses shared `decide_summary()` to evaluate both `t24_status` and `t24_business_status`. Fails closed if any execution-log stage failed. Publishes summary task values before raising for failures.
   - **Legacy Prototype References (`NB22` / `NB18`):** Legacy prototype `NB22_SQLArtifactMigrate` converts, classifies, and stores; does not deploy and does not connect to source databases. `NB18_MaterializeSourceArtifacts` remains documented as a raw materialization reference.
 - **Workflow Independence:**
@@ -538,11 +538,14 @@ It is logically separated as Pipeline 5:
   - `MANUAL_REVIEW`: Successfully converted `PROCEDURE`; successfully converted `VIEW` while `object_map_applied = false`; or objects with high complexity, unknown statements, fixmes, risk constructs, or validation errors. Stored if converted; never auto-deployed; `deployment_status = NOT_DEPLOYED`.
   - `UNSUPPORTED`: Non-migratable constructs (dynamic SQL, linked servers, proprietary lock hints); empty/missing definitions; out-of-scope objects such as `TRIGGER`; Analyzer failures or transpile failures. Stored if converted; never auto-deployed; `deployment_status = NOT_DEPLOYED`.
 - **Convert and Store Only (No Deployment):**
-  - Converted SQL is written to `/Volumes/<catalog>/<schema>/_converted_artifacts/<relative_path>` using atomic `temp-file + os.replace`.
-  - `CREATE SCHEMA IF NOT EXISTS` may be used only to support required Volumes. `CREATE VOLUME IF NOT EXISTS` is supported.
+  - Converted SQL is written to `/Volumes/da_accelerators/ConvertedArtifacts/converted_artifacts/<database>/<schema>/<object_type>/<object>.sql` using atomic `temp-file + os.replace`.
+  - Folder and filename whitespace is normalized (leading/trailing whitespace trimmed, repeated internal whitespace runs collapsed to a single underscore).
+  - Source metadata and original raw source definitions remain unchanged.
+  - Converted files are stored centrally; candidate target deployment routing (`target_catalog`, `target_schema`, `target_object_name`) remains separate and unchanged.
+  - Converted SQL is not executed automatically (`deployment_status = NOT_DEPLOYED` for every row).
+  - `CREATE SCHEMA IF NOT EXISTS` and `CREATE VOLUME IF NOT EXISTS` are run idempotently on `da_accelerators.ConvertedArtifacts.converted_artifacts`.
   - No target schemas for deployed views or procedures are created.
-  - No converted SQL DDL/DML (`CREATE OR REPLACE VIEW`, `CREATE PROCEDURE`) is executed (`spark.sql` on converted SQL removed).
-  - `deployment_status = NOT_DEPLOYED` for every row.
+  - No converted SQL DDL/DML (`CREATE OR REPLACE VIEW`, `CREATE PROCEDURE`) is executed.
 - **Job Parameters:**
   - `catalog`, `control_schema`, `connection_id` (optional filter), `source_database` (optional filter), `max_artifacts` (optional limit; invalid or negative raises).
   - `catalog` and `control_schema` are passed to every task.

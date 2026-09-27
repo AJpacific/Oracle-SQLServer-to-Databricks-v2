@@ -209,6 +209,7 @@ for r in candidates:
             source_schema=c_sch,
             object_type=c_type,
             object_name=c_name,
+            include_connection_id=True,
         )
         c_vol = sqlobj_art.build_artifact_volume_path(c_cat, c_target_sch, volume_name, c_rel)
         candidate_target_paths[c_owner] = (c_vol, c_rel, c_cat, c_target_sch)
@@ -596,6 +597,7 @@ for row in candidates:
             source_schema=source_sch,
             object_type=norm_type,
             object_name=obj_name,
+            include_connection_id=True,
         )
         vol_path = sqlobj_art.build_artifact_volume_path(target_cat, target_sch, volume_name, rel_path)
     except Exception as e:

@@ -314,15 +314,19 @@ reads a source secret scope.
   missing/corrupt artifact repair.
 - The SQL Artifact Migration workflow (`ACCELERATOR_SQL_ARTIFACT_MIGRATION`) is an
   independent pipeline operating separately from Full Load and Delta Sync. It initializes
-  dedicated control tables (`sql_artifact_control`, `sql_artifact_execution_log`) via
+  dedicated control tables (`sql_artifact_control`, `sql_artifact_execution_log`, and `converted_artifact_ownership`) via
   `NB21_SQLArtifactInit`.
-- `NB22_SQLArtifactMigrate` converts, classifies, and stores; does not deploy and does not connect to source databases. Reads only what Assessment (Job 1A) already captured. Objects are classified as `AUTO`, `MANUAL_REVIEW`, or `UNSUPPORTED`:
-  - `VIEW`: `AUTO` only after successful dialect conversion, external reference resolution via approved object map, and structural validation. Converted SQL is stored in Unity Catalog Volumes under `_converted_artifacts` via atomic writes; `deployment_status = NOT_DEPLOYED`.
-  - `PROCEDURE` and `FUNCTION`: Classified as `MANUAL_REVIEW`; never deployed. Converted SQL is stored if available; `deployment_status = NOT_DEPLOYED`.
-  - Oracle `PACKAGE` and `PACKAGE_BODY`: Classified as `MANUAL_REVIEW`; require manual decomposition; never deployed; `deployment_status = NOT_DEPLOYED`.
-  - `TRIGGER`: Excluded from default capture discovery; externally supplied trigger rows are classified as `UNSUPPORTED`; never deployed; `deployment_status = NOT_DEPLOYED`.
-  - Validation failures, comma-joins, or unresolved bare tables route to `MANUAL_REVIEW` or `UNSUPPORTED`.
-- Selection-driven candidates: Non-table rows in `source_assessment` where `is_selected = true`, joined on `run_id` to `sql_object_assessment`.
+- **Active Pipeline Flow**: The workflow converts, classifies, and stores; does not deploy and does not connect to source databases during conversion. Flow:
+  `NB23_FetchSelectedSQLArtifacts` → `NB24_LakebridgeAnalyzeAndTranspile` → `NB_SQLArtifactSummary`
+  - **Active Scope**: Strictly `VIEW` and `PROCEDURE` only. Functions, packages, and triggers are out of executable scope.
+  - **Source Fetch (`NB23`)**: Fetches definitions directly from registered source connections via JDBC and stages them. On rerun, previous `converted_artifact_path` is reset to NULL so stale successful paths cannot linger after failed or incomplete runs.
+  - **Lakebridge Analyze & Transpile (`NB24`)**: Runs Databricks Labs Lakebridge Analyzer and BladeBridge transpilation in an isolated runtime.
+  - **Centralized Converted Volume**: Converted SQL is stored in `/Volumes/da_accelerators/ConvertedArtifacts/converted_artifacts/<database>/<schema>/<type>/<file>.sql`.
+  - **Raw Source Artifacts**: Remain connection-owned under `_source_artifacts` (`_source_artifacts/<connection_id>/<database>/<schema>/<type>/<file>.sql`).
+  - **Fail-Closed Collision Prevention**: Concurrency-safe, Delta-backed path ownership record in `da_accelerators.ConvertedArtifacts.converted_artifact_ownership` keyed by normalized complete Volume path and canonical artifact owner identity (`connection_id:source_system:db:sch:type:name`). Blocks distinct source owners from overwriting the same physical file (e.g., "A B" vs "A_B", "A/B" vs "A:B", cross-connection, or cross-dialect).
+  - **Atomic File Writes & Cleanup**: Failed writes in NB24 automatically remove `.tmp.<uuid>` temporary files while preserving valid existing files.
+  - **Zero Deployment / Execution**: Converted SQL is never executed or deployed; `deployment_status = NOT_DEPLOYED`.
+- Selection-driven candidates: Non-table rows in `source_assessment` where `is_selected = true`.
 - `NB_SQLArtifactSummary` aggregates execution and classification metrics scoped strictly to the current `run_id`. If T05 status is not `SUCCEEDED`, reports `FAILED` and raises. Existing table pipeline control tables are read-only.
 
 ### Bronze-to-Silver ETL and data quality
@@ -708,17 +712,14 @@ claimed while required live checks remain `NOT_EXECUTED`.
 ## SQL Artifact Migration (Job: ACCELERATOR_SQL_ARTIFACT_MIGRATION)
 
 The SQL Artifact Migration workflow is defined in `jobs/ACCELERATOR_SQL_ARTIFACT_MIGRATION.yaml`.
-It is a selection-driven convert-and-store pipeline for non-table database objects (`VIEW`, `PROCEDURE`, `FUNCTION`, `PACKAGE`, `PACKAGE_BODY`).
-It converts, classifies, and stores; does not deploy and does not connect to source databases. It reads only what Assessment (Job 1A) already captured.
-NB18 preserves raw definitions without conversion, does not execute source SQL, and does not deploy converted SQL objects. Artifacts are never auto-deployed.
+It is a selection-driven convert-and-store pipeline for non-table database objects (`VIEW` and `PROCEDURE` in executable scope).
+NB23 fetches definitions directly from registered source connections via JDBC, NB24 analyzes and transpiles using Databricks Labs Lakebridge and BladeBridge in an isolated environment, and NB_SQLArtifactSummary summarizes the run metrics. Converted SQL is never executed or deployed.
 
-- **Selection-driven only**: Discovers non-table candidate objects from `source_assessment` where `is_selected = true`, joined to `sql_object_assessment` definitions from the same assessment run.
-- **Convert and Store Only**: Transpiles dialect SQL to Databricks SQL, classifies each artifact (`AUTO`, `MANUAL_REVIEW`, `UNSUPPORTED`), stores converted SQL as `.sql` files in Unity Catalog Volumes under `_converted_artifacts` using atomic writes (`temp-file + os.replace`), and records control status in `sql_artifact_control`.
-- **Zero Deployment**: No objects are deployed to Unity Catalog schemas, no target schemas are created, and `deployment_status = NOT_DEPLOYED` for every row. Objects are never auto-deployed.
-- **Job Graph**: Five sequential tasks:
-  1. `T00_Create_Run_Context` (`deployment/NB_CreateRunContext`)
-  2. `T03_Init_SQL_Artifact_Control` (`shared/NB21_SQLArtifactInit`)
-  3. `T04_Materialize_Source_Artifacts` (`shared/NB18_MaterializeSourceArtifacts`, `run_if: ALL_SUCCESS`)
-  4. `T05_Migrate_SQL_Artifacts` (`shared/NB22_SQLArtifactMigrate`, `run_if: ALL_SUCCESS`)
-  5. `T06_SQL_Artifact_Summary` (`deployment/NB_SQLArtifactSummary`, `run_if: ALL_DONE`)
+- **Active Pipeline Flow**:
+  1. `NB23_FetchSelectedSQLArtifacts`: Discovers selected `VIEW` and `PROCEDURE` candidates from `source_assessment` where `is_selected = true`, validates connection ownership, and fetches definitions via JDBC. Clears `converted_artifact_path = NULL` on rerun so stale paths never linger after failed or incomplete runs.
+  2. `NB24_LakebridgeAnalyzeAndTranspile`: Analyzes complexity and transpiles dialect SQL to Databricks SQL in an isolated runtime with uv. Stores converted `.sql` files in the centralized Unity Catalog Volume `/Volumes/da_accelerators/ConvertedArtifacts/converted_artifacts/<database>/<schema>/<type>/<file>.sql` using atomic writes (`temp-file + os.replace`) and cleans up `.tmp.<uuid>` on write failure.
+  3. `NB_SQLArtifactSummary`: Aggregates execution and classification metrics scoped strictly to the current `run_id`.
+- **Fail-Closed Concurrency-Safe Path Ownership**: Backed by `da_accelerators.ConvertedArtifacts.converted_artifact_ownership` keyed by normalized complete Volume path and canonical artifact owner identity (`connection_id:source_system:db:sch:type:name`). Prevents distinct source owners from overwriting the same physical file (including "A B" vs "A_B", "A/B" vs "A:B", cross-connection, and Oracle vs SQL Server).
+- **Raw Source Artifacts Preserved**: Materialized raw source definitions remain connection-owned under `/Volumes/<catalog>/<schema>/_source_artifacts/<connection_id>/<database>/<schema>/<type>/<file>.sql`.
+- **Zero Deployment / Execution**: Converted SQL is never executed or deployed; `deployment_status = NOT_DEPLOYED`. Objects are never auto-deployed.
 

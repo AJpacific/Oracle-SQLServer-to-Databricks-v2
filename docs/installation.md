@@ -63,6 +63,16 @@ creates the control schema, all control/audit tables, the `source_connection`,
 `dq_quarantine` tables, and idempotently adds the `connection_id`, identity-v2,
 ETL, retry, and reconciliation columns to existing tables.
 
+For SQL Artifact Migration, run `shared/NB21_SQLArtifactInit`. It idempotently initializes `sql_artifact_control` and `sql_artifact_execution_log`, additively adds `converted_artifact_path STRING` if missing, and ensures the centralized Unity Catalog schema and Volume exist:
+- Catalog: `da_accelerators`
+- Schema: `ConvertedArtifacts`
+- Volume: `converted_artifacts`
+- Physical storage hierarchy: `/Volumes/da_accelerators/ConvertedArtifacts/converted_artifacts/<database>/<schema>/<object_type>/<object>.sql`
+- Whitespace in folder and file names is normalized (leading/trailing trimmed, repeated internal whitespace collapsed to a single underscore).
+- Source metadata and original raw source definitions remain unchanged.
+- Converted files are stored centrally; candidate target deployment routing (`target_catalog`, `target_schema`, `target_object_name`) remains separate.
+- Converted files are not executed or deployed automatically (`deployment_status = NOT_DEPLOYED`).
+
 NB00 never rewrites a legacy `source_table_id`. It reports legacy or inconsistent
 ownership and directs operators to the explicit migration. Existing
 installations must run

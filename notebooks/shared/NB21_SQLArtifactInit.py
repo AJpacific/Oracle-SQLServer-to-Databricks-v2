@@ -16,6 +16,13 @@ import json
 
 try:
     from src.identifiers import quote_databricks, escape_string_literal
+    from src.lakebridge_artifact_common import (
+        CONVERTED_ARTIFACT_CATALOG,
+        CONVERTED_ARTIFACT_SCHEMA,
+        CONVERTED_ARTIFACT_VOLUME,
+        CONVERTED_ARTIFACT_OWNERSHIP_TABLE,
+        build_create_converted_artifact_ownership_ddl,
+    )
     from src.sql_artifact_control_common import (
         SQL_ARTIFACT_CONTROL_TABLE,
         SQL_ARTIFACT_EXECUTION_LOG_TABLE,
@@ -33,6 +40,13 @@ try:
     )
 except ModuleNotFoundError:
     from identifiers import quote_databricks, escape_string_literal
+    from lakebridge_artifact_common import (
+        CONVERTED_ARTIFACT_CATALOG,
+        CONVERTED_ARTIFACT_SCHEMA,
+        CONVERTED_ARTIFACT_VOLUME,
+        CONVERTED_ARTIFACT_OWNERSHIP_TABLE,
+        build_create_converted_artifact_ownership_ddl,
+    )
     from sql_artifact_control_common import (
         SQL_ARTIFACT_CONTROL_TABLE,
         SQL_ARTIFACT_EXECUTION_LOG_TABLE,
@@ -100,6 +114,23 @@ except Exception as e:
     raise RuntimeError(f"NB21 failed initializing/upgrading {SQL_ARTIFACT_EXECUTION_LOG_TABLE}: {safe_err}") from e
 
 print(f"SQL artifact execution log table ready: {catalog}.{control_schema}.{SQL_ARTIFACT_EXECUTION_LOG_TABLE}")
+
+# 2b. Create Centralized Converted Artifacts Schema and Volume
+try:
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {quote_databricks(CONVERTED_ARTIFACT_CATALOG)}.{quote_databricks(CONVERTED_ARTIFACT_SCHEMA)}")
+    spark.sql(f"CREATE VOLUME IF NOT EXISTS {quote_databricks(CONVERTED_ARTIFACT_CATALOG)}.{quote_databricks(CONVERTED_ARTIFACT_SCHEMA)}.{quote_databricks(CONVERTED_ARTIFACT_VOLUME)}")
+    print(f"Centralized converted artifacts volume ready: {CONVERTED_ARTIFACT_CATALOG}.{CONVERTED_ARTIFACT_SCHEMA}.{CONVERTED_ARTIFACT_VOLUME}")
+except Exception as e:
+    safe_err = sanitize_error(e)
+    raise RuntimeError(f"NB21 failed creating centralized converted artifacts volume: {safe_err}") from e
+
+# 2c. Create Centralized Converted Artifact Ownership Table
+try:
+    spark.sql(build_create_converted_artifact_ownership_ddl())
+    print(f"Centralized converted artifact ownership table ready: {CONVERTED_ARTIFACT_CATALOG}.{CONVERTED_ARTIFACT_SCHEMA}.{CONVERTED_ARTIFACT_OWNERSHIP_TABLE}")
+except Exception as e:
+    safe_err = sanitize_error(e)
+    raise RuntimeError(f"NB21 failed creating converted artifact ownership table: {safe_err}") from e
 
 # 3. Additive Legacy Upgrades for sql_object_assessment
 if _table_exists(assessment_fqn):

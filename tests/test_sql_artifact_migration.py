@@ -94,9 +94,11 @@ from sql_artifact_converter import (
 )
 from sql_object_artifact_common import (
     build_artifact_relative_path,
+    build_artifact_volume_path,
     canonical_artifact_owner_id,
     canonical_owner_key,
 )
+import sql_object_artifact_common as sqlobj_art
 import sqlserver_sql_builder as ss_builder
 from identifiers import (
     normalize_target_identifier,
@@ -456,7 +458,7 @@ class TestPathCollisionAndContract(unittest.TestCase):
     def test_distinct_names_normalizing_to_same_stem_do_not_collide(self):
         p_space = build_artifact_relative_path(
             connection_id="c1", source_system="oracle", source_schema="s1",
-            object_type="VIEW", object_name="A B"
+            object_type="VIEW", object_name="A B", append_hash=True
         )
         p_slash = build_artifact_relative_path(
             connection_id="c1", source_system="oracle", source_schema="s1",
@@ -484,8 +486,8 @@ class TestPathCollisionAndContract(unittest.TestCase):
     def test_same_run_colliding_candidates_rejected_foo_vs_FOO(self):
         from _fakes import FakeRow
         from test_sql_object_artifact_materialization import run_nb18_harness
-        cand1 = FakeRow(connection_id="c1", source_system="oracle", source_database="db1", source_schema="s1", object_name="Foo", object_type="VIEW", source_definition="SELECT 1")
-        cand2 = FakeRow(connection_id="c1", source_system="oracle", source_database="db1", source_schema="s1", object_name="FOO", object_type="VIEW", source_definition="SELECT 2")
+        cand1 = FakeRow(connection_id="c1", source_system="oracle", source_database="db1", source_schema="s1", object_name="Foo Bar", object_type="VIEW", source_definition="SELECT 1")
+        cand2 = FakeRow(connection_id="c1", source_system="oracle", source_database="db1", source_schema="s1", object_name="Foo  Bar", object_type="VIEW", source_definition="SELECT 2")
         res = run_nb18_harness(candidates=[cand1, cand2])
         # Neither colliding candidate is written
         self.assertEqual(res["fs"].write_count, 0)
@@ -502,10 +504,11 @@ class TestPathCollisionAndContract(unittest.TestCase):
             source_schema="dbo", object_type="PROCEDURE", object_name="ProcessOrders"
         )
         self.assertNotEqual(p_dba, p_dbb)
-        self.assertIn("/db_a/", p_dba)
-        self.assertIn("/db_b/", p_dbb)
+        self.assertIn("DB_A/dbo/", p_dba)
+        self.assertIn("DB_B/dbo/", p_dbb)
 
     def test_same_object_across_connections_distinct_paths(self):
+        # Centralized converted paths omit connection_id
         p_c1 = build_artifact_relative_path(
             connection_id="conn_1", source_system="oracle", source_schema="s1",
             object_type="VIEW", object_name="v_emp"
@@ -514,9 +517,19 @@ class TestPathCollisionAndContract(unittest.TestCase):
             connection_id="conn_2", source_system="oracle", source_schema="s1",
             object_type="VIEW", object_name="v_emp"
         )
-        self.assertNotEqual(p_c1, p_c2)
-        self.assertTrue(p_c1.startswith("conn_1/"))
-        self.assertTrue(p_c2.startswith("conn_2/"))
+        self.assertEqual(p_c1, p_c2)
+        # Connection-owned source paths retain connection_id
+        p_c1_conn = build_artifact_relative_path(
+            connection_id="conn_1", source_system="oracle", source_schema="s1",
+            object_type="VIEW", object_name="v_emp", include_connection_id=True
+        )
+        p_c2_conn = build_artifact_relative_path(
+            connection_id="conn_2", source_system="oracle", source_schema="s1",
+            object_type="VIEW", object_name="v_emp", include_connection_id=True
+        )
+        self.assertNotEqual(p_c1_conn, p_c2_conn)
+        self.assertTrue(p_c1_conn.startswith("conn_1/"))
+        self.assertTrue(p_c2_conn.startswith("conn_2/"))
 
     def test_package_and_package_body_distinct_paths(self):
         p_pkg = build_artifact_relative_path(
@@ -537,7 +550,7 @@ class TestPathCollisionAndContract(unittest.TestCase):
                 connection_id="c1", source_system="oracle", source_schema=sch,
                 object_type="VIEW", object_name="v_target"
             )
-            self.assertIn(f"/{sch.lower()}/views/", p)
+            self.assertIn(f"/{sch}/views/", p)
 
     def test_ambiguous_positional_arguments_rejected(self):
         with self.assertRaises(ValueError):
@@ -651,8 +664,8 @@ class TestBlocker1SameRunArtifactPathCollisions(unittest.TestCase):
         self.assertNotEqual(p1, p2)
 
     def test_case_only_name_differences_in_same_batch(self):
-        cand1 = FakeRow(connection_id="c1", source_system="oracle", source_database="", source_schema="s1", object_name="Foo", object_type="VIEW", source_definition="SELECT 1")
-        cand2 = FakeRow(connection_id="c1", source_system="oracle", source_database="", source_schema="s1", object_name="FOO", object_type="VIEW", source_definition="SELECT 2")
+        cand1 = FakeRow(connection_id="c1", source_system="oracle", source_database="", source_schema="s1", object_name="Foo Bar", object_type="VIEW", source_definition="SELECT 1")
+        cand2 = FakeRow(connection_id="c1", source_system="oracle", source_database="", source_schema="s1", object_name="Foo  Bar", object_type="VIEW", source_definition="SELECT 2")
         res = run_nb18_harness(candidates=[cand1, cand2])
         self.assertEqual(res["fs"].write_count, 0)
         self.assertEqual(res["task_values"]["failed_count"], 2)
@@ -681,17 +694,17 @@ class TestBlocker1SameRunArtifactPathCollisions(unittest.TestCase):
             source_schema="dbo", object_type="VIEW", object_name="v1"
         )
         self.assertNotEqual(p1, p2)
-        self.assertIn("/db_a/", p1)
-        self.assertIn("/db_b/", p2)
+        self.assertIn("DB_A/dbo/", p1)
+        self.assertIn("DB_B/dbo/", p2)
 
     def test_same_object_name_under_different_connections(self):
         p1 = build_artifact_relative_path(
             connection_id="conn1", source_system="oracle", source_schema="s1",
-            object_type="VIEW", object_name="v1"
+            object_type="VIEW", object_name="v1", include_connection_id=True
         )
         p2 = build_artifact_relative_path(
             connection_id="conn2", source_system="oracle", source_schema="s1",
-            object_type="VIEW", object_name="v1"
+            object_type="VIEW", object_name="v1", include_connection_id=True
         )
         self.assertNotEqual(p1, p2)
         self.assertTrue(p1.startswith("conn1/"))
@@ -711,16 +724,17 @@ class TestBlocker1SameRunArtifactPathCollisions(unittest.TestCase):
         self.assertIn("/package_bodies/", p2)
 
     def test_two_collisions_in_one_batch(self):
-        c1 = FakeRow(connection_id="c1", source_system="oracle", source_database="", source_schema="s1", object_name="Foo", object_type="VIEW", source_definition="SELECT 1")
-        c2 = FakeRow(connection_id="c1", source_system="oracle", source_database="", source_schema="s1", object_name="FOO", object_type="VIEW", source_definition="SELECT 2")
-        c3 = FakeRow(connection_id="c1", source_system="oracle", source_database="", source_schema="s1", object_name="Bar", object_type="VIEW", source_definition="SELECT 3")
-        c4 = FakeRow(connection_id="c1", source_system="oracle", source_database="", source_schema="s1", object_name="BAR", object_type="VIEW", source_definition="SELECT 4")
+        c1 = FakeRow(connection_id="c1", source_system="oracle", source_database="", source_schema="s1", object_name="Foo Bar", object_type="VIEW", source_definition="SELECT 1")
+        c2 = FakeRow(connection_id="c1", source_system="oracle", source_database="", source_schema="s1", object_name="Foo  Bar", object_type="VIEW", source_definition="SELECT 2")
+        c3 = FakeRow(connection_id="c1", source_system="oracle", source_database="", source_schema="s1", object_name="Bar Baz", object_type="VIEW", source_definition="SELECT 3")
+        c4 = FakeRow(connection_id="c1", source_system="oracle", source_database="", source_schema="s1", object_name="Bar  Baz", object_type="VIEW", source_definition="SELECT 4")
         res = run_nb18_harness(candidates=[c1, c2, c3, c4])
         self.assertEqual(res["fs"].write_count, 0)
         self.assertEqual(res["task_values"]["failed_count"], 4)
 
     def test_simulated_two_run_path_claim(self):
-        vol_path = "/Volumes/da_accelerators/s1/_source_artifacts/c1/s1/views/foo.sql"
+        rel_p = build_artifact_relative_path(connection_id="c1", source_database="", source_schema="s1", object_type="VIEW", object_name="Foo", include_connection_id=True)
+        vol_path = sqlobj_art.build_artifact_volume_path("da_accelerators", "s1", "_source_artifacts", rel_p)
         mr = FakeRow(
             connection_id="c1", source_database="", source_schema="s1",
             object_type="VIEW", object_name="Foo", artifact_path=vol_path,
@@ -728,7 +742,7 @@ class TestBlocker1SameRunArtifactPathCollisions(unittest.TestCase):
         )
         cand = FakeRow(
             connection_id="c1", source_system="oracle", source_database="",
-            source_schema="s1", object_name="FOO", object_type="VIEW",
+            source_schema="s1", object_name=" Foo ", object_type="VIEW",
             source_definition="SELECT 2"
         )
         res = run_nb18_harness(candidates=[cand], manifest_rows=[mr])
@@ -737,7 +751,8 @@ class TestBlocker1SameRunArtifactPathCollisions(unittest.TestCase):
         self.assertTrue(any("ARTIFACT_PATH_COLLISION" in str(e) for e in res["env"]["errors"]))
 
     def test_same_owner_rerun(self):
-        vol_path = "/Volumes/da_accelerators/s1/_source_artifacts/c1/s1/views/foo.sql"
+        rel_p = build_artifact_relative_path(connection_id="c1", source_database="", source_schema="s1", object_type="VIEW", object_name="foo", include_connection_id=True)
+        vol_path = sqlobj_art.build_artifact_volume_path("da_accelerators", "s1", "_source_artifacts", rel_p)
         content = "SELECT 1 FROM dual;"
         def_hash = compute_definition_hash(content)
         mr = FakeRow(
@@ -757,7 +772,8 @@ class TestBlocker1SameRunArtifactPathCollisions(unittest.TestCase):
         self.assertEqual(res["task_values"]["unchanged_count"], 1)
 
     def test_correct_same_owner_repair(self):
-        vol_path = "/Volumes/da_accelerators/s1/_source_artifacts/c1/s1/views/foo.sql"
+        rel_p = build_artifact_relative_path(connection_id="c1", source_database="", source_schema="s1", object_type="VIEW", object_name="foo", include_connection_id=True)
+        vol_path = sqlobj_art.build_artifact_volume_path("da_accelerators", "s1", "_source_artifacts", rel_p)
         content = "SELECT 1 FROM dual;"
         def_hash = compute_definition_hash(content)
         mr = FakeRow(
@@ -782,7 +798,8 @@ class TestBlocker2RepairMissingAndCorruptedFiles(unittest.TestCase):
     def test_correct_unchanged_file(self):
         content = "SELECT 1"
         h = compute_definition_hash(content)
-        vol_path = "/Volumes/da_accelerators/s1/_source_artifacts/c1/s1/views/v1.sql"
+        rel_p = build_artifact_relative_path(connection_id="c1", source_schema="s1", object_type="VIEW", object_name="v1", include_connection_id=True)
+        vol_path = sqlobj_art.build_artifact_volume_path("da_accelerators", "s1", "_source_artifacts", rel_p)
         fs = FakeFilesystem()
         fs.files[vol_path] = content
         mr = FakeRow(connection_id="c1", source_schema="s1", object_type="VIEW", object_name="v1", artifact_path=vol_path, source_definition_hash=h, materialization_status="SUCCEEDED")
@@ -795,7 +812,8 @@ class TestBlocker2RepairMissingAndCorruptedFiles(unittest.TestCase):
     def test_missing_file_repaired(self):
         content = "SELECT 1"
         h = compute_definition_hash(content)
-        vol_path = "/Volumes/da_accelerators/s1/_source_artifacts/c1/s1/views/v1.sql"
+        rel_p = build_artifact_relative_path(connection_id="c1", source_schema="s1", object_type="VIEW", object_name="v1", include_connection_id=True)
+        vol_path = sqlobj_art.build_artifact_volume_path("da_accelerators", "s1", "_source_artifacts", rel_p)
         fs = FakeFilesystem()
         mr = FakeRow(connection_id="c1", source_schema="s1", object_type="VIEW", object_name="v1", artifact_path=vol_path, source_definition_hash=h, materialization_status="SUCCEEDED")
         cand = FakeRow(connection_id="c1", source_system="oracle", source_schema="s1", object_name="v1", object_type="VIEW", source_definition=content)
@@ -806,7 +824,8 @@ class TestBlocker2RepairMissingAndCorruptedFiles(unittest.TestCase):
     def test_corrupted_file_repaired(self):
         expected_content = "SELECT 1"
         h = compute_definition_hash(expected_content)
-        vol_path = "/Volumes/da_accelerators/s1/_source_artifacts/c1/s1/views/v1.sql"
+        rel_p = build_artifact_relative_path(connection_id="c1", source_schema="s1", object_type="VIEW", object_name="v1", include_connection_id=True)
+        vol_path = sqlobj_art.build_artifact_volume_path("da_accelerators", "s1", "_source_artifacts", rel_p)
         fs = FakeFilesystem()
         fs.files[vol_path] = "CORRUPTED CONTENT"
         mr = FakeRow(connection_id="c1", source_schema="s1", object_type="VIEW", object_name="v1", artifact_path=vol_path, source_definition_hash=h, materialization_status="SUCCEEDED")
@@ -818,7 +837,8 @@ class TestBlocker2RepairMissingAndCorruptedFiles(unittest.TestCase):
     def test_empty_file_when_nonempty_content_expected(self):
         expected_content = "SELECT 100"
         h = compute_definition_hash(expected_content)
-        vol_path = "/Volumes/da_accelerators/s1/_source_artifacts/c1/s1/views/v1.sql"
+        rel_p = build_artifact_relative_path(connection_id="c1", source_schema="s1", object_type="VIEW", object_name="v1", include_connection_id=True)
+        vol_path = sqlobj_art.build_artifact_volume_path("da_accelerators", "s1", "_source_artifacts", rel_p)
         fs = FakeFilesystem()
         fs.files[vol_path] = ""
         mr = FakeRow(connection_id="c1", source_schema="s1", object_type="VIEW", object_name="v1", artifact_path=vol_path, source_definition_hash=h, materialization_status="SUCCEEDED")

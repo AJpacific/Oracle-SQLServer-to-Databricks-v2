@@ -44,25 +44,46 @@ def normalize_object_type(object_type: Any) -> str:
     return s
 
 
-def sanitize_path_component(value: Any, field_name: str) -> str:
-    """Sanitize a path component deterministically and prevent path traversal."""
+def normalize_artifact_path_component(value: Any, component_name: str = "path_component") -> str:
+    """Normalize and sanitize an artifact path component deterministically.
+
+    Operations in exact order:
+    1. Convert the input to string.
+    2. Trim leading and trailing whitespace.
+    3. Replace every internal sequence of one or more whitespace characters with exactly one underscore.
+    4. Apply existing safety rules for:
+       - slashes
+       - backslashes
+       - path traversal
+       - control characters
+       - unsafe filesystem characters
+    5. Preserve the existing deterministic collision-protection contract.
+    """
     if value is None:
-        raise ValueError(f"{field_name} cannot be blank")
+        raise ValueError(f"{component_name} cannot be blank")
     val = str(value).strip()
     if not val:
-        raise ValueError(f"{field_name} cannot be blank")
+        raise ValueError(f"{component_name} cannot be blank")
 
-    if (val in (".", "..")
-            or "/.." in val or "\\.." in val
-            or "../" in val or "..\\" in val
-            or val.startswith("..")):
-        raise ValueError(f"path traversal in {field_name}")
+    # Step 3: Replace every internal sequence of one or more whitespace characters with exactly one underscore
+    s = re.sub(r"\s+", "_", val)
 
-    has_leading = val.startswith("_")
-    has_trailing = val.endswith("_")
+    # Step 4: Path traversal checks
+    if (s in (".", "..")
+            or "/.." in s or "\\.." in s
+            or "../" in s or "..\\" in s
+            or s.startswith("..")):
+        raise ValueError(f"path traversal in {component_name}")
 
-    s = val.lower()
-    s = re.sub(r'[^a-z0-9_\-]+', '_', s)
+    # Check for control characters
+    if any(ord(c) < 32 or ord(c) == 127 for c in s):
+        raise ValueError(f"control characters in {component_name}")
+
+    has_leading = s.startswith("_")
+    has_trailing = s.endswith("_")
+
+    # Replace unsafe characters outside [A-Za-z0-9_\-] with underscore
+    s = re.sub(r'[^A-Za-z0-9_\-]+', '_', s)
     s = re.sub(r'_+', '_', s)
     if not has_leading:
         s = s.lstrip('_')
@@ -70,9 +91,14 @@ def sanitize_path_component(value: Any, field_name: str) -> str:
         s = s.rstrip('_')
 
     if not s or s in (".", ".."):
-        raise ValueError(f"invalid sanitized path component for {field_name}")
+        raise ValueError(f"invalid sanitized path component for {component_name}")
 
     return s
+
+
+def sanitize_path_component(value: Any, field_name: str) -> str:
+    """Sanitize a path component deterministically and prevent path traversal."""
+    return normalize_artifact_path_component(value, component_name=field_name)
 
 
 def definition_sha256(source_definition: Any) -> str:
@@ -126,9 +152,16 @@ def build_artifact_relative_path(
     object_type: Any = None,
     object_name: Any = None,
     append_hash: bool = False,
+    include_connection_id: bool = False,
     **kwargs: Any,
 ) -> str:
-    """Build deterministic connection-owned relative path.
+    """Build deterministic relative path.
+
+    Centralized converted hierarchy (include_connection_id=False, default):
+      <normalized_source_database>/<normalized_source_schema>/<type_directory>/<normalized_object_name>.sql
+
+    Connection-owned source hierarchy (include_connection_id=True):
+      <connection_id>/<normalized_source_database>/<normalized_source_schema>/<type_directory>/<normalized_object_name>.sql
 
     Supports keyword-only contract:
       build_artifact_relative_path(
@@ -141,11 +174,10 @@ def build_artifact_relative_path(
       build_artifact_relative_path(conn_id, source_database, schema, otype, oname)
 
     Collision resistance:
-      When normalization of object_name is lossy (e.g. uppercase characters,
-      spaces, slashes, or special characters), appends a short stable SHA-256
+      When normalization of object_name is lossy (e.g. slashes or special characters
+      replaced by _), or when append_hash=True, appends a short stable SHA-256
       hash derived from the full canonical owner identity to ensure distinct
-      source objects (such as 'A B', 'A/B', 'A_B', 'Foo', 'FOO') never collide
-      on the same physical filename.
+      source objects never collide on the same physical filename.
     """
     conn_id = connection_id or kwargs.get("connection_id")
     src_db = source_database or kwargs.get("source_database")
@@ -191,14 +223,23 @@ def build_artifact_relative_path(
     elif len(pargs) > 0:
         conn_id = conn_id or pargs[0]
 
-    safe_conn = sanitize_path_component(conn_id, "connection_id")
+    safe_conn = normalize_artifact_path_component(conn_id, "connection_id") if (conn_id and str(conn_id).strip()) else "_no_connection"
     norm_type = normalize_object_type(otype)
     type_dir = OBJECT_TYPE_DIRECTORIES[norm_type]
-    safe_obj = sanitize_path_component(oname, "object_name")
 
-    # Detect lossy normalization (e.g. spaces, slashes, punctuation replaced by _, or explicit append_hash)
-    val_str = str(oname)
-    is_lossy = (val_str.lower() != safe_obj)
+    # Handle blank source_database deterministically with _no_database
+    if src_db and str(src_db).strip():
+        norm_db = normalize_artifact_path_component(src_db, "source_database")
+    else:
+        norm_db = "_no_database"
+
+    norm_sch = normalize_artifact_path_component(schema, "source_schema")
+    norm_obj = normalize_artifact_path_component(oname, "object_name")
+
+    # Detect lossy normalization (e.g. slashes, special characters replaced by _, or explicit append_hash)
+    val_str = str(oname).strip()
+    ws_norm = re.sub(r"\s+", "_", val_str)
+    is_lossy = (ws_norm != norm_obj)
     if is_lossy or append_hash:
         owner_id = canonical_artifact_owner_id(
             connection_id=safe_conn,
@@ -209,15 +250,15 @@ def build_artifact_relative_path(
             object_name=oname,
         )
         short_hash = hashlib.sha256(owner_id.encode("utf-8")).hexdigest()[:8]
-        file_name = f"{safe_obj}_{short_hash}.sql"
+        file_name = f"{norm_obj}_{short_hash}.sql"
     else:
-        file_name = f"{safe_obj}.sql"
+        file_name = f"{norm_obj}.sql"
 
-    parts = [safe_conn]
-    if src_db and str(src_db).strip():
-        parts.append(sanitize_path_component(src_db, "source_database"))
-    if schema and str(schema).strip():
-        parts.append(sanitize_path_component(schema, "source_schema"))
+    parts = []
+    if include_connection_id:
+        parts.append(safe_conn)
+    parts.append(norm_db)
+    parts.append(norm_sch)
     parts.append(type_dir)
     parts.append(file_name)
 
