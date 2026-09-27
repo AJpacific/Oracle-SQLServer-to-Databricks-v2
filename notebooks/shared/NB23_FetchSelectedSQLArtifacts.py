@@ -453,6 +453,10 @@ for (conn_id, src_sys, src_db), group_candidates in groups.items():
         art_id = compute_artifact_id(conn_id, src_sys, src_db, sch, otype, oname)
         existing_art = existing_artifacts.get(art_id)
 
+        # Preserve the exact source object name, but normalize the generated
+        # Databricks target object name according to the centralized naming policy.
+        target_oname = normalize_target_identifier(oname)
+
         try:
             target_cat, target_sch = resolve_target_catalog_and_schema(tgt_cfg, src_db, sch)
         except Exception:
@@ -523,7 +527,7 @@ for (conn_id, src_sys, src_db), group_candidates in groups.items():
                 now_ts=now_utc,
                 target_catalog=target_cat,
                 target_schema=target_sch,
-                target_object_name=oname.lower(),
+                target_object_name=target_oname,
                 fetch_error_code=err_code,
                 fetch_error_message=err_msg,
             )
@@ -596,7 +600,7 @@ for (conn_id, src_sys, src_db), group_candidates in groups.items():
                 now_ts=now_utc,
                 target_catalog=target_cat,
                 target_schema=target_sch,
-                target_object_name=oname.lower(),
+                target_object_name=target_oname,
                 fetch_error_code=err_code,
                 fetch_error_message=err_msg,
             )
@@ -635,7 +639,7 @@ for (conn_id, src_sys, src_db), group_candidates in groups.items():
             now_ts=now_utc,
             target_catalog=target_cat,
             target_schema=target_sch,
-            target_object_name=oname.lower(),
+            target_object_name=target_oname,
         )
         persist_control_row(ctrl_row)
         persist_execution_log({
@@ -655,7 +659,7 @@ for (conn_id, src_sys, src_db), group_candidates in groups.items():
             "execution_metadata": json.dumps({
                 "source_system": src_sys,
                 "connection_id": conn_id,
-                "target_fqn": databricks_fqn(target_cat, target_sch, oname.lower()),
+                "target_fqn": databricks_fqn(target_cat, target_sch, target_oname),
             }),
             "created_ts": datetime.now(timezone.utc),
         })

@@ -3,7 +3,7 @@
 Provides idempotent, non-interactive bootstrap for automated Databricks Workflow notebooks:
 - Locates /usr/local/bin/uv or uv in PATH
 - Creates isolated Python 3.12 venv with --seed (working pip)
-- Installs pinned versions: databricks-labs-lakebridge==0.15.2, databricks-bb-plugin==0.3.0, databricks-bb-analyzer==0.1.24
+- Installs pinned versions: databricks-labs-lakebridge==0.15.2, databricks-bb-plugin==0.3.0, databricks-bb-analyzer==0.3.0
 - Validates BladeBridge and Bladespector Analyzer Python APIs and signatures
 - Provides concurrency-safe atomic promotion via staging environment
 - Caches bootstrap status per compute context
@@ -31,7 +31,7 @@ except ModuleNotFoundError:
 # Pinned exact package versions validated live on Databricks compute
 PINNED_LAKEBRIDGE_VERSION = "0.15.2"
 PINNED_BLADEBRIDGE_VERSION = "0.3.0"
-PINNED_ANALYZER_VERSION = "0.1.24"
+PINNED_ANALYZER_VERSION = "0.3.0"
 
 DEFAULT_LAKEBRIDGE_VERSION = PINNED_LAKEBRIDGE_VERSION
 DEFAULT_BLADEBRIDGE_VERSION = PINNED_BLADEBRIDGE_VERSION

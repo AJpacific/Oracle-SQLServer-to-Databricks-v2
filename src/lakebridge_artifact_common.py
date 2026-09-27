@@ -242,16 +242,33 @@ def normalize_diagnostic_severity(severity: Any) -> str:
     return "INFORMATION"
 
 
-def _position_to_offset(line_starts: List[int], lines: List[str], line: int, character: int) -> int:
+def _position_to_offset(
+    line_starts: List[int],
+    lines: List[str],
+    line: int,
+    character: int,
+    source_length: int,
+) -> int:
     """Convert LSP line and UTF-16 character position to Python string character offset.
 
     Calculates LSP UTF-16 character positions using line content without \\r or \\n,
     while preserving original source offsets. Ensures a position never inserts text between \\r and \\n.
     """
     if line < 0 or character < 0:
-        raise ValueError(f"Invalid position: line={line}, character={character} cannot be negative")
-    if line >= len(line_starts):
-        raise ValueError(f"Line out of bounds: line {line} >= total lines {len(line_starts)}")
+        raise ValueError(
+            f"Invalid position: line={line}, character={character} cannot be negative"
+        )
+
+    # BladeBridge full-document TextEdits can represent the exact EOF as
+    # line == total lines and character == 0.
+    if line == len(line_starts) and character == 0:
+        return source_length
+
+    # Reject every other out-of-range position.
+    if line < 0 or line >= len(line_starts):
+        raise ValueError(
+            f"Line out of bounds: line {line} >= total lines {len(line_starts)}"
+        )
 
     l_start = line_starts[line]
     line_str = lines[line]
@@ -362,8 +379,20 @@ def apply_text_edits(source_text: str, edits: List[Any]) -> str:
             s_line, s_char = _get_pos(start_obj)
             e_line, e_char = _get_pos(end_obj)
 
-            s_off = _position_to_offset(line_starts, lines, s_line, s_char)
-            e_off = _position_to_offset(line_starts, lines, e_line, e_char)
+            s_off = _position_to_offset(
+                line_starts,
+                lines,
+                s_line,
+                s_char,
+                len(source_text),
+            )
+            e_off = _position_to_offset(
+                line_starts,
+                lines,
+                e_line,
+                e_char,
+                len(source_text),
+            )
 
         if s_off > e_off:
             raise ValueError(f"Invalid TextEdit range: start offset {s_off} is after end offset {e_off}")

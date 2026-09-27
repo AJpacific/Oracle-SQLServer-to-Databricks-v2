@@ -14,6 +14,7 @@
 # COMMAND ----------
 
 import os
+import sys
 import shutil
 import json
 import uuid
@@ -35,6 +36,7 @@ try:
         quote_databricks,
         escape_string_literal,
         databricks_fqn,
+        normalize_target_identifier,
     )
     from src.sql_artifact_control_common import (
         SQL_ARTIFACT_CONTROL_TABLE,
@@ -57,6 +59,7 @@ try:
     from src.lakebridge_artifact_common import (
         normalize_source_system,
         normalize_object_type,
+        normalize_diagnostic_severity,
         prepare_lakebridge_input_file,
         read_analyzer_workbook,
         read_analyzer_report,
@@ -90,6 +93,7 @@ except ModuleNotFoundError:
         quote_databricks,
         escape_string_literal,
         databricks_fqn,
+        normalize_target_identifier,
     )
     from sql_artifact_control_common import (
         SQL_ARTIFACT_CONTROL_TABLE,
@@ -112,6 +116,7 @@ except ModuleNotFoundError:
     from lakebridge_artifact_common import (
         normalize_source_system,
         normalize_object_type,
+        normalize_diagnostic_severity,
         prepare_lakebridge_input_file,
         read_analyzer_workbook,
         read_analyzer_report,
@@ -761,7 +766,10 @@ for cand in candidates_to_process:
             "object_type": otype,
             "target_catalog": target_cat,
             "target_schema": target_sch,
-            "target_object_name": oname.lower(),
+            "target_object_name": (
+                cand.get("target_object_name")
+                or normalize_target_identifier(oname)
+            ),
             "source_definition": src_def,
             "converted_definition": raw_bladebridge_sql if not persistence_failed else None,
             "source_definition_hash": src_hash,
@@ -933,7 +941,10 @@ for cand in candidates_to_process:
                 "object_type": cand.get("object_type") or "VIEW",
                 "target_catalog": cand.get("target_catalog") or catalog,
                 "target_schema": cand.get("target_schema") or c_sch.lower(),
-                "target_object_name": c_oname.lower(),
+                "target_object_name": (
+                    cand.get("target_object_name")
+                    or normalize_target_identifier(c_oname)
+                ),
                 "source_definition": c_sdef,
                 "converted_definition": None,
                 "source_definition_hash": c_shash,
@@ -1011,16 +1022,18 @@ if total_candidates == 0:
     business_status = "NO_CANDIDATES"
 elif len(candidates_to_process) == 0:
     business_status = "FAILED"
-elif total_failures > 0 and completed_count == 0:
+elif completed_count == 0:
     business_status = "FAILED"
 elif total_failures > 0:
     business_status = "PARTIAL"
-elif manual_review_count > 0 or unsupported_count > 0:
+elif manual_review_count > 0:
     business_status = "MANUAL_REVIEW_REQUIRED"
 else:
     business_status = "COMPLETE"
 
-status = "FAILED" if (business_status in ("FAILED", "PARTIAL") or total_failures > 0) else "SUCCEEDED"
+# A mixed-result batch completed successfully at task level.
+# Individual failed artifacts remain FAILED/UNSUPPORTED.
+status = "FAILED" if business_status == "FAILED" else "SUCCEEDED"
 
 # Publish Task Values for Orchestrator before raising
 set_task_value("run_id", run_id)
@@ -1060,4 +1073,3 @@ if status == "FAILED":
     raise RuntimeError(f"NB24_LakebridgeAnalyzeAndTranspile completed with failures: business_status={business_status}")
 
 dbutils.notebook.exit(json.dumps(summary))
-

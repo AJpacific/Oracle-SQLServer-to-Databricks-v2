@@ -718,65 +718,103 @@ def decide_summary(
 
     if is_lakebridge_mode:
         t24_stat_norm = str(t24_status or "").strip().upper()
-        # Fail closed when t24_status is blank, missing, or not SUCCEEDED
+
+        # Missing or genuinely failed T24 means the workflow failed.
+        # Future T24 runs must publish SUCCEEDED for COMPLETE,
+        # MANUAL_REVIEW_REQUIRED, NO_CANDIDATES, and PARTIAL outcomes.
         if not t24_status or t24_stat_norm != "SUCCEEDED":
             return ("FAILED", "FAILED")
 
-        sel_count = int(ctrl_metrics.get("selected_candidate_count") or 0)
-        fetch_count = int(ctrl_metrics.get("fetched_definition_count") or 0)
-        an_count = int(ctrl_metrics.get("analyzed_count") or 0)
-        tr_count = int(ctrl_metrics.get("transpiled_count") or 0)
-        auto_count = int(ctrl_metrics.get("auto_candidate_count") or 0)
-        man_count = int(ctrl_metrics.get("manual_review_count") or 0)
-        unsupp_count = int(ctrl_metrics.get("unsupported_count") or 0)
+        sel_count = int(
+            ctrl_metrics.get("selected_candidate_count") or 0
+        )
+
+        fetch_count = int(
+            ctrl_metrics.get("fetched_definition_count") or 0
+        )
+
+        an_count = int(
+            ctrl_metrics.get("analyzed_count") or 0
+        )
+
+        tr_count = int(
+            ctrl_metrics.get("transpiled_count") or 0
+        )
+
+        auto_count = int(
+            ctrl_metrics.get("auto_candidate_count") or 0
+        )
+
+        man_count = int(
+            ctrl_metrics.get("manual_review_count") or 0
+        )
+
+        unsupp_count = int(
+            ctrl_metrics.get("unsupported_count") or 0
+        )
+
         failed_count = (
             int(ctrl_metrics.get("failed_count") or 0)
             + int(ctrl_metrics.get("definition_missing_count") or 0)
             + int(ctrl_metrics.get("source_fetch_failure_count") or 0)
             + int(ctrl_metrics.get("persistent_store_failure_count") or 0)
         )
+
         completed_count = auto_count + man_count
 
-        # Fail closed conditions:
-        # selected > 0 and fetched == 0 without equivalent terminal failure count
-        if sel_count > 0 and fetch_count == 0 and failed_count < sel_count:
-            return ("FAILED", "FAILED")
-        # fetched > 0 and analyzed == 0
-        if fetch_count > 0 and an_count == 0:
-            return ("FAILED", "FAILED")
-        # fetched > 0 and transpiled == 0
-        if fetch_count > 0 and tr_count == 0:
-            return ("FAILED", "FAILED")
-        # incomplete without terminal outcome
-        if (completed_count + failed_count) < sel_count:
-            return ("FAILED", "FAILED" if completed_count == 0 else "PARTIAL")
+        # Count terminal failures by artifact, not by execution-log stage.
+        # One artifact may have multiple failed stage-log rows.
+        terminal_failure_count = max(
+            failed_count,
+            unsupp_count,
+        )
 
-        # Required business-status outcomes:
-        # NO_CANDIDATES:
-        if sel_count == 0 and failed_count == 0 and (failed_log_stages or 0) == 0:
+        has_failed_log_stages = int(failed_log_stages or 0) > 0
+
+        # No selected objects is a successful no-op.
+        if sel_count == 0:
             return ("SUCCEEDED", "NO_CANDIDATES")
 
-        # PARTIAL: at least one completed, at least one failed (or failed log stage)
-        if completed_count > 0 and (failed_count > 0 or (failed_log_stages or 0) > 0):
-            return ("FAILED", "PARTIAL")
-
-        # FAILED: failures occurred and zero completed successfully
-        if (failed_count > 0 or (failed_log_stages or 0) > 0) and completed_count == 0:
+        # Fail when nothing was fetched and there is no complete
+        # terminal failure record for every selected artifact.
+        if (
+            sel_count > 0
+            and fetch_count == 0
+            and terminal_failure_count < sel_count
+        ):
             return ("FAILED", "FAILED")
 
-        # If failed_log_stages > 0, overall status is ALWAYS FAILED
-        if (failed_log_stages or 0) > 0:
-            return ("FAILED", "PARTIAL" if completed_count > 0 else "FAILED")
+        # Every fetched artifact must have an Analyzer outcome.
+        if fetch_count > 0 and an_count == 0:
+            return ("FAILED", "FAILED")
 
-        # MANUAL_REVIEW_REQUIRED: all completed, no stage failed, at least one is manual review or unsupported
-        if man_count > 0 or unsupp_count > 0:
+        # Every selected artifact must have a terminal result.
+        if (
+            completed_count + terminal_failure_count
+        ) < sel_count:
+            return (
+                "FAILED",
+                "PARTIAL" if completed_count > 0 else "FAILED",
+            )
+
+        # Nothing completed successfully.
+        if completed_count == 0:
+            return ("FAILED", "FAILED")
+
+        if terminal_failure_count > 0 or has_failed_log_stages:
+            return ("SUCCEEDED", "PARTIAL")
+
+        # Everything completed, but procedures or other artifacts
+        # require manual review.
+        if man_count > 0:
             return ("SUCCEEDED", "MANUAL_REVIEW_REQUIRED")
 
-        # COMPLETE: every selected candidate completed, no failure
-        if completed_count == sel_count and failed_count == 0:
+        # Every selected artifact completed without failures.
+        if completed_count == sel_count:
             return ("SUCCEEDED", "COMPLETE")
 
-        return ("FAILED", "PARTIAL" if completed_count > 0 else "FAILED")
+        # Any unexpected state fails closed.
+        return ("FAILED", "FAILED")
 
     # Legacy workflow mode
     total_artifacts = ctrl_metrics.get("total_artifacts")
