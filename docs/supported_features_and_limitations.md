@@ -155,10 +155,12 @@
   - Job graph: `T00_Create_Run_Context` -> `T03_Init_SQL_Artifact_Control` -> `T23_Fetch_Selected_SQL_Artifacts` -> `T24_Lakebridge_Analyze_And_Transpile` -> `T06_SQL_Artifact_Summary`.
   - `NB21_SQLArtifactInit` initializes and additively manages dedicated control structures (`sql_artifact_control`, `sql_artifact_execution_log`) without modifying table pipeline state.
   - `NB23_FetchSelectedSQLArtifacts` performs selected-only Oracle and SQL Server JDBC definition fetches from registered source databases and stores raw definitions under `_source_artifacts` Volumes.
-  - `NB24_LakebridgeAnalyzeAndTranspile` invokes Databricks Labs Lakebridge CLI:
-    - Runs Analyzer via `databricks labs lakebridge analyze --source-directory ... --report-file ... --source-tech ...`
-    - Runs BladeBridge transpilation via `databricks labs lakebridge transpile --source-dialect ... --input-source ... --output-folder ... --error-file-path ... --skip-validation true`
-    - Stores converted definitions under `_converted_artifacts` Volumes and reports/error logs under `_lakebridge_reports` Volumes.
+  - `NB24_LakebridgeAnalyzeAndTranspile` executes Lakebridge Analyzer and BladeBridge transpilation via an isolated Python environment:
+    - Bootstrapped via `uv venv --seed --python 3.12` containing `databricks-labs-lakebridge`, `databricks-bb-plugin`, and `databricks-bb-analyzer` (eliminating the interactive-only Databricks CLI dependency in automated workflow runs).
+    - Runs Analyzer via `from databricks.labs.bladespector.analyzer import Analyzer` (`Analyzer.analyze(...)` with source tech `"MS SQL Server"` / `"Oracle"`), extracting structured metrics primarily from JSON (`analyzer_report.json`) with deterministic XLSX fallback (`analyzer_report.xlsx`).
+    - Runs BladeBridge transpilation via `from databricks.labs.bladebridge.transpiler import Transpiler` (`source_tech="MSSQL"/"ORACLE"`, `target_tech="SQL"`).
+    - Parses multipart MIME output using Python's standard `email` library to cleanly extract the `.sql` attachment, strictly stripping MIME headers and boundary markers before storage.
+    - Stores converted clean definitions under `_converted_artifacts` Volumes and JSON/XLSX reports/error logs under `_lakebridge_reports` Volumes.
     - Uses unique local staging per artifact attempt (`/local_disk0/sql_artifact_lakebridge/<run_id>/<artifact_id>/<attempt>/<uuid>/`).
     - Staging directory is cleaned up only on complete success; retained on failure for diagnostics.
     - `CREATE SCHEMA IF NOT EXISTS` may be used only to support required Volumes.
@@ -167,7 +169,7 @@
     - `AUTO` / `AUTO_CANDIDATE`: Allowed only for `VIEW` when transpilation succeeds with zero errors, zero warnings/fixmes, no risky constructs, no unresolved source syntax/references, and `object_map_applied = true`. Because `object_map_applied` is false in this release, no artifact is classified `AUTO`; never auto-deployed; `deployment_status = NOT_DEPLOYED`.
     - `MANUAL_REVIEW`: Successfully converted `PROCEDURE`, or successfully converted `VIEW` while `object_map_applied = false`, or any artifact with high complexity, unknown statements, fixmes, risk constructs, or validation errors; reason recorded; converted definition stored if available; never auto-deployed; `deployment_status = NOT_DEPLOYED`.
     - `UNSUPPORTED`: Missing or blank source definition, Analyzer failure, parsing/generation errors, transpile failure, or missing/blank output; non-migratable constructs or out-of-scope objects such as `TRIGGER`; reason recorded; converted definition stored if available; never auto-deployed; `deployment_status = NOT_DEPLOYED`.
-  - Historical reference: Legacy prototype `NB22_SQLArtifactMigrate` converts, classifies, and stores; does not deploy and does not connect to source databases. The active executable artifact pipeline uses Lakebridge CLI via `NB24_LakebridgeAnalyzeAndTranspile`.
+  - Historical reference: Legacy prototype `NB22_SQLArtifactMigrate` converts, classifies, and stores; does not deploy and does not connect to source databases. The active executable artifact pipeline uses Lakebridge Analyzer and BladeBridge Python APIs in an isolated environment via `NB24_LakebridgeAnalyzeAndTranspile`.
   - Assessment, Onboarding, Full Load, Delta Sync, ETL, Retry, and reconciliation remain unchanged.
   - Lakebridge, BladeBridge, JDBC, Unity Catalog, Volume, and Databricks Job behavior require live validation.
   - Dedicated artifact control tables are updated; existing configuration and table pipeline tables remain strictly read-only.
@@ -248,7 +250,7 @@
 
 ## Limitations / non-goals
 - No generalized workflow engine or custom scheduler (Databricks Jobs orchestrate).
-- In the dedicated SQL Artifact Migration workflow, executable scope is strictly VIEW and PROCEDURE only, analyze/transpile and store only. Converted SQL is never executed, and `CREATE VIEW` or `CREATE PROCEDURE` is never run. Nothing is deployed. NB23 connects to registered source databases via JDBC only to fetch selected definitions. Raw definitions are stored in `_source_artifacts` Volumes. NB24 invokes Databricks Labs Lakebridge and BladeBridge to analyze and transpile, storing outputs in `_converted_artifacts` and `_lakebridge_reports` Volumes. `CREATE SCHEMA IF NOT EXISTS` may be used only to support required Volumes.
+- In the dedicated SQL Artifact Migration workflow, executable scope is strictly VIEW and PROCEDURE only, analyze/transpile and store only. Converted SQL is never executed, and `CREATE VIEW` or `CREATE PROCEDURE` is never run. Nothing is deployed. NB23 connects to registered source databases via JDBC only to fetch selected definitions. Raw definitions are stored in `_source_artifacts` Volumes. NB24 executes Databricks Labs Lakebridge and BladeBridge Python APIs in an isolated runtime to analyze and transpile, storing outputs in `_converted_artifacts` and `_lakebridge_reports` Volumes. `CREATE SCHEMA IF NOT EXISTS` may be used only to support required Volumes.
 - Routine types `FUNCTION`, Oracle `PACKAGE`, `PACKAGE_BODY`, and `TRIGGER` are out of scope for the active artifact migration job; any encountered trigger or unhandled routine is classified `UNSUPPORTED` and never deployed or executed.
 - Raw source definitions materialized by NB18 are preserved unchanged without conversion under `_source_artifacts` volumes.
 - No AI conversion of source SQL objects; transpilation uses deterministic rule-based transformations.

@@ -17,6 +17,8 @@ Fully unit-testable in any standard Python environment.
 from __future__ import annotations
 
 import csv
+import email
+import email.policy
 import hashlib
 import io
 import json
@@ -70,6 +72,395 @@ def normalize_source_system(source_system: Any) -> str:
     if s in ("sqlserver", "sql_server", "mssql", "microsoft_sql_server"):
         return "mssql"
     raise ValueError(f"Unsupported source_system: {source_system!r}")
+
+
+def get_analyzer_platform(source_system: Any) -> str:
+    """Map source system to Lakebridge Analyzer platform string.
+
+    Authoritative live mapping:
+      sqlserver / mssql -> "MS SQL Server"
+      oracle -> "Oracle"
+    Raises ValueError for unknown source system.
+    """
+    norm = normalize_source_system(source_system)
+    if norm == "mssql":
+        return "MS SQL Server"
+    elif norm == "oracle":
+        return "Oracle"
+    raise ValueError(f"Unknown source system for Lakebridge Analyzer: {source_system!r}")
+
+
+def get_bladebridge_tech(source_system: Any) -> Tuple[str, str]:
+    """Map source system to low-level BladeBridge Python API (source_tech, target_tech).
+
+    Authoritative live mapping:
+      sqlserver / mssql -> ("MSSQL", "SQL")
+      oracle -> ("ORACLE", "SQL")
+    Raises ValueError for unknown source system.
+    """
+    norm = normalize_source_system(source_system)
+    if norm == "mssql":
+        return ("MSSQL", "SQL")
+    elif norm == "oracle":
+        return ("ORACLE", "SQL")
+    raise ValueError(f"Unknown source system for BladeBridge tech mapping: {source_system!r}")
+
+
+def extract_sql_from_bladebridge_mime(raw_text: str) -> str:
+    """Extract clean SQL from BladeBridge MIME multipart/mixed response.
+
+    Rules:
+    1. Treats content as MIME only when it has a valid multipart Content-Type with a boundary.
+    2. Header matching is case-insensitive.
+    3. Uses Python's standard email parser with email.policy.default.
+    4. Honors each part's declared charset.
+    5. Prefers exactly one .sql attachment.
+    6. Otherwise prefers exactly one supported plain SQL/text part.
+    7. Rejects ambiguous multiple SQL attachments.
+    8. Rejects malformed MIME.
+    9. Rejects blank extracted output.
+    10. Preserves ordinary SQL comments exactly (e.g. '--generated').
+    11. Ensures Content-Type, Content-Disposition, Content-Transfer-Encoding, MIME-Version,
+        and boundary markers never reach persisted SQL.
+    """
+    if not raw_text or not str(raw_text).strip():
+        raise ValueError("Cannot extract SQL from empty or blank BladeBridge response")
+
+    stripped = str(raw_text).strip()
+
+    # Case-insensitive check for multipart Content-Type with boundary
+    has_multipart_content_type = bool(
+        re.search(r"(?im)^content-type:\s*multipart/[^;\r\n]+;\s*boundary=", stripped[:1000])
+        or (re.search(r"(?im)^content-type:\s*multipart/", stripped[:500]) and "boundary=" in stripped[:1000])
+    )
+
+    if not has_multipart_content_type:
+        if re.search(r"(?im)^content-type:\s*multipart/", stripped[:500]):
+            raise ValueError("Malformed MIME: multipart Content-Type missing boundary")
+        if re.match(r"(?im)^content-type:", stripped) and re.search(r"(?im)^mime-version:", stripped[:300]):
+            raise ValueError("Malformed MIME headers in BladeBridge output")
+        return stripped
+
+    msg = email.message_from_string(stripped, policy=email.policy.default)
+
+    boundary = msg.get_boundary()
+    if not boundary:
+        m_b = re.search(r'(?i)boundary=["\']?([^"\'\s;]+)["\']?', stripped[:1000])
+        if m_b:
+            boundary = m_b.group(1)
+        else:
+            raise ValueError("Malformed MIME: boundary parameter missing from multipart message")
+
+    sql_attachments: List[str] = []
+    text_parts: List[str] = []
+
+    for part in msg.walk():
+        if part.is_multipart():
+            continue
+
+        filename = (part.get_filename() or "").strip()
+        content_type = part.get_content_type().lower()
+        charset = part.get_content_charset() or "utf-8"
+
+        payload = part.get_payload(decode=True)
+        if payload is not None:
+            try:
+                text = payload.decode(charset, errors="replace").strip()
+            except Exception:
+                text = payload.decode("utf-8", errors="replace").strip()
+        else:
+            raw_payload = part.get_payload()
+            text = str(raw_payload).strip() if raw_payload is not None else ""
+
+        if not text:
+            continue
+
+        if filename.lower().endswith(".sql") or content_type in ("application/sql", "text/x-sql", "text/sql"):
+            sql_attachments.append(text)
+        elif content_type in ("text/plain", "text/html"):
+            text_parts.append(text)
+        else:
+            text_parts.append(text)
+
+    if len(sql_attachments) > 1:
+        raise ValueError(f"Ambiguous MIME response: found {len(sql_attachments)} .sql attachments")
+    elif len(sql_attachments) == 1:
+        chosen = sql_attachments[0]
+    elif len(text_parts) > 1:
+        raise ValueError(f"Ambiguous MIME response: found {len(text_parts)} plain text/SQL parts without .sql attachment")
+    elif len(text_parts) == 1:
+        chosen = text_parts[0]
+    else:
+        raise ValueError("Malformed MIME: blank MIME payload or no usable SQL attachment found in multipart payload")
+
+    if not chosen or not chosen.strip():
+        raise ValueError("MIME extraction resulted in blank SQL payload")
+
+    boundary_pattern = re.compile(r"^--" + re.escape(boundary) + r"(?:--)?\s*$", re.M)
+    clean_sql = boundary_pattern.sub("", chosen).strip()
+
+    if not clean_sql:
+        raise ValueError("MIME extraction resulted in empty SQL after boundary removal")
+
+    if re.search(r"(?im)^content-(?:type|disposition|transfer-encoding):", clean_sql):
+        raise ValueError("MIME headers leaked into extracted SQL")
+    if re.search(r"(?im)^mime-version:", clean_sql):
+        raise ValueError("MIME-Version header leaked into extracted SQL")
+
+    return clean_sql
+
+
+def normalize_diagnostic_severity(severity: Any) -> str:
+    """Normalize LSP / BladeBridge diagnostic severity to 'ERROR', 'WARNING', 'INFORMATION', or 'HINT'."""
+    if severity is None:
+        return "INFORMATION"
+    if hasattr(severity, "name"):
+        n = str(severity.name).strip().upper()
+        if n in ("ERROR", "WARNING", "INFORMATION", "HINT"):
+            return n
+        if n == "INFO":
+            return "INFORMATION"
+    if isinstance(severity, int) or (isinstance(severity, str) and str(severity).strip().isdigit()):
+        val = int(severity)
+        if val == 1:
+            return "ERROR"
+        if val == 2:
+            return "WARNING"
+        if val == 3:
+            return "INFORMATION"
+        if val == 4:
+            return "HINT"
+    s = str(severity).strip().upper()
+    if "ERR" in s or s == "1":
+        return "ERROR"
+    if "WARN" in s or s == "2":
+        return "WARNING"
+    if "HINT" in s or s == "4":
+        return "HINT"
+    if "INFO" in s or s == "3":
+        return "INFORMATION"
+    return "INFORMATION"
+
+
+def _position_to_offset(line_starts: List[int], lines: List[str], line: int, character: int) -> int:
+    """Convert LSP line and UTF-16 character position to Python string character offset.
+
+    Calculates LSP UTF-16 character positions using line content without \\r or \\n,
+    while preserving original source offsets. Ensures a position never inserts text between \\r and \\n.
+    """
+    if line < 0 or character < 0:
+        raise ValueError(f"Invalid position: line={line}, character={character} cannot be negative")
+    if line >= len(line_starts):
+        raise ValueError(f"Line out of bounds: line {line} >= total lines {len(line_starts)}")
+
+    l_start = line_starts[line]
+    line_str = lines[line]
+
+    # Calculate line content without \r or \n line terminators
+    if line_str.endswith("\r\n"):
+        line_content = line_str[:-2]
+    elif line_str.endswith(("\r", "\n")):
+        line_content = line_str[:-1]
+    else:
+        line_content = line_str
+
+    if character == 0:
+        return l_start
+
+    utf16_count = 0
+    char_idx = 0
+    while char_idx < len(line_content) and utf16_count < character:
+        ch = line_content[char_idx]
+        code_units = 2 if ord(ch) > 0xFFFF else 1
+        if utf16_count + code_units > character:
+            raise ValueError(
+                f"Position character {character} points into the middle of a UTF-16 surrogate pair on line {line}"
+            )
+        utf16_count += code_units
+        char_idx += 1
+
+    if utf16_count < character:
+        raise ValueError(
+            f"Character offset out of bounds: character {character} > line content length in UTF-16 {utf16_count} on line {line}"
+        )
+
+    return l_start + char_idx
+
+
+def apply_text_edits(source_text: str, edits: List[Any]) -> str:
+    """Apply LSP / BladeBridge TextEdits to original source SQL text.
+
+    Supports insertion, replacement, deletion, multiline edits, adjacent edits,
+    and full-document replacement. Validates ranges, rejects overlapping edits,
+    and applies in descending source-offset order preserving all untouched text.
+    """
+    if source_text is None:
+        raise ValueError("source_text cannot be None")
+    if not edits:
+        return source_text
+
+    lines = source_text.splitlines(keepends=True)
+    line_starts = [0]
+    for line_s in lines[:-1]:
+        line_starts.append(line_starts[-1] + len(line_s))
+
+    if source_text.endswith(("\n", "\r")):
+        line_starts.append(len(source_text))
+        lines.append("")
+    elif not lines:
+        lines = [""]
+
+    parsed_edits: List[Dict[str, Any]] = []
+    for edit in edits:
+        if isinstance(edit, dict):
+            new_text = edit.get("new_text")
+            if new_text is None:
+                new_text = edit.get("newText")
+            if new_text is None:
+                new_text = edit.get("text")
+            if new_text is None:
+                raise ValueError(f"TextEdit missing new_text: {edit}")
+
+            rng = edit.get("range")
+            if rng is None and "start" in edit and "end" in edit:
+                rng = {"start": edit["start"], "end": edit["end"]}
+        else:
+            new_text = getattr(edit, "new_text", None)
+            if new_text is None:
+                new_text = getattr(edit, "newText", None)
+            if new_text is None:
+                new_text = getattr(edit, "text", None)
+            if new_text is None:
+                raise ValueError(f"TextEdit missing new_text: {edit}")
+
+            rng = getattr(edit, "range", None)
+            if rng is None and hasattr(edit, "start") and hasattr(edit, "end"):
+                rng = {"start": edit.start, "end": edit.end}
+
+        if rng is None:
+            if len(edits) == 1:
+                s_off = 0
+                e_off = len(source_text)
+            else:
+                raise ValueError("Multiple TextEdits provided but edit has no range")
+        else:
+            if isinstance(rng, dict):
+                start_obj = rng.get("start")
+                end_obj = rng.get("end")
+            else:
+                start_obj = getattr(rng, "start", None)
+                end_obj = getattr(rng, "end", None)
+
+            if start_obj is None or end_obj is None:
+                raise ValueError(f"Malformed TextEdit range: {rng}")
+
+            def _get_pos(p: Any) -> Tuple[int, int]:
+                if isinstance(p, dict):
+                    return int(p["line"]), int(p["character"])
+                return int(getattr(p, "line")), int(getattr(p, "character"))
+
+            s_line, s_char = _get_pos(start_obj)
+            e_line, e_char = _get_pos(end_obj)
+
+            s_off = _position_to_offset(line_starts, lines, s_line, s_char)
+            e_off = _position_to_offset(line_starts, lines, e_line, e_char)
+
+        if s_off > e_off:
+            raise ValueError(f"Invalid TextEdit range: start offset {s_off} is after end offset {e_off}")
+
+        parsed_edits.append({
+            "start": s_off,
+            "end": e_off,
+            "new_text": str(new_text),
+        })
+
+    parsed_edits.sort(key=lambda x: (x["start"], x["end"]))
+    for i in range(len(parsed_edits) - 1):
+        curr_e = parsed_edits[i]
+        next_e = parsed_edits[i + 1]
+        if next_e["start"] < curr_e["end"]:
+            raise ValueError(
+                f"Overlapping TextEdit ranges: edit at [{curr_e['start']}:{curr_e['end']}] "
+                f"overlaps with edit at [{next_e['start']}:{next_e['end']}]"
+            )
+
+    parsed_edits.sort(key=lambda x: (x["start"], x["end"]), reverse=True)
+    result = source_text
+    for e in parsed_edits:
+        s = e["start"]
+        end = e["end"]
+        result = result[:s] + e["new_text"] + result[end:]
+
+    return result
+
+
+class UnknownFragment(dict):
+    """Structured unknown SQL fragment supporting dict access, substring checks, and JSON serialization."""
+
+    def __init__(self, fragment: str, count: int = 1):
+        super().__init__(fragment=fragment, count=count)
+        self.fragment = fragment
+        self.count = count
+
+    def __contains__(self, item: Any) -> bool:
+        return super().__contains__(item) or (isinstance(item, str) and item in self.fragment)
+
+    def __str__(self) -> str:
+        return self.fragment
+
+    def __repr__(self) -> str:
+        return f"UnknownFragment(fragment={self.fragment!r}, count={self.count})"
+
+
+def _artifact_matches(
+    val: str,
+    object_name: Optional[str] = None,
+    staged_filename: Optional[str] = None,
+    artifact_id: Optional[str] = None,
+) -> bool:
+    """Check if value matches the staged filename, artifact ID, or object name."""
+    if not val or not str(val).strip():
+        return False
+    v = str(val).strip().lower()
+    v_base = os.path.splitext(os.path.basename(v))[0]
+
+    if staged_filename:
+        sf = os.path.basename(staged_filename).strip().lower()
+        sf_base = os.path.splitext(sf)[0]
+        if v == sf or v == sf_base or v_base == sf_base or os.path.basename(v) == sf:
+            return True
+
+    if artifact_id:
+        aid = artifact_id.strip().lower()
+        if aid in v or aid in v_base:
+            return True
+
+    if object_name:
+        on = object_name.strip().lower()
+        on_clean = re.sub(r"[^a-zA-Z0-9_]+", "_", on).strip("_")
+        if v == on or v_base == on or v_base == on_clean or on_clean in v_base or v_base.endswith(on_clean):
+            return True
+
+    return False
+
+
+def _find_artifact_row(
+    rows: List[Dict[str, Any]],
+    object_name: Optional[str] = None,
+    staged_filename: Optional[str] = None,
+    artifact_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Match artifact row deterministically by staged filename, artifact ID, or object name."""
+    if not rows:
+        return None
+
+    for r in rows:
+        for key in ("name", "source_file", "sourcefile", "program_name", "program", "caller", "source_object", "artifact_id", "object_name"):
+            val = r.get(key)
+            if val and _artifact_matches(str(val), object_name, staged_filename, artifact_id):
+                return r
+
+    return None
 
 
 def normalize_object_type(object_type: Any) -> str:
@@ -269,17 +660,39 @@ def read_analyzer_workbook(
             except Exception as e:
                 raise ValueError(f"Malformed shared strings in Analyzer workbook: {e}") from e
 
-        # Map sheet names to sheet XML files
+        # Parse relationships from xl/_rels/workbook.xml.rels
+        rel_map: Dict[str, str] = {}
+        if "xl/_rels/workbook.xml.rels" in zf.namelist():
+            try:
+                rels_root = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
+                for rel in rels_root.findall(".//{*}Relationship"):
+                    r_id = rel.attrib.get("Id")
+                    target = rel.attrib.get("Target")
+                    if r_id and target:
+                        if not target.startswith("xl/"):
+                            target = "xl/" + target.lstrip("/")
+                        rel_map[r_id] = target
+            except Exception:
+                pass
+
+        # Map sheet names to sheet XML files using relationships
         sheet_map: Dict[str, str] = {}
         if "xl/workbook.xml" in zf.namelist():
             try:
                 wb_root = ET.fromstring(zf.read("xl/workbook.xml"))
                 for idx, sheet_el in enumerate(wb_root.findall(".//{*}sheet"), 1):
                     s_name = sheet_el.attrib.get("name") or f"sheet{idx}"
-                    s_id = sheet_el.attrib.get("sheetId") or str(idx)
-                    target_file = f"xl/worksheets/sheet{idx}.xml"
-                    if target_file not in zf.namelist():
-                        target_file = f"xl/worksheets/sheet{s_id}.xml"
+                    r_id = None
+                    for attr_name, attr_val in sheet_el.attrib.items():
+                        if attr_name.lower().endswith("id") and attr_name.lower() != "sheetid":
+                            r_id = attr_val
+                            break
+                    target_file = rel_map.get(r_id) if r_id else None
+                    if not target_file or target_file not in zf.namelist():
+                        s_id = sheet_el.attrib.get("sheetId") or str(idx)
+                        target_file = f"xl/worksheets/sheet{idx}.xml"
+                        if target_file not in zf.namelist():
+                            target_file = f"xl/worksheets/sheet{s_id}.xml"
                     sheet_map[_normalize_token(s_name)] = target_file
             except Exception as e:
                 raise ValueError(f"Malformed workbook XML in Analyzer archive: {e}") from e
@@ -403,50 +816,134 @@ def read_analyzer_workbook(
         return result
 
 
-def extract_complexity(workbook_data: Dict[str, List[Dict[str, Any]]], object_name: Optional[str] = None) -> Optional[str]:
-    """Extract complexity ('LOW', 'MEDIUM', 'HIGH', 'VERY_HIGH', or None) from Analyzer sheets."""
+def extract_complexity(
+    workbook_data: Dict[str, List[Dict[str, Any]]],
+    object_name: Optional[str] = None,
+    staged_filename: Optional[str] = None,
+    artifact_id: Optional[str] = None,
+) -> Optional[str]:
+    """Extract complexity ('LOW', 'MEDIUM', 'HIGH', 'VERY_HIGH', or None) from Analyzer report.
+
+    CRITICAL: Never reads aggregate categories from 'Summary' sheet.
+    Prefers structured JSON inventory, then XLSX 'SQL Programs' sheet.
+    Fails closed if JSON and XLSX provide contradictory values.
+    """
+    json_comp: Optional[str] = None
+    xlsx_comp: Optional[str] = None
+
+    # 1. JSON inventory
+    if "inventory" in workbook_data:
+        row = _find_artifact_row(workbook_data["inventory"], object_name, staged_filename, artifact_id)
+        if row:
+            for key in ("complexityLevel", "complexity_level", "complexity"):
+                comp = row.get(key)
+                if comp and str(comp).strip().upper() in VALID_COMPLEXITIES:
+                    json_comp = str(comp).strip().upper()
+                    break
+
+    # 2. XLSX SQL Programs
+    sql_prog_key = "xlsx_sql_programs" if "xlsx_sql_programs" in workbook_data else "sql_programs"
+    if sql_prog_key in workbook_data:
+        row = _find_artifact_row(workbook_data[sql_prog_key], object_name, staged_filename, artifact_id)
+        if row:
+            comp = row.get("complexity")
+            if comp and str(comp).strip().upper() in VALID_COMPLEXITIES:
+                xlsx_comp = str(comp).strip().upper()
+
+    # Fail closed on contradictory classification-critical values
+    if json_comp and xlsx_comp and json_comp != xlsx_comp:
+        raise ValueError(
+            f"Contradictory Analyzer complexity: JSON reports {json_comp} but XLSX reports {xlsx_comp}"
+        )
+
+    if json_comp:
+        return json_comp
+    if xlsx_comp:
+        return xlsx_comp
+
+    # 3. Legacy/mock sheets (excluding summary/overview)
     for s_name, rows in workbook_data.items():
-        if any(k in s_name for k in ("complex", "summary", "overview", "assessment")):
-            for row in rows:
-                if object_name:
-                    row_obj = str(row.get("object_name") or row.get("object") or row.get("name") or "").strip().lower()
-                    if row_obj and row_obj != object_name.strip().lower():
-                        continue
+        if s_name.startswith("xlsx_"):
+            s_name = s_name[5:]
+        if s_name in ("summary", "overview", "runinfo", "run_info", "_warnings", "_contradictions"):
+            continue  # NEVER search Summary sheet!
+        if any(k in s_name for k in ("complex", "assessment", "object", "program")):
+            row = _find_artifact_row(rows, object_name, staged_filename, artifact_id)
+            if row:
                 for col_key, val in row.items():
                     if "complex" in col_key and val:
                         raw = str(val).strip().upper().replace(" ", "_")
                         for comp in ("VERY_HIGH", "HIGH", "MEDIUM", "LOW"):
                             if comp in raw:
                                 return comp
+
     return None
 
 
 def extract_statement_counts(
     workbook_data: Dict[str, List[Dict[str, Any]]],
     object_name: Optional[str] = None,
+    staged_filename: Optional[str] = None,
+    artifact_id: Optional[str] = None,
 ) -> Tuple[Optional[int], Optional[int]]:
-    """Extract (statement_count, unknown_statement_count)."""
+    """Extract (statement_count, unknown_statement_count) from Analyzer report."""
     stmt_count: Optional[int] = None
     unknown_count: Optional[int] = None
 
-    for s_name, rows in workbook_data.items():
-        if any(k in s_name for k in ("statement", "summary", "complexity")):
-            for row in rows:
-                if object_name:
-                    row_obj = str(row.get("object_name") or row.get("object") or row.get("name") or "").strip().lower()
-                    if row_obj and row_obj != object_name.strip().lower():
-                        continue
-                for col_key, val in row.items():
-                    if ("unknown" in col_key or "unsupported" in col_key) and val is not None:
-                        try:
-                            unknown_count = int(val)
-                        except Exception:
-                            pass
-                    elif ("statement" in col_key or "stmt" in col_key) and "unknown" not in col_key and val is not None:
-                        try:
-                            stmt_count = int(val)
-                        except Exception:
-                            pass
+    # 1. JSON inventory
+    if "inventory" in workbook_data:
+        row = _find_artifact_row(workbook_data["inventory"], object_name, staged_filename, artifact_id)
+        if row and "statementCount" in row and row["statementCount"] is not None:
+            try:
+                stmt_count = int(row["statementCount"])
+            except Exception:
+                pass
+        if row and "scriptCategories" in row and isinstance(row["scriptCategories"], list):
+            if "UNKNOWN" not in row["scriptCategories"] and unknown_count is None:
+                unknown_count = 0
+
+    # 2. XLSX SQL Programs
+    if stmt_count is None and "sql_programs" in workbook_data:
+        row = _find_artifact_row(workbook_data["sql_programs"], object_name, staged_filename, artifact_id)
+        if row and row.get("statement_count") is not None:
+            try:
+                stmt_count = int(row["statement_count"])
+            except Exception:
+                pass
+
+    # 3. XLSX UNKNOWN SQL Category
+    if "unknown_sql_category" in workbook_data:
+        tot_unk = 0
+        has_rows = False
+        for r in workbook_data["unknown_sql_category"]:
+            has_rows = True
+            cnt_val = r.get("of_occurrences") or r.get("occurrences") or r.get("count") or 1
+            try:
+                tot_unk += int(cnt_val)
+            except Exception:
+                tot_unk += 1
+        if has_rows:
+            unknown_count = tot_unk
+
+    # 4. Legacy/mock sheets fallback
+    if stmt_count is None or unknown_count is None:
+        for s_name, rows in workbook_data.items():
+            if s_name in ("summary", "overview", "runinfo"):
+                continue
+            if any(k in s_name for k in ("statement", "complexity", "object", "program")):
+                row = _find_artifact_row(rows, object_name, staged_filename, artifact_id)
+                if row:
+                    for col_key, val in row.items():
+                        if ("unknown" in col_key or "unsupported" in col_key) and val is not None and unknown_count is None:
+                            try:
+                                unknown_count = int(val)
+                            except Exception:
+                                pass
+                        elif ("statement" in col_key or "stmt" in col_key) and "unknown" not in col_key and val is not None and stmt_count is None:
+                            try:
+                                stmt_count = int(val)
+                            except Exception:
+                                pass
 
     return stmt_count, unknown_count
 
@@ -454,21 +951,43 @@ def extract_statement_counts(
 def extract_unknown_fragments(
     workbook_data: Dict[str, List[Dict[str, Any]]],
     object_name: Optional[str] = None,
-) -> List[str]:
+    staged_filename: Optional[str] = None,
+    artifact_id: Optional[str] = None,
+) -> List[Any]:
     """Extract unknown fragments reported by Analyzer."""
-    fragments: List[str] = []
+    fragments: List[Any] = []
+
+    # 1. XLSX UNKNOWN SQL Category
+    if "unknown_sql_category" in workbook_data:
+        for r in workbook_data["unknown_sql_category"]:
+            txt = str(r.get("sql_unknown_category_scripts") or "").strip()
+            cnt_val = r.get("of_occurrences") or r.get("occurrences") or r.get("count") or 1
+            try:
+                cnt = int(cnt_val)
+            except Exception:
+                cnt = 1
+            if txt:
+                fragments.append(UnknownFragment(txt, cnt))
+
+    if fragments:
+        return fragments
+
+    # 2. Legacy/mock sheets fallback
     for s_name, rows in workbook_data.items():
+        if s_name in ("summary", "overview", "runinfo"):
+            continue
         if any(k in s_name for k in ("fragment", "unknown", "error", "unsupported")):
             for row in rows:
-                if object_name:
-                    row_obj = str(row.get("object_name") or row.get("object") or row.get("name") or "").strip().lower()
-                    if row_obj and row_obj != object_name.strip().lower():
+                if object_name or staged_filename or artifact_id:
+                    matched = _find_artifact_row([row], object_name, staged_filename, artifact_id)
+                    if not matched:
                         continue
                 for col_key, val in row.items():
                     if any(t in col_key for t in ("fragment", "syntax", "unknown", "text", "snippet")) and val:
                         txt = str(val).strip()
-                        if txt and txt not in fragments:
-                            fragments.append(txt)
+                        if txt and not any(f.fragment == txt if isinstance(f, UnknownFragment) else f == txt for f in fragments):
+                            fragments.append(UnknownFragment(txt, 1))
+
     return fragments
 
 
@@ -532,21 +1051,32 @@ def count_fixme_markers(sql_text: str) -> int:
     return len(re.findall(r"\bFIXME\b", sql_text, re.I))
 
 
+def mask_sql_literals_and_comments(sql_text: str) -> str:
+    """Mask string literals and comments so static regex heuristics do not extract dynamic SQL, commented tables, or source syntax."""
+    if not sql_text:
+        return ""
+    pattern = re.compile(r"'(?:''|[^'])*'|/\*[\s\S]*?\*/|--[^\r\n]*")
+    return pattern.sub(" ", sql_text)
+
+
 def detect_remaining_source_syntax(sql_text: str, source_system: str) -> Tuple[bool, List[str]]:
     """Detect if converted output retains untranspiled source-specific dialect constructs."""
     if not sql_text:
         return False, []
+    masked_sql = mask_sql_literals_and_comments(sql_text)
+    if not masked_sql.strip():
+        return False, []
+
     sys_norm = normalize_source_system(source_system)
     retained = []
 
     if sys_norm == "mssql":
         patterns = [
-            (r"\[dbo\]", "[dbo] bracket syntax"),
+            (r"\[[^\]\r\n]+\]", "T-SQL bracketed identifier syntax"),
             (r"\bISNULL\s*\(", "T-SQL ISNULL function"),
             (r"\bGETDATE\s*\(\)", "T-SQL GETDATE()"),
             (r"\bTOP\s+\(?\d+\)?", "T-SQL TOP clause"),
             (r"\bIDENTITY\s*\(", "T-SQL IDENTITY"),
-            (r"\bN'[^\']*'", "T-SQL N'...' literal"),
             (r"#[a-zA-Z0-9_]+", "T-SQL temporary table #..."),
             (r"@@[a-zA-Z0-9_]+", "T-SQL system variable @@..."),
         ]
@@ -561,7 +1091,7 @@ def detect_remaining_source_syntax(sql_text: str, source_system: str) -> Tuple[b
         ]
 
     for pat, desc in patterns:
-        if re.search(pat, sql_text, re.I):
+        if re.search(pat, masked_sql, re.I):
             retained.append(desc)
 
     return bool(retained), retained
@@ -571,42 +1101,93 @@ def extract_referenced_objects(
     workbook_data: Dict[str, List[Dict[str, Any]]],
     sql_text: Optional[str] = None,
     object_name: Optional[str] = None,
+    staged_filename: Optional[str] = None,
+    artifact_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Extract referenced objects and operations (READ/WRITE) from Analyzer workbook or SQL text."""
+    """Extract referenced objects from Analyzer JSON objectRel, XLSX, or SQL text."""
     refs: List[Dict[str, Any]] = []
 
-    # 1. Try from workbook
-    for s_name, rows in workbook_data.items():
-        if any(k in s_name for k in ("reference", "dependency", "lineage", "object")):
-            for row in rows:
-                if object_name:
-                    row_caller = str(row.get("source_object") or row.get("caller") or row.get("object_name") or "").strip().lower()
-                    if row_caller and row_caller != object_name.strip().lower():
-                        continue
-                obj = str(row.get("referenced_object") or row.get("object") or row.get("target") or "").strip()
-                if not obj and row.get("referenced_table"):
-                    ref_sch = str(row.get("referenced_schema") or "").strip()
-                    ref_tbl = str(row.get("referenced_table") or "").strip()
-                    obj = f"{ref_sch}.{ref_tbl}" if ref_sch else ref_tbl
-                op = str(row.get("operation") or row.get("action") or "READ").strip().upper()
-                cnt = row.get("count") or 1
+    # 1. JSON inventory objectRel
+    if "inventory" in workbook_data:
+        row = _find_artifact_row(workbook_data["inventory"], object_name, staged_filename, artifact_id)
+        if row and "objectRel" in row and isinstance(row["objectRel"], list):
+            for rel in row["objectRel"]:
+                obj = rel.get("object")
+                act = str(rel.get("action") or "READ").upper()
+                cnt = rel.get("count", 1)
                 try:
                     cnt = int(cnt)
                 except Exception:
                     cnt = 1
                 if obj:
-                    refs.append({"object": obj, "operation": op, "count": cnt})
+                    refs.append({"object": obj, "operation": act, "count": cnt})
+        if refs:
+            return refs
 
-    if refs:
-        return refs
+    # 2. XLSX RAW_PROGRAM_OBJECT_XREF
+    if "raw_program_object_xref" in workbook_data:
+        for r in workbook_data["raw_program_object_xref"]:
+            if object_name or staged_filename or artifact_id:
+                prog = str(r.get("program") or "").strip()
+                if prog and not _find_artifact_row([{"program": prog}], object_name, staged_filename, artifact_id):
+                    continue
+            obj = str(r.get("object") or "").strip()
+            op = str(r.get("operation") or "READ").upper()
+            cnt = r.get("count") or 1
+            try:
+                cnt = int(cnt)
+            except Exception:
+                cnt = 1
+            if obj:
+                refs.append({"object": obj, "operation": op, "count": cnt})
+        if refs:
+            return refs
 
-    # 2. Heuristic extraction from SQL if workbook has no explicit table
+    # 3. XLSX Referenced Objects
+    if "referenced_objects" in workbook_data:
+        for r in workbook_data["referenced_objects"]:
+            if object_name or staged_filename or artifact_id:
+                caller = str(r.get("source_object") or r.get("caller") or r.get("object_name") or "").strip()
+                if caller and not _find_artifact_row([{"caller": caller}], object_name, staged_filename, artifact_id):
+                    continue
+            obj = str(r.get("object") or r.get("referenced_object") or r.get("target") or "").strip()
+            if not obj and r.get("referenced_table"):
+                ref_sch = str(r.get("referenced_schema") or "").strip()
+                ref_tbl = str(r.get("referenced_table") or "").strip()
+                obj = f"{ref_sch}.{ref_tbl}" if ref_sch else ref_tbl
+            if not obj:
+                continue
+
+            # Check individual operation columns (CREATE, READ, WRITE, DROP, TRUNCATE)
+            found_op = False
+            for op_col in ("read", "write", "create", "drop", "truncate"):
+                if op_col in r and r[op_col] is not None:
+                    try:
+                        c_val = int(r[op_col])
+                        if c_val > 0:
+                            refs.append({"object": obj, "operation": op_col.upper(), "count": c_val})
+                            found_op = True
+                    except Exception:
+                        pass
+            if not found_op:
+                op = str(r.get("operation") or r.get("action") or "READ").upper()
+                cnt = r.get("count") or 1
+                try:
+                    cnt = int(cnt)
+                except Exception:
+                    cnt = 1
+                refs.append({"object": obj, "operation": op, "count": cnt})
+        if refs:
+            return refs
+
+    # 4. SQL text heuristic fallback
     if sql_text:
         found: Dict[Tuple[str, str], int] = {}
-        for m in re.finditer(r"\b(?:FROM|JOIN)\s+([a-zA-Z0-9_\.\`\"\[\]]+)", sql_text, re.I):
+        masked_sql = mask_sql_literals_and_comments(sql_text)
+        for m in re.finditer(r"\b(?:FROM|JOIN)\s+([a-zA-Z0-9_\.\`\"\[\]]+)", masked_sql, re.I):
             target = m.group(1).strip()
             found[(target, "READ")] = found.get((target, "READ"), 0) + 1
-        for m in re.finditer(r"\b(?:INSERT\s+INTO|UPDATE|MERGE\s+INTO)\s+([a-zA-Z0-9_\.\`\"\[\]]+)", sql_text, re.I):
+        for m in re.finditer(r"\b(?:INSERT\s+INTO|UPDATE|MERGE\s+INTO)\s+([a-zA-Z0-9_\.\`\"\[\]]+)", masked_sql, re.I):
             target = m.group(1).strip()
             found[(target, "WRITE")] = found.get((target, "WRITE"), 0) + 1
 
@@ -614,6 +1195,54 @@ def extract_referenced_objects(
             refs.append({"object": target, "operation": op, "count": cnt})
 
     return refs
+
+
+def read_analyzer_report(
+    report_xlsx_path: Optional[str] = None,
+    report_json_path: Optional[str] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Read Lakebridge Analyzer report preferring structured JSON inventory, with XLSX fallback/validation."""
+    merged: Dict[str, List[Dict[str, Any]]] = {}
+    json_err: Optional[str] = None
+
+    if report_json_path and os.path.isfile(report_json_path):
+        try:
+            json_wb = read_analyzer_workbook(report_json_path)
+            merged.update(json_wb)
+        except Exception as e:
+            json_err = sanitize_message(e)
+
+    if report_xlsx_path and os.path.isfile(report_xlsx_path):
+        try:
+            xlsx_wb = read_analyzer_workbook(report_xlsx_path)
+            for k, v in xlsx_wb.items():
+                if k not in merged:
+                    merged[k] = v
+                else:
+                    merged[f"xlsx_{k}"] = v
+        except Exception as e:
+            if not merged and json_err:
+                raise ValueError(
+                    f"Both Analyzer JSON ({json_err}) and XLSX ({sanitize_message(e)}) failed to parse"
+                ) from e
+            if not merged:
+                raise
+
+    if json_err:
+        if not merged:
+            raise ValueError(f"Analyzer JSON report is corrupt: {json_err}")
+        if "_warnings" not in merged:
+            merged["_warnings"] = []
+        merged["_warnings"].append(f"Preferred Analyzer JSON was corrupt: {json_err}. Fell back to XLSX.")
+
+    if not merged:
+        if report_xlsx_path and not os.path.exists(report_xlsx_path):
+            raise FileNotFoundError(f"Analyzer report file not found: {report_xlsx_path}")
+        if report_json_path and not os.path.exists(report_json_path):
+            raise FileNotFoundError(f"Analyzer report file not found: {report_json_path}")
+        raise ValueError("No valid Analyzer report file provided")
+
+    return merged
 
 
 def build_bounded_json(data: Any, max_bytes: int = 8192) -> str:
@@ -658,6 +1287,7 @@ def derive_lakebridge_classification(
     require_object_map: bool = False,
     object_type: Optional[str] = None,
     unresolved_references: bool = False,
+    diagnostic_warning_count: int = 0,
 ) -> Tuple[str, str, bool, Optional[str], Optional[str], Optional[str]]:
     """Derive lakebridge_classification and map to control status fields.
 
@@ -725,6 +1355,8 @@ def derive_lakebridge_classification(
         manual_reasons.append("uses trigger constructs")
     if validation_error_count > 0:
         manual_reasons.append(f"validation_error_count={validation_error_count}")
+    if diagnostic_warning_count > 0:
+        manual_reasons.append(f"BladeBridge diagnostic warnings ({diagnostic_warning_count})")
     if remaining_source_syntax:
         manual_reasons.append(f"retains source syntax: {', '.join(remaining_source_syntax)}")
     if complexity is None or statement_count is None or unknown_statement_count is None:
@@ -734,11 +1366,28 @@ def derive_lakebridge_classification(
     if not object_map_applied:
         manual_reasons.append("object_map_applied is false")
 
+    is_partial_conversion = bool(
+        fixme_count > 0
+        or remaining_source_syntax
+        or (unknown_statement_count is not None and unknown_statement_count > 0)
+        or unknown_fragments
+        or validation_error_count > 0
+        or diagnostic_warning_count > 0
+    )
+
     if manual_reasons:
         reason_str = "; ".join(manual_reasons)
+        if is_partial_conversion:
+            conv_status = "PARTIAL"
+        elif norm_otype == "PROCEDURE":
+            conv_status = "CONVERTED"
+        elif norm_otype == "VIEW":
+            conv_status = "CONVERTED" if object_map_applied else "PARTIAL"
+        else:
+            conv_status = "PARTIAL"
         return (
             LAKEBRIDGE_CLASSIFICATION_MANUAL_REVIEW,
-            "PARTIAL",
+            conv_status,
             True,
             reason_str[:500],
             None,

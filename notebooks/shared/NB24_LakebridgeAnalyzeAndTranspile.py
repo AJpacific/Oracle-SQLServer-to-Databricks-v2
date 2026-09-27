@@ -59,6 +59,10 @@ try:
         normalize_object_type,
         prepare_lakebridge_input_file,
         read_analyzer_workbook,
+        read_analyzer_report,
+        get_analyzer_platform,
+        get_bladebridge_tech,
+        extract_sql_from_bladebridge_mime,
         extract_complexity,
         extract_statement_counts,
         extract_unknown_fragments,
@@ -77,6 +81,9 @@ try:
         build_artifact_relative_path,
         build_artifact_volume_path,
     )
+    from src.lakebridge_environment import ensure_lakebridge_environment
+    import src.lakebridge_runner as _lb_runner_module
+    RUNNER_SCRIPT_PATH = os.path.abspath(_lb_runner_module.__file__)
 except ModuleNotFoundError:
     from identifiers import (
         quote_databricks,
@@ -106,6 +113,10 @@ except ModuleNotFoundError:
         normalize_object_type,
         prepare_lakebridge_input_file,
         read_analyzer_workbook,
+        read_analyzer_report,
+        get_analyzer_platform,
+        get_bladebridge_tech,
+        extract_sql_from_bladebridge_mime,
         extract_complexity,
         extract_statement_counts,
         extract_unknown_fragments,
@@ -124,6 +135,9 @@ except ModuleNotFoundError:
         build_artifact_relative_path,
         build_artifact_volume_path,
     )
+    from lakebridge_environment import ensure_lakebridge_environment
+    import lakebridge_runner as _lb_runner_module
+    RUNNER_SCRIPT_PATH = os.path.abspath(_lb_runner_module.__file__)
 
 # COMMAND ----------
 
@@ -200,24 +214,20 @@ def write_atomic_file(target_path: str, content: Union[str, bytes]) -> None:
         f.write(content)
     os.replace(temp_path, target_path)
 
-def default_cli_runner(cmd: List[str]) -> Tuple[int, str, str]:
-    """Execute command via subprocess, returning (exit_code, stdout, stderr)."""
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        return proc.returncode, proc.stdout, proc.stderr
-    except FileNotFoundError:
-        return 127, "", f"Command not found: {cmd[0]}"
-    except Exception as exc_run:
-        return 1, "", sanitize_message(exc_run)
+# Optional custom runner for testing or dependency injection
+custom_lakebridge_runner: Optional[Callable[[Dict[str, Any], str, str], Dict[str, Any]]] = None
 
-cli_runner: Callable[[List[str]], Tuple[int, str, str]] = default_cli_runner
+# Environment bootstrap and availability check before processing artifacts
+try:
+    env_ready, venv_python, env_details = ensure_lakebridge_environment()
+except Exception as exc_env:
+    env_ready = False
+    venv_python = None
+    env_details = {"error": sanitize_cli_output(exc_env)}
 
-# Availability check before processing artifacts
-check_cmd = ["databricks", "labs", "lakebridge", "--help"]
-chk_code, chk_out, chk_err = cli_runner(check_cmd)
-if chk_code != 0:
-    safe_chk_err = sanitize_cli_output(chk_err or chk_out)
-    print(f"FATAL: Lakebridge CLI availability check failed (exit code {chk_code}): {safe_chk_err}")
+if not env_ready:
+    safe_chk_err = sanitize_cli_output(env_details.get("error", "Lakebridge environment unavailable"))
+    print(f"FATAL: Lakebridge environment initialization failed: {safe_chk_err}")
     set_task_value("run_id", run_id)
     set_task_value("status", "FAILED")
     set_task_value("business_status", "FAILED")
@@ -232,7 +242,51 @@ if chk_code != 0:
     set_task_value("generation_error_count", 0)
     set_task_value("fixme_artifact_count", 0)
     set_task_value("persistent_store_failure_count", 0)
-    raise RuntimeError(f"Lakebridge CLI is unavailable (exit code {chk_code}): {safe_chk_err}")
+    raise RuntimeError(f"Lakebridge runtime environment is unavailable: {safe_chk_err}")
+
+print(f"Lakebridge isolated runtime ready using Python: {venv_python}")
+
+def execute_lakebridge_runner(
+    request_data: Dict[str, Any],
+    attempt_dir: str,
+    timeout_sec: int = 180,
+) -> Dict[str, Any]:
+    """Execute action through isolated runner script using the seeded environment Python."""
+    req_path = os.path.join(attempt_dir, f"request_{uuid.uuid4().hex[:8]}.json")
+    resp_path = os.path.join(attempt_dir, f"response_{uuid.uuid4().hex[:8]}.json")
+
+    with open(req_path, "w", encoding="utf-8") as f:
+        json.dump(request_data, f, indent=2)
+
+    if custom_lakebridge_runner:
+        return custom_lakebridge_runner(request_data, req_path, resp_path)
+
+    cmd = [venv_python or sys.executable, RUNNER_SCRIPT_PATH, "--request", req_path, "--response", resp_path]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=timeout_sec)
+        if os.path.isfile(resp_path):
+            try:
+                with open(resp_path, "r", encoding="utf-8") as rf:
+                    return json.load(rf)
+            except Exception:
+                pass
+        return {
+            "status": "FAILED",
+            "error": sanitize_cli_output(proc.stderr or proc.stdout or f"Process failed with exit code {proc.returncode}"),
+            "exit_code": proc.returncode,
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "FAILED",
+            "error": f"Lakebridge runner execution timed out after {timeout_sec}s",
+            "exit_code": 124,
+        }
+    except Exception as exc_run:
+        return {
+            "status": "FAILED",
+            "error": sanitize_message(exc_run),
+            "exit_code": 1,
+        }
 
 verified_schemas: Set[Tuple[str, str]] = set()
 verified_volumes: Set[Tuple[str, str, str]] = set()
@@ -398,6 +452,7 @@ for cand in candidates_to_process:
     print(f"\nProcessing artifact {sch}.{oname} ({otype}) id={art_id}, attempt={attempt_num}")
     tech = "mssql" if src_sys == "sqlserver" else "oracle"
 
+    artifact_counted = False
     try:
         # 1. Prepare collision-resistant input file
         input_file = prepare_lakebridge_input_file(
@@ -412,68 +467,107 @@ for cand in candidates_to_process:
             source_system=src_sys,
         )
 
-        # 2. Run Databricks Labs Lakebridge Analyze
+        # 2. Run Lakebridge Analyzer via isolated Python runner
         report_file = os.path.join(report_dir, f"{art_id}_report.xlsx")
-        analyze_cmd = [
-            "databricks", "labs", "lakebridge", "analyze",
-            "--source-directory", os.path.abspath(input_dir),
-            "--report-file", os.path.abspath(report_file),
-            "--source-tech", tech,
-        ]
+        report_json_file = os.path.join(report_dir, f"{art_id}_report.json")
+        an_req = {
+            "action": "analyze",
+            "input_dir": os.path.abspath(input_dir),
+            "report_xlsx_path": os.path.abspath(report_file),
+            "report_json_path": os.path.abspath(report_json_file),
+            "source_system": src_sys,
+            "is_debug": False,
+        }
         an_start_ts = datetime.now(timezone.utc)
-        code_an, out_an, err_an = cli_runner(analyze_cmd)
+        an_resp = execute_lakebridge_runner(an_req, attempt_dir)
         an_end_ts = datetime.now(timezone.utc)
 
-        analyzer_failed = (code_an != 0)
-        safe_an_err = sanitize_cli_output(err_an or out_an) if analyzer_failed else ""
+        analyzer_failed = (an_resp.get("status") != "SUCCEEDED")
+        safe_an_err = sanitize_cli_output(an_resp.get("error", "")) if analyzer_failed else ""
         if analyzer_failed:
-            print(f"  [warn] Lakebridge Analyze failed (code {code_an}): {safe_an_err}")
+            print(f"  [warn] Lakebridge Analyze failed: {safe_an_err}")
             with open(os.path.join(error_dir, f"{art_id}_analyzer_error.txt"), "w", encoding="utf-8") as f:
                 f.write(safe_an_err)
 
-        # 3. Read Analyzer report if available
+        # 3. Read Analyzer report if available (preferring structured JSON inventory, with XLSX fallback)
         workbook_data: Dict[str, List[Dict[str, Any]]] = {}
-        if not analyzer_failed and os.path.exists(report_file):
+        if not analyzer_failed and (os.path.exists(report_file) or os.path.exists(report_json_file)):
             try:
-                workbook_data = read_analyzer_workbook(report_file)
+                workbook_data = read_analyzer_report(
+                    report_xlsx_path=report_file if os.path.exists(report_file) else None,
+                    report_json_path=report_json_file if os.path.exists(report_json_file) else None,
+                )
             except Exception as exc_wb:
                 analyzer_failed = True
                 safe_an_err = sanitize_message(exc_wb)
                 print(f"  [warn] Failed to parse Analyzer report: {safe_an_err}")
 
-        # 4. Run Databricks Labs Lakebridge Transpile
+        # 4. Run BladeBridge Transpile via isolated Python runner
         error_file = os.path.join(error_dir, f"{art_id}_error.txt")
-        transpile_cmd = [
-            "databricks", "labs", "lakebridge", "transpile",
-            "--source-dialect", tech,
-            "--input-source", os.path.abspath(input_dir),
-            "--output-folder", os.path.abspath(output_dir),
-            "--error-file-path", os.path.abspath(error_file),
-            "--skip-validation", "true",
-        ]
+        converted_file = os.path.join(output_dir, f"{art_id}_converted.sql")
+        tr_req = {
+            "action": "transpile",
+            "source_file": os.path.abspath(input_file),
+            "output_file": os.path.abspath(converted_file),
+            "source_system": src_sys,
+            "object_name": oname,
+        }
         tr_start_ts = datetime.now(timezone.utc)
-        code_tr, out_tr, err_tr = cli_runner(transpile_cmd)
+        tr_resp = execute_lakebridge_runner(tr_req, attempt_dir)
         tr_end_ts = datetime.now(timezone.utc)
 
-        transpile_failed = (code_tr != 0)
-        safe_tr_err = sanitize_cli_output(err_tr or out_tr) if transpile_failed else ""
+        tr_diag_errors = int(tr_resp.get("diagnostic_error_count", 0))
+        tr_diag_warnings = int(tr_resp.get("diagnostic_warning_count", 0))
+        raw_tr_diagnostics = tr_resp.get("diagnostics", [])
+
+        # Sanitize diagnostics: bounded, no source SQL, no secrets
+        sanitized_diagnostics = []
+        for d in (raw_tr_diagnostics or [])[:20]:
+            if isinstance(d, dict):
+                raw_m = str(d.get("message", ""))
+                sev = normalize_diagnostic_severity(d.get("severity"))
+            else:
+                raw_m = getattr(d, "message", str(d))
+                sev = normalize_diagnostic_severity(getattr(d, "severity", None))
+            clean_m = sanitize_message(raw_m)[:500]
+            if src_def and len(src_def) > 10 and src_def[:50] in clean_m:
+                clean_m = clean_m.replace(src_def[:50], "<source_sql>")
+            sanitized_diagnostics.append({"message": clean_m, "severity": sev})
+
+        transpile_failed = (tr_resp.get("status") != "SUCCEEDED" or tr_diag_errors > 0)
+        safe_tr_err = sanitize_cli_output(tr_resp.get("error", "")) if transpile_failed else ""
+        if tr_diag_errors > 0 and not safe_tr_err:
+            safe_tr_err = f"BladeBridge transpiler reported {tr_diag_errors} diagnostic error(s)"
         if transpile_failed:
-            print(f"  [warn] Lakebridge Transpile failed (code {code_tr}): {safe_tr_err}")
+            print(f"  [warn] Lakebridge Transpile failed: {safe_tr_err}")
+            err_payload = f"Error: {safe_tr_err}\n"
+            if sanitized_diagnostics:
+                err_payload += "Sanitized Diagnostics:\n" + json.dumps(sanitized_diagnostics, indent=2)
             with open(error_file, "w", encoding="utf-8") as f:
-                f.write(safe_tr_err)
+                f.write(err_payload[:4000])
 
         # 5. Discover converted output in output_dir only
         raw_bladebridge_sql: Optional[str] = None
-        if not transpile_failed:
+        if not transpile_failed and os.path.isfile(converted_file):
+            try:
+                with open(converted_file, "r", encoding="utf-8") as cf:
+                    content = cf.read().strip()
+                    if content:
+                        raw_bladebridge_sql = extract_sql_from_bladebridge_mime(content)
+            except Exception as exc_rf:
+                transpile_failed = True
+                safe_tr_err = sanitize_message(exc_rf)
+
+        if not transpile_failed and not raw_bladebridge_sql:
             for root, _, files in os.walk(output_dir):
                 for f in files:
                     if f.endswith(".sql"):
                         cand_path = os.path.join(root, f)
                         try:
                             with open(cand_path, "r", encoding="utf-8") as cf:
-                                content = cf.read()
-                                if content.strip():
-                                    raw_bladebridge_sql = content
+                                content = cf.read().strip()
+                                if content:
+                                    raw_bladebridge_sql = extract_sql_from_bladebridge_mime(content)
                                     break
                         except Exception as exc_rf:
                             safe_tr_err = sanitize_message(exc_rf)
@@ -485,19 +579,20 @@ for cand in candidates_to_process:
             safe_tr_err = "No converted SQL output produced in output folder"
 
         # 6. Extract Analyzer metadata and detect constructs
-        complexity = extract_complexity(workbook_data, oname)
-        stmt_count, unk_stmt_count = extract_statement_counts(workbook_data, oname)
-        unk_fragments = extract_unknown_fragments(workbook_data, oname)
+        staged_fname = os.path.basename(input_file)
+        complexity = extract_complexity(workbook_data, oname, staged_filename=staged_fname, artifact_id=art_id)
+        stmt_count, unk_stmt_count = extract_statement_counts(workbook_data, oname, staged_filename=staged_fname, artifact_id=art_id)
+        unk_fragments = extract_unknown_fragments(workbook_data, oname, staged_filename=staged_fname, artifact_id=art_id)
         constructs = detect_sql_constructs(raw_bladebridge_sql or src_def or "", src_sys)
         fixme_count = count_fixme_markers(raw_bladebridge_sql or "")
         retains_syntax, retained_patterns = detect_remaining_source_syntax(raw_bladebridge_sql or "", src_sys)
-        referenced_objects = extract_referenced_objects(workbook_data, raw_bladebridge_sql, oname)
+        referenced_objects = extract_referenced_objects(workbook_data, raw_bladebridge_sql, oname, staged_filename=staged_fname, artifact_id=art_id)
         bounded_refs_json = build_bounded_json(referenced_objects, max_bytes=8192)
         bounded_fragments_json = build_bounded_json(unk_fragments, max_bytes=8192)
 
         p_err = 1 if analyzer_failed else 0
         v_err = 1 if retains_syntax else 0
-        g_err = 1 if transpile_failed else 0
+        g_err = tr_diag_errors if tr_diag_errors > 0 else int(transpile_failed)
 
         parsing_error_count += p_err
         validation_error_count += v_err
@@ -523,14 +618,8 @@ for cand in candidates_to_process:
             object_map_applied=False,
             require_object_map=False,
             object_type=otype,
+            diagnostic_warning_count=tr_diag_warnings,
         )
-
-        if cls_res == LAKEBRIDGE_CLASSIFICATION_AUTO_CANDIDATE:
-            auto_candidate_count += 1
-        elif cls_res == LAKEBRIDGE_CLASSIFICATION_MANUAL_REVIEW:
-            manual_review_count += 1
-        else:
-            unsupported_count += 1
 
         if not analyzer_failed:
             analyzed_count += 1
@@ -572,20 +661,21 @@ for cand in candidates_to_process:
                 persistence_err = f"Failed to persist converted SQL: {sanitize_error(exc_p)}"
 
         # 7b. Persist report file if produced
-        if os.path.exists(report_file) and not persistence_failed:
-            try:
-                report_vol_dir = build_lakebridge_report_path(catalog, control_schema, run_id, src_sys)
-                vol_key = (catalog, control_schema, "_lakebridge_reports")
-                if vol_key not in verified_volumes:
-                    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {quote_databricks(catalog)}.{quote_databricks(control_schema)}")
-                    spark.sql(f"CREATE VOLUME IF NOT EXISTS {quote_databricks(catalog)}.{quote_databricks(control_schema)}.`_lakebridge_reports`")
-                    verified_volumes.add(vol_key)
-                dst_rep = os.path.join(report_vol_dir, os.path.basename(report_file))
-                with open(report_file, "rb") as rf:
-                    write_atomic_file(dst_rep, rf.read())
-            except Exception as exc_p:
-                persistence_failed = True
-                persistence_err = f"Failed to persist Analyzer report: {sanitize_error(exc_p)}"
+        for r_file in (report_file, report_json_file):
+            if os.path.exists(r_file) and not persistence_failed:
+                try:
+                    report_vol_dir = build_lakebridge_report_path(catalog, control_schema, run_id, src_sys)
+                    vol_key = (catalog, control_schema, "_lakebridge_reports")
+                    if vol_key not in verified_volumes:
+                        spark.sql(f"CREATE SCHEMA IF NOT EXISTS {quote_databricks(catalog)}.{quote_databricks(control_schema)}")
+                        spark.sql(f"CREATE VOLUME IF NOT EXISTS {quote_databricks(catalog)}.{quote_databricks(control_schema)}.`_lakebridge_reports`")
+                        verified_volumes.add(vol_key)
+                    dst_rep = os.path.join(report_vol_dir, os.path.basename(r_file))
+                    with open(r_file, "rb") as rf:
+                        write_atomic_file(dst_rep, rf.read())
+                except Exception as exc_p:
+                    persistence_failed = True
+                    persistence_err = f"Failed to persist Analyzer report: {sanitize_error(exc_p)}"
 
         # 7c. Persist errors if any error files exist
         if os.path.exists(error_dir) and not persistence_failed:
@@ -617,6 +707,15 @@ for cand in candidates_to_process:
             err_msg = persistence_err
             man_req = True
             man_reason = persistence_err
+
+        # Increment classification counters only from the final stored classification
+        if cls_res == LAKEBRIDGE_CLASSIFICATION_AUTO_CANDIDATE:
+            auto_candidate_count += 1
+        elif cls_res == LAKEBRIDGE_CLASSIFICATION_MANUAL_REVIEW:
+            manual_review_count += 1
+        else:
+            unsupported_count += 1
+        artifact_counted = True
 
         # 8. Persist control row immediately
         ctrl_row = {
@@ -685,6 +784,9 @@ for cand in candidates_to_process:
             "parsing_error_count": p_err,
             "validation_error_count": v_err,
             "generation_error_count": g_err,
+            "diagnostic_error_count": tr_diag_errors,
+            "diagnostic_warning_count": tr_diag_warnings,
+            "diagnostics": sanitized_diagnostics,
         }
 
         # Stage: Analyze
@@ -776,7 +878,9 @@ for cand in candidates_to_process:
         safe_exc = sanitize_message(art_exc)
         print(f"  [error] Artifact {art_id} processing failed: {safe_exc}")
         print(f"  [diagnostics] Retaining attempt directory: {attempt_dir}")
-        unsupported_count += 1
+        if not artifact_counted:
+            unsupported_count += 1
+            artifact_counted = True
 
         try:
             persist_control_row({
@@ -860,7 +964,8 @@ for cand in candidates_to_process:
 
 # Determine overall status and business status
 completed_count = auto_candidate_count + manual_review_count
-total_failures = unsupported_count + store_failure_count
+def_missing_count = max(0, total_candidates - len(candidates_to_process))
+total_failures = unsupported_count + def_missing_count
 
 if total_candidates == 0:
     business_status = "NO_CANDIDATES"

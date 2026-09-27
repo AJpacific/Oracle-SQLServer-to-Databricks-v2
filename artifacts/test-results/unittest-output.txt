@@ -1,3 +1,274 @@
+[_common] src location: D:\Visual Studio Code\Oracle-SQLServer-to-Databricks-v2\src
+[_common] bootstrap complete. CATALOG=dummy CONTROL_SCHEMA=dummy
+Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
+Distinct failed operations: 2
+Retry worklist: 2; manual review: 0
+Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
+Distinct failed operations: 2
+Retry worklist: 1; manual review: 1
+  MANUAL_REVIEW parent_run_id=run-a connection_id=c1 source_table_id=t1 operation=FULL_LOAD reason=MAX_RETRIES_REACHED
+Selecting retries for INGEST runs ['run-a', 'run-b', 'run-c']; child run_id=retry_001
+Distinct failed operations: 3
+Retry worklist: 3; manual review: 0
+Selecting retries for INGEST runs ['run-a', 'run-b', 'run-c']; child run_id=retry_001
+Distinct failed operations: 3
+Retry worklist: 3; manual review: 0
+Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
+Distinct failed operations: 2
+Retry worklist: 2; manual review: 0
+Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
+Distinct failed operations: 2
+Retry worklist: 2; manual review: 0
+Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
+Distinct failed operations: 2
+Retry worklist: 1; manual review: 1
+  MANUAL_REVIEW parent_run_id=run-a connection_id=c1 source_table_id=t1 operation=FULL_LOAD reason=MAX_RETRIES_REACHED
+Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
+Distinct failed operations: 2
+Retry worklist: 0; manual review: 2
+  MANUAL_REVIEW parent_run_id=run-a connection_id=c1 source_table_id=t1 operation=FULL_LOAD reason=MAX_RETRIES_REACHED
+  MANUAL_REVIEW parent_run_id=run-b connection_id=c1 source_table_id=t1 operation=FULL_LOAD reason=MAX_RETRIES_REACHED
+Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
+Distinct failed operations: 2
+Retry worklist: 2; manual review: 0
+Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
+Distinct failed operations: 2
+Retry worklist: 2; manual review: 0
+Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
+Distinct failed operations: 0
+Retry worklist: 0; manual review: 0
+Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
+Distinct failed operations: 2
+Retry worklist: 2; manual review: 0
+Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
+Distinct failed operations: 2
+Retry worklist: 1; manual review: 1
+  MANUAL_REVIEW parent_run_id=run-b connection_id=c2 source_table_id=t2 operation=FULL_LOAD reason=MAX_RETRIES_REACHED
+Selecting retries for INGEST runs ['run-a', 'run-b', 'run-c']; child run_id=retry_001
+Distinct failed operations: 2
+Retry worklist: 2; manual review: 0
+Selecting retries for INGEST runs ['run-a', "run'oops"]; child run_id=retry_001
+Distinct failed operations: 0
+Retry worklist: 0; manual review: 0
+Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
+Distinct failed operations: 0
+Retry worklist: 0; manual review: 0
+Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
+Distinct failed operations: 0
+Retry worklist: 0; manual review: 0
+=== Starting SQL Artifact Migration run_id=run-test-22 ===
+Control Catalog=da_accelerators, Control Schema=control
+Filter Connection='', Filter Database='', Max Artifacts=None
+Discovered 1 selected candidate artifact(s)
+Updated 1 record(s) in `da_accelerators`.`control`.`sql_artifact_control`
+Appended 1 log row(s) to `da_accelerators`.`control`.`sql_artifact_execution_log`
+Run Summary: {
+  "status": "SUCCEEDED",
+  "business_status": "COMPLETE",
+  "run_id": "run-test-22",
+  "total_candidates": 1,
+  "auto_count": 1,
+  "manual_review_count": 0,
+  "unsupported_count": 0,
+  "failed_count": 0,
+  "definition_missing_count": 0,
+  "artifact_write_failed_count": 0,
+  "skipped_duplicates_count": 0,
+  "skipped_connections_count": 0,
+  "classifications": {
+    "AUTO": 1,
+    "MANUAL_REVIEW": 0,
+    "UNSUPPORTED": 0
+  }
+}
+=== Starting SQL Artifact Migration run_id=run-test-22 ===
+Control Catalog=da_accelerators, Control Schema=control
+Filter Connection='', Filter Database='', Max Artifacts=None
+Discovered 2 selected candidate artifact(s)
+Updated 2 record(s) in `da_accelerators`.`control`.`sql_artifact_control`
+Appended 2 log row(s) to `da_accelerators`.`control`.`sql_artifact_execution_log`
+Run Summary: {
+  "status": "SUCCEEDED",
+  "business_status": "MANUAL_REVIEW_REQUIRED",
+  "run_id": "run-test-22",
+  "total_candidates": 2,
+  "auto_count": 1,
+  "manual_review_count": 1,
+  "unsupported_count": 0,
+  "failed_count": 0,
+  "definition_missing_count": 0,
+  "artifact_write_failed_count": 0,
+  "skipped_duplicates_count": 0,
+  "skipped_connections_count": 0,
+  "classifications": {
+    "AUTO": 1,
+    "MANUAL_REVIEW": 1,
+    "UNSUPPORTED": 0
+  }
+}
+=== Starting SQL Artifact Migration run_id=run-test-22 ===
+Control Catalog=da_accelerators, Control Schema=control
+Filter Connection='', Filter Database='', Max Artifacts=None
+Discovered 1 selected candidate artifact(s)
+Error: Failed to write converted artifact file: Simulated volume disk write I/O error
+Updated 1 record(s) in `da_accelerators`.`control`.`sql_artifact_control`
+Appended 1 log row(s) to `da_accelerators`.`control`.`sql_artifact_execution_log`
+Run Summary: {
+  "status": "SUCCEEDED",
+  "business_status": "PARTIAL",
+  "run_id": "run-test-22",
+  "total_candidates": 1,
+  "auto_count": 0,
+  "manual_review_count": 0,
+  "unsupported_count": 0,
+  "failed_count": 1,
+  "definition_missing_count": 0,
+  "artifact_write_failed_count": 1,
+  "skipped_duplicates_count": 0,
+  "skipped_connections_count": 0,
+  "classifications": {
+    "AUTO": 0,
+    "MANUAL_REVIEW": 0,
+    "UNSUPPORTED": 0
+  }
+}
+=== Starting SQL Artifact Migration run_id=run-test-22 ===
+Control Catalog=da_accelerators, Control Schema=control
+Filter Connection='', Filter Database='', Max Artifacts=None
+Discovered 2 selected candidate artifact(s)
+Updated 1 record(s) in `da_accelerators`.`control`.`sql_artifact_control`
+Appended 2 log row(s) to `da_accelerators`.`control`.`sql_artifact_execution_log`
+Run Summary: {
+  "status": "SUCCEEDED",
+  "business_status": "COMPLETE",
+  "run_id": "run-test-22",
+  "total_candidates": 2,
+  "auto_count": 1,
+  "manual_review_count": 0,
+  "unsupported_count": 0,
+  "failed_count": 0,
+  "definition_missing_count": 0,
+  "artifact_write_failed_count": 0,
+  "skipped_duplicates_count": 1,
+  "skipped_connections_count": 0,
+  "classifications": {
+    "AUTO": 1,
+    "MANUAL_REVIEW": 0,
+    "UNSUPPORTED": 0
+  }
+}
+=== Starting SQL Artifact Migration run_id=run-test-22 ===
+Control Catalog=da_accelerators, Control Schema=control
+Filter Connection='', Filter Database='', Max Artifacts=None
+Discovered 1 selected candidate artifact(s)
+Updated 1 record(s) in `da_accelerators`.`control`.`sql_artifact_control`
+Appended 1 log row(s) to `da_accelerators`.`control`.`sql_artifact_execution_log`
+Run Summary: {
+  "status": "SUCCEEDED",
+  "business_status": "PARTIAL",
+  "run_id": "run-test-22",
+  "total_candidates": 1,
+  "auto_count": 0,
+  "manual_review_count": 0,
+  "unsupported_count": 0,
+  "failed_count": 1,
+  "definition_missing_count": 1,
+  "artifact_write_failed_count": 0,
+  "skipped_duplicates_count": 0,
+  "skipped_connections_count": 0,
+  "classifications": {
+    "AUTO": 0,
+    "MANUAL_REVIEW": 0,
+    "UNSUPPORTED": 0
+  }
+}
+=== Starting SQL Artifact Migration run_id=run-test-22 ===
+Control Catalog=da_accelerators, Control Schema=control
+Filter Connection='', Filter Database='', Max Artifacts=None
+Discovered 1 selected candidate artifact(s)
+Appended 1 log row(s) to `da_accelerators`.`control`.`sql_artifact_execution_log`
+Run Summary: {
+  "status": "SUCCEEDED",
+  "business_status": "PARTIAL",
+  "run_id": "run-test-22",
+  "total_candidates": 1,
+  "auto_count": 0,
+  "manual_review_count": 0,
+  "unsupported_count": 0,
+  "failed_count": 0,
+  "definition_missing_count": 0,
+  "artifact_write_failed_count": 0,
+  "skipped_duplicates_count": 0,
+  "skipped_connections_count": 1,
+  "classifications": {
+    "AUTO": 0,
+    "MANUAL_REVIEW": 0,
+    "UNSUPPORTED": 0
+  }
+}
+=== Starting SQL Artifact Migration run_id=run-test-22 ===
+Control Catalog=da_accelerators, Control Schema=control
+Filter Connection='', Filter Database='', Max Artifacts=None
+Discovered 1 selected candidate artifact(s)
+=== Starting SQL Artifact Migration run_id=run-test-22 ===
+Control Catalog=da_accelerators, Control Schema=control
+Filter Connection='', Filter Database='', Max Artifacts=None
+Discovered 0 selected candidate artifact(s)
+NB18 complete: status=SUCCEEDED, business_status=PARTIAL, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=1, failed=0
+NB18 complete: status=SUCCEEDED, business_status=NO_OBJECTS, discovered=0, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=FAILED, business_status=FAILED, discovered=2, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=2
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=0, repaired=1, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=1, repaired=0, skipped=0, failed=0
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=4, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=4
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=1, repaired=0, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=0, repaired=1, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=0, repaired=1, skipped=0, failed=0
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=0, repaired=1, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=FAILED, business_status=FAILED, discovered=2, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=2
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=PARTIAL, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=1, failed=0
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=1, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=1, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=1, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=SUCCEEDED, business_status=PARTIAL, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=1, failed=0
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=PARTIAL, discovered=2, materialized=0, updated=0, unchanged=1, repaired=0, skipped=1, failed=0
+NB18 complete: status=SUCCEEDED, business_status=PARTIAL, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=1, failed=0
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=SUCCEEDED, business_status=PARTIAL, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=1, failed=0
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=1, repaired=0, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=1, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=FAILED, business_status=PARTIAL, discovered=2, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
+NB18 complete: status=SUCCEEDED, business_status=NO_OBJECTS, discovered=0, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
+NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
+
 test_oracle_adapter_returns_oracle_discovery (test_assessment.TestAdapterDiscoveryRouting.test_oracle_adapter_returns_oracle_discovery) ... ok
 test_sqlserver_adapter_returns_sqlserver_discovery (test_assessment.TestAdapterDiscoveryRouting.test_sqlserver_adapter_returns_sqlserver_discovery) ... ok
 test_mandatory_discovery_failure_is_failed (test_assessment.TestAssessmentDiscoveryStatus.test_mandatory_discovery_failure_is_failed) ... ok
@@ -281,214 +552,7 @@ Item 3: NB22 removed ownership and deploy logic, retains compute_artifact_id and
 test_item04_docs_reflect_convert_and_store_only (test_final_blockers.TestConvertAndStorePipelineRequirements.test_item04_docs_reflect_convert_and_store_only)
 Item 4: Docs: say 'converts, classifies, and stores; does not deploy and does not connect to source databases'. ... ok
 test_item05_candidate_selection_driven_and_validations (test_final_blockers.TestConvertAndStorePipelineRequirements.test_item05_candidate_selection_driven_and_validations)
-Item 5: Selection-driven candidates, join on run_id, validations, definition missing, unusable connection. ... [_common] src location: D:\Visual Studio Code\Oracle-SQLServer-to-Databricks-v2\src
-[_common] bootstrap complete. CATALOG=dummy CONTROL_SCHEMA=dummy
-Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
-Distinct failed operations: 2
-Retry worklist: 2; manual review: 0
-Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
-Distinct failed operations: 2
-Retry worklist: 1; manual review: 1
-  MANUAL_REVIEW parent_run_id=run-a connection_id=c1 source_table_id=t1 operation=FULL_LOAD reason=MAX_RETRIES_REACHED
-Selecting retries for INGEST runs ['run-a', 'run-b', 'run-c']; child run_id=retry_001
-Distinct failed operations: 3
-Retry worklist: 3; manual review: 0
-Selecting retries for INGEST runs ['run-a', 'run-b', 'run-c']; child run_id=retry_001
-Distinct failed operations: 3
-Retry worklist: 3; manual review: 0
-Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
-Distinct failed operations: 2
-Retry worklist: 2; manual review: 0
-Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
-Distinct failed operations: 2
-Retry worklist: 2; manual review: 0
-Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
-Distinct failed operations: 2
-Retry worklist: 1; manual review: 1
-  MANUAL_REVIEW parent_run_id=run-a connection_id=c1 source_table_id=t1 operation=FULL_LOAD reason=MAX_RETRIES_REACHED
-Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
-Distinct failed operations: 2
-Retry worklist: 0; manual review: 2
-  MANUAL_REVIEW parent_run_id=run-a connection_id=c1 source_table_id=t1 operation=FULL_LOAD reason=MAX_RETRIES_REACHED
-  MANUAL_REVIEW parent_run_id=run-b connection_id=c1 source_table_id=t1 operation=FULL_LOAD reason=MAX_RETRIES_REACHED
-Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
-Distinct failed operations: 2
-Retry worklist: 2; manual review: 0
-Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
-Distinct failed operations: 2
-Retry worklist: 2; manual review: 0
-Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
-Distinct failed operations: 0
-Retry worklist: 0; manual review: 0
-Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
-Distinct failed operations: 2
-Retry worklist: 2; manual review: 0
-Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
-Distinct failed operations: 2
-Retry worklist: 1; manual review: 1
-  MANUAL_REVIEW parent_run_id=run-b connection_id=c2 source_table_id=t2 operation=FULL_LOAD reason=MAX_RETRIES_REACHED
-Selecting retries for INGEST runs ['run-a', 'run-b', 'run-c']; child run_id=retry_001
-Distinct failed operations: 2
-Retry worklist: 2; manual review: 0
-Selecting retries for INGEST runs ['run-a', "run'oops"]; child run_id=retry_001
-Distinct failed operations: 0
-Retry worklist: 0; manual review: 0
-Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
-Distinct failed operations: 0
-Retry worklist: 0; manual review: 0
-Selecting retries for INGEST runs ['run-a', 'run-b']; child run_id=retry_001
-Distinct failed operations: 0
-Retry worklist: 0; manual review: 0
-=== Starting SQL Artifact Migration run_id=run-test-22 ===
-Control Catalog=da_accelerators, Control Schema=control
-Filter Connection='', Filter Database='', Max Artifacts=None
-Discovered 1 selected candidate artifact(s)
-Updated 1 record(s) in `da_accelerators`.`control`.`sql_artifact_control`
-Appended 1 log row(s) to `da_accelerators`.`control`.`sql_artifact_execution_log`
-Run Summary: {
-  "status": "SUCCEEDED",
-  "business_status": "COMPLETE",
-  "run_id": "run-test-22",
-  "total_candidates": 1,
-  "auto_count": 1,
-  "manual_review_count": 0,
-  "unsupported_count": 0,
-  "failed_count": 0,
-  "definition_missing_count": 0,
-  "artifact_write_failed_count": 0,
-  "skipped_duplicates_count": 0,
-  "skipped_connections_count": 0,
-  "classifications": {
-    "AUTO": 1,
-    "MANUAL_REVIEW": 0,
-    "UNSUPPORTED": 0
-  }
-}
-=== Starting SQL Artifact Migration run_id=run-test-22 ===
-Control Catalog=da_accelerators, Control Schema=control
-Filter Connection='', Filter Database='', Max Artifacts=None
-Discovered 2 selected candidate artifact(s)
-Updated 2 record(s) in `da_accelerators`.`control`.`sql_artifact_control`
-Appended 2 log row(s) to `da_accelerators`.`control`.`sql_artifact_execution_log`
-Run Summary: {
-  "status": "SUCCEEDED",
-  "business_status": "MANUAL_REVIEW_REQUIRED",
-  "run_id": "run-test-22",
-  "total_candidates": 2,
-  "auto_count": 1,
-  "manual_review_count": 1,
-  "unsupported_count": 0,
-  "failed_count": 0,
-  "definition_missing_count": 0,
-  "artifact_write_failed_count": 0,
-  "skipped_duplicates_count": 0,
-  "skipped_connections_count": 0,
-  "classifications": {
-    "AUTO": 1,
-    "MANUAL_REVIEW": 1,
-    "UNSUPPORTED": 0
-  }
-}
-=== Starting SQL Artifact Migration run_id=run-test-22 ===
-Control Catalog=da_accelerators, Control Schema=control
-Filter Connection='', Filter Database='', Max Artifacts=None
-Discovered 1 selected candidate artifact(s)
-Error: Failed to write converted artifact file: Simulated volume disk write I/O error
-Updated 1 record(s) in `da_accelerators`.`control`.`sql_artifact_control`
-Appended 1 log row(s) to `da_accelerators`.`control`.`sql_artifact_execution_log`
-Run Summary: {
-  "status": "SUCCEEDED",
-  "business_status": "PARTIAL",
-  "run_id": "run-test-22",
-  "total_candidates": 1,
-  "auto_count": 0,
-  "manual_review_count": 0,
-  "unsupported_count": 0,
-  "failed_count": 1,
-  "definition_missing_count": 0,
-  "artifact_write_failed_count": 1,
-  "skipped_duplicates_count": 0,
-  "skipped_connections_count": 0,
-  "classifications": {
-    "AUTO": 0,
-    "MANUAL_REVIEW": 0,
-    "UNSUPPORTED": 0
-  }
-}
-=== Starting SQL Artifact Migration run_id=run-test-22 ===
-Control Catalog=da_accelerators, Control Schema=control
-Filter Connection='', Filter Database='', Max Artifacts=None
-Discovered 2 selected candidate artifact(s)
-Updated 1 record(s) in `da_accelerators`.`control`.`sql_artifact_control`
-Appended 2 log row(s) to `da_accelerators`.`control`.`sql_artifact_execution_log`
-Run Summary: {
-  "status": "SUCCEEDED",
-  "business_status": "COMPLETE",
-  "run_id": "run-test-22",
-  "total_candidates": 2,
-  "auto_count": 1,
-  "manual_review_count": 0,
-  "unsupported_count": 0,
-  "failed_count": 0,
-  "definition_missing_count": 0,
-  "artifact_write_failed_count": 0,
-  "skipped_duplicates_count": 1,
-  "skipped_connections_count": 0,
-  "classifications": {
-    "AUTO": 1,
-    "MANUAL_REVIEW": 0,
-    "UNSUPPORTED": 0
-  }
-}
-=== Starting SQL Artifact Migration run_id=run-test-22 ===
-Control Catalog=da_accelerators, Control Schema=control
-Filter Connection='', Filter Database='', Max Artifacts=None
-Discovered 1 selected candidate artifact(s)
-Updated 1 record(s) in `da_accelerators`.`control`.`sql_artifact_control`
-Appended 1 log row(s) to `da_accelerators`.`control`.`sql_artifact_execution_log`
-Run Summary: {
-  "status": "SUCCEEDED",
-  "business_status": "PARTIAL",
-  "run_id": "run-test-22",
-  "total_candidates": 1,
-  "auto_count": 0,
-  "manual_review_count": 0,
-  "unsupported_count": 0,
-  "failed_count": 1,
-  "definition_missing_count": 1,
-  "artifact_write_failed_count": 0,
-  "skipped_duplicates_count": 0,
-  "skipped_connections_count": 0,
-  "classifications": {
-    "AUTO": 0,
-    "MANUAL_REVIEW": 0,
-    "UNSUPPORTED": 0
-  }
-}
-=== Starting SQL Artifact Migration run_id=run-test-22 ===
-Control Catalog=da_accelerators, Control Schema=control
-Filter Connection='', Filter Database='', Max Artifacts=None
-Discovered 1 selected candidate artifact(s)
-Appended 1 log row(s) to `da_accelerators`.`control`.`sql_artifact_execution_log`
-Run Summary: {
-  "status": "SUCCEEDED",
-  "business_status": "PARTIAL",
-  "run_id": "run-test-22",
-  "total_candidates": 1,
-  "auto_count": 0,
-  "manual_review_count": 0,
-  "unsupported_count": 0,
-  "failed_count": 0,
-  "definition_missing_count": 0,
-  "artifact_write_failed_count": 0,
-  "skipped_duplicates_count": 0,
-  "skipped_connections_count": 1,
-  "classifications": {
-    "AUTO": 0,
-    "MANUAL_REVIEW": 0,
-    "UNSUPPORTED": 0
-  }
-}ok
+Item 5: Selection-driven candidates, join on run_id, validations, definition missing, unusable connection. ... ok
 test_item06_nb18_and_nb22_shared_candidate_query (test_final_blockers.TestConvertAndStorePipelineRequirements.test_item06_nb18_and_nb22_shared_candidate_query)
 Item 6: NB18 and NB22 use the same candidate query through shared helper in src/. ... ok
 test_item07_nb22_typing_imports (test_final_blockers.TestConvertAndStorePipelineRequirements.test_item07_nb22_typing_imports)
@@ -598,13 +662,33 @@ test_oracle_database_required (test_job_1b_deduplication.TestScenarioJBackwardCo
 test_source_identity_algorithm_unchanged (test_job_1b_deduplication.TestScenarioJBackwardCompatibility.test_source_identity_algorithm_unchanged) ... ok
 test_job_1b_documented_task_graph (test_job_1b_deduplication.TestScenarioKArchitectureContract.test_job_1b_documented_task_graph) ... ok
 test_job_1b_yaml_not_in_repository (test_job_1b_deduplication.TestScenarioKArchitectureContract.test_job_1b_yaml_not_in_repository) ... ok
+test_contradictory_json_and_xlsx_complexity_fails_closed (test_lakebridge_artifact_migration.TestAnalyzerParserGaps.test_contradictory_json_and_xlsx_complexity_fails_closed) ... ok
+test_corrupt_json_with_xlsx_fallback (test_lakebridge_artifact_migration.TestAnalyzerParserGaps.test_corrupt_json_with_xlsx_fallback) ... ok
+test_dynamic_sql_dependency_fallback_masked (test_lakebridge_artifact_migration.TestAnalyzerParserGaps.test_dynamic_sql_dependency_fallback_masked) ... ok
+test_referenced_objects_strict_artifact_matching (test_lakebridge_artifact_migration.TestAnalyzerParserGaps.test_referenced_objects_strict_artifact_matching) ... ok
+test_xlsx_relationships_resolution (test_lakebridge_artifact_migration.TestAnalyzerParserGaps.test_xlsx_relationships_resolution)
+Test XLSX worksheet files are resolved via workbook.xml relationships rather than ordinal. ... ok
+test_diagnostic_errors_force_unsupported_classification (test_lakebridge_artifact_migration.TestBladeBridgeDiagnostics.test_diagnostic_errors_force_unsupported_classification) ... ok
+test_diagnostic_severity_normalization (test_lakebridge_artifact_migration.TestBladeBridgeDiagnostics.test_diagnostic_severity_normalization) ... ok
+test_diagnostic_warnings_force_manual_review (test_lakebridge_artifact_migration.TestBladeBridgeDiagnostics.test_diagnostic_warnings_force_manual_review) ... ok
+test_production_run_transpile_with_diagnostics (test_lakebridge_artifact_migration.TestBladeBridgeDiagnostics.test_production_run_transpile_with_diagnostics) ... ok
 test_candidates_filter_is_selected_true_and_view_procedure_only (test_lakebridge_artifact_migration.TestCandidateSelection.test_candidates_filter_is_selected_true_and_view_procedure_only) ... ok
 test_deterministic_ordering (test_lakebridge_artifact_migration.TestCandidateSelection.test_deterministic_ordering) ... ok
 test_joins_latest_assessment_per_connection_and_database (test_lakebridge_artifact_migration.TestCandidateSelection.test_joins_latest_assessment_per_connection_and_database) ... ok
 test_unselected_and_other_types_excluded (test_lakebridge_artifact_migration.TestCandidateSelection.test_unselected_and_other_types_excluded) ... ok
 test_validate_max_artifacts (test_lakebridge_artifact_migration.TestCandidateSelection.test_validate_max_artifacts) ... ok
+test_each_artifact_counted_exactly_once_and_no_double_count (test_lakebridge_artifact_migration.TestClassificationCountersAndPersistence.test_each_artifact_counted_exactly_once_and_no_double_count)
+Multiple artifacts: 1 auto, 1 manual, 1 unsupported transpile, 1 store failure, 1 missing definition. ... ok
+test_failed_persistence_updates_classification_to_unsupported (test_lakebridge_artifact_migration.TestClassificationCountersAndPersistence.test_failed_persistence_updates_classification_to_unsupported)
+When persistence fails, classification is updated to UNSUPPORTED and auto_candidate is NOT incremented. ... ok
+test_successful_persistence_increments_auto_candidate (test_lakebridge_artifact_migration.TestClassificationCountersAndPersistence.test_successful_persistence_increments_auto_candidate)
+When persistence succeeds, artifact classification is AUTO_CANDIDATE and auto_candidate_count increments. ... ok
 test_all_18_lakebridge_columns_present (test_lakebridge_artifact_migration.TestControlTable18LakebridgeColumns.test_all_18_lakebridge_columns_present) ... ok
 test_ddl_generation_and_upgrade (test_lakebridge_artifact_migration.TestControlTable18LakebridgeColumns.test_ddl_generation_and_upgrade) ... ok
+test_concurrent_initialization (test_lakebridge_artifact_migration.TestEnvironmentPromotionSafety.test_concurrent_initialization) ... ok
+test_failed_post_promotion_health_check (test_lakebridge_artifact_migration.TestEnvironmentPromotionSafety.test_failed_post_promotion_health_check) ... ok
+test_failed_promotion_with_rollback (test_lakebridge_artifact_migration.TestEnvironmentPromotionSafety.test_failed_promotion_with_rollback) ... ok
+test_successful_promotion (test_lakebridge_artifact_migration.TestEnvironmentPromotionSafety.test_successful_promotion) ... ok
 test_job_yaml_sequence_and_tasks (test_lakebridge_artifact_migration.TestJobGraphAndComputeRequirements.test_job_yaml_sequence_and_tasks) ... ok
 test_auto_candidate_classification (test_lakebridge_artifact_migration.TestLakebridgeClassification.test_auto_candidate_classification) ... ok
 test_manual_review_classification (test_lakebridge_artifact_migration.TestLakebridgeClassification.test_manual_review_classification) ... ok
@@ -613,6 +697,64 @@ test_construct_detection (test_lakebridge_artifact_migration.TestLakebridgeCommo
 test_fixme_and_dialect_syntax_detection (test_lakebridge_artifact_migration.TestLakebridgeCommonParserAndWorkbook.test_fixme_and_dialect_syntax_detection) ... ok
 test_referenced_objects_bounded_json (test_lakebridge_artifact_migration.TestLakebridgeCommonParserAndWorkbook.test_referenced_objects_bounded_json) ... ok
 test_workbook_parser_pure_python (test_lakebridge_artifact_migration.TestLakebridgeCommonParserAndWorkbook.test_workbook_parser_pure_python) ... ok
+test_A_no_runtime_databricks_cli_call_from_nb24 (test_lakebridge_artifact_migration.TestLiveDatabricksRuntimeValidation.test_A_no_runtime_databricks_cli_call_from_nb24)
+Item A: No runtime Databricks CLI call from NB24. ... ok
+test_B_analyzer_source_system_mapping (test_lakebridge_artifact_migration.TestLiveDatabricksRuntimeValidation.test_B_analyzer_source_system_mapping)
+Item B: sqlserver -> MS SQL Server, oracle -> Oracle, unknown -> failure. ... ok
+test_C_analyzer_json_inventory_parsing (test_lakebridge_artifact_migration.TestLiveDatabricksRuntimeValidation.test_C_analyzer_json_inventory_parsing)
+Item C: Parse authoritative live Analyzer JSON inventory format. ... ok
+test_D_actual_sql_programs_xlsx_parsing (test_lakebridge_artifact_migration.TestLiveDatabricksRuntimeValidation.test_D_actual_sql_programs_xlsx_parsing)
+Item D: Parse actual SQL Programs sheet from Analyzer XLSX. ... ok
+test_E_summary_labels_cannot_contaminate_artifact_complexity (test_lakebridge_artifact_migration.TestLiveDatabricksRuntimeValidation.test_E_summary_labels_cannot_contaminate_artifact_complexity)
+Item E: Aggregate Summary sheet labels (VERY_HIGH, etc.) must NEVER contaminate artifact complexity. ... ok
+test_F_statement_count_extraction_from_json (test_lakebridge_artifact_migration.TestLiveDatabricksRuntimeValidation.test_F_statement_count_extraction_from_json)
+Item F: statementCount extraction from structured JSON inventory. ... ok
+test_G_statement_count_fallback_from_sql_programs (test_lakebridge_artifact_migration.TestLiveDatabricksRuntimeValidation.test_G_statement_count_fallback_from_sql_programs)
+Item G: Statement Count fallback from SQL Programs XLSX sheet. ... ok
+test_H_unknown_sql_category_occurrence_aggregation (test_lakebridge_artifact_migration.TestLiveDatabricksRuntimeValidation.test_H_unknown_sql_category_occurrence_aggregation)
+Item H: UNKNOWN SQL Category sheet occurrence count aggregation. ... ok
+test_I_json_object_rel_extraction (test_lakebridge_artifact_migration.TestLiveDatabricksRuntimeValidation.test_I_json_object_rel_extraction)
+Item I: JSON objectRel extraction for referenced objects. ... ok
+test_J_raw_program_object_xref_fallback (test_lakebridge_artifact_migration.TestLiveDatabricksRuntimeValidation.test_J_raw_program_object_xref_fallback)
+Item J: RAW_PROGRAM_OBJECT_XREF XLSX sheet fallback for referenced objects. ... ok
+test_K_dynamic_sql_detected_without_fabricating_references (test_lakebridge_artifact_migration.TestLiveDatabricksRuntimeValidation.test_K_dynamic_sql_detected_without_fabricating_references)
+Item K: Dynamic SQL detected as construct/risk without fabricating references inside dynamic strings. ... ok
+test_L_bladebridge_low_level_mapping (test_lakebridge_artifact_migration.TestLiveDatabricksRuntimeValidation.test_L_bladebridge_low_level_mapping)
+Item L: BladeBridge low-level API mapping (MSSQL/SQL, ORACLE/SQL). ... ok
+test_M_textedit_application_correctness (test_lakebridge_artifact_migration.TestLiveDatabricksRuntimeValidation.test_M_textedit_application_correctness)
+Item M: TextEdit application correctness. ... ok
+test_N_mime_sql_attachment_extraction (test_lakebridge_artifact_migration.TestLiveDatabricksRuntimeValidation.test_N_mime_sql_attachment_extraction)
+Item N: Robust MIME .sql attachment extraction from BladeBridge response. ... ok
+test_O_mime_headers_and_boundaries_never_persisted (test_lakebridge_artifact_migration.TestLiveDatabricksRuntimeValidation.test_O_mime_headers_and_boundaries_never_persisted)
+Item O: MIME headers and boundaries are never present in extracted SQL. ... ok
+test_P_blank_mime_or_blank_output_fails_conversion (test_lakebridge_artifact_migration.TestLiveDatabricksRuntimeValidation.test_P_blank_mime_or_blank_output_fails_conversion)
+Item P: Blank MIME or blank output fails conversion with ValueError. ... ok
+test_Q_diagnostics_translated_truthfully (test_lakebridge_artifact_migration.TestLiveDatabricksRuntimeValidation.test_Q_diagnostics_translated_truthfully)
+Item Q: Diagnostics distinguished between warnings and errors. ... ok
+test_R_fixmes_count_from_clean_sql_only (test_lakebridge_artifact_migration.TestLiveDatabricksRuntimeValidation.test_R_fixmes_count_from_clean_sql_only)
+Item R: FIXMEs count only on clean extracted SQL. ... ok
+test_S_successful_procedure_remains_manual_review_converted_not_deployed (test_lakebridge_artifact_migration.TestLiveDatabricksRuntimeValidation.test_S_successful_procedure_remains_manual_review_converted_not_deployed)
+Item S: Successful procedure conversion produces MANUAL_REVIEW / CONVERTED / NOT_DEPLOYED. ... ok
+test_T_bootstrap_is_idempotent (test_lakebridge_artifact_migration.TestLiveDatabricksRuntimeValidation.test_T_bootstrap_is_idempotent)
+Item T: Bootstrap is idempotent and caches ready state. ... ok
+test_U_missing_uv_fails_safely_sanitized (test_lakebridge_artifact_migration.TestLiveDatabricksRuntimeValidation.test_U_missing_uv_fails_safely_sanitized)
+Item U: Missing uv returns structured sanitized failure without crashing. ... ok
+test_V_failed_pip_bootstrap_fails_safely_sanitized (test_lakebridge_artifact_migration.TestLiveDatabricksRuntimeValidation.test_V_failed_pip_bootstrap_fails_safely_sanitized)
+Item V: Failed package install fails safely and sanitized without leaking secrets. ... ok
+test_W_compute_restart_like_fresh_runtime_recreates_environment (test_lakebridge_artifact_migration.TestLiveDatabricksRuntimeValidation.test_W_compute_restart_like_fresh_runtime_recreates_environment)
+Item W: Fresh compute context verifies and reinitializes runtime. ... ok
+test_X_atomic_writes_attempt_isolation_and_no_deployment (test_lakebridge_artifact_migration.TestLiveDatabricksRuntimeValidation.test_X_atomic_writes_attempt_isolation_and_no_deployment)
+Item X: Atomic writes, attempt isolation, and no-deployment behavior preserved. ... ok
+test_Y_oracle_path_not_broken_by_sqlserver_fixes (test_lakebridge_artifact_migration.TestLiveDatabricksRuntimeValidation.test_Y_oracle_path_not_broken_by_sqlserver_fixes)
+Item Y: Oracle path works correctly with Oracle platform and ORACLE/SQL tech mapping. ... ok
+test_actual_multipart_response_shape (test_lakebridge_artifact_migration.TestMimeExtractionHardening.test_actual_multipart_response_shape) ... ok
+test_blank_mime_payload_rejected (test_lakebridge_artifact_migration.TestMimeExtractionHardening.test_blank_mime_payload_rejected) ... ok
+test_declared_non_utf8_charset (test_lakebridge_artifact_migration.TestMimeExtractionHardening.test_declared_non_utf8_charset) ... ok
+test_lowercase_mime_headers (test_lakebridge_artifact_migration.TestMimeExtractionHardening.test_lowercase_mime_headers) ... ok
+test_malformed_mime_rejected (test_lakebridge_artifact_migration.TestMimeExtractionHardening.test_malformed_mime_rejected) ... ok
+test_multiple_sql_attachments_rejected (test_lakebridge_artifact_migration.TestMimeExtractionHardening.test_multiple_sql_attachments_rejected) ... ok
+test_normal_non_mime_sql (test_lakebridge_artifact_migration.TestMimeExtractionHardening.test_normal_non_mime_sql) ... ok
+test_plain_sql_starting_with_comment (test_lakebridge_artifact_migration.TestMimeExtractionHardening.test_plain_sql_starting_with_comment) ... ok
 test_baseline_manifest_integrity (test_lakebridge_artifact_migration.TestNonNegotiableIsolation.test_baseline_manifest_integrity)
 All 44 protected files must exist and match approved baseline hashes. ... ok
 test_both_nb13_notebooks_remain_unchanged (test_lakebridge_artifact_migration.TestNonNegotiableIsolation.test_both_nb13_notebooks_remain_unchanged)
@@ -629,10 +771,22 @@ test_protected_file_validation_never_passes_vacuously (test_lakebridge_artifact_
 Validation must fail when baseline manifest is empty. ... ok
 test_restored_files_match_preceding_package (test_lakebridge_artifact_migration.TestNonNegotiableIsolation.test_restored_files_match_preceding_package)
 NB_GetDeltaWorklist.ipynb and NB00_ControlTableInit.py must match preceding package byte-for-byte. ... ok
+test_bracketed_identifiers_detected (test_lakebridge_artifact_migration.TestRemainingSourceSyntaxDetection.test_bracketed_identifiers_detected) ... ok
+test_dual_inside_comment_not_detected (test_lakebridge_artifact_migration.TestRemainingSourceSyntaxDetection.test_dual_inside_comment_not_detected) ... ok
+test_genuine_remaining_source_syntax_outside_comments_and_strings (test_lakebridge_artifact_migration.TestRemainingSourceSyntaxDetection.test_genuine_remaining_source_syntax_outside_comments_and_strings) ... ok
+test_getdate_inside_comment_not_detected (test_lakebridge_artifact_migration.TestRemainingSourceSyntaxDetection.test_getdate_inside_comment_not_detected) ... ok
+test_getdate_inside_string_not_detected (test_lakebridge_artifact_migration.TestRemainingSourceSyntaxDetection.test_getdate_inside_string_not_detected) ... ok
+test_sysdate_inside_string_not_detected (test_lakebridge_artifact_migration.TestRemainingSourceSyntaxDetection.test_sysdate_inside_string_not_detected) ... ok
+test_temporary_tables_detected (test_lakebridge_artifact_migration.TestRemainingSourceSyntaxDetection.test_temporary_tables_detected) ... ok
+test_xlsx_and_json_persistence_binary_exact_match (test_lakebridge_artifact_migration.TestReportPersistence.test_xlsx_and_json_persistence_binary_exact_match)
+Verifies report persistence logic opens both XLSX and JSON in binary mode, preserving contents. ... ok
 test_01_runtime_resolution_of_union_and_annotations (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_01_runtime_resolution_of_union_and_annotations) ... ok
-test_02_exact_lakebridge_availability_check_argv (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_02_exact_lakebridge_availability_check_argv) ... ok
-test_03_exact_analyzer_argv (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_03_exact_analyzer_argv) ... ok
-test_04_exact_transpile_argv (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_04_exact_transpile_argv) ... ok
+test_02_no_runtime_databricks_cli_invoked_by_nb24 (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_02_no_runtime_databricks_cli_invoked_by_nb24)
+Authoritative requirement: Databricks CLI cannot run in notebook task runtime. ... ok
+test_03_analyzer_source_system_platform_mapping (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_03_analyzer_source_system_platform_mapping)
+Authoritative requirement: Analyzer platform mapping for SQL Server and Oracle. ... ok
+test_04_bladebridge_low_level_tech_mapping (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_04_bladebridge_low_level_tech_mapping)
+Authoritative requirement: Low-level BladeBridge API expects MSSQL/SQL and ORACLE/SQL. ... ok
 test_05_nonzero_cli_return_code_fails_artifact (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_05_nonzero_cli_return_code_fails_artifact) ... ok
 test_06_cli_stdout_and_stderr_sanitization (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_06_cli_stdout_and_stderr_sanitization) ... ok
 test_07_real_csv_analyzer_parsing (test_lakebridge_artifact_migration.TestSection15TargetedBlockers.test_07_real_csv_analyzer_parsing) ... ok
@@ -703,6 +857,23 @@ test_71_no_secrets_or_credentials_in_logs_or_metadata (test_lakebridge_artifact_
 test_connection_usable_requires_active_valid_and_secret_scope (test_lakebridge_artifact_migration.TestSourceConnectionAndFetchValidation.test_connection_usable_requires_active_valid_and_secret_scope) ... ok
 test_nb23_notebook_structure_and_fetch_isolation (test_lakebridge_artifact_migration.TestSourceConnectionAndFetchValidation.test_nb23_notebook_structure_and_fetch_isolation) ... ok
 test_nb23_partial_fetch_status_and_raise_behavior (test_lakebridge_artifact_migration.TestSourceConnectionAndFetchValidation.test_nb23_partial_fetch_status_and_raise_behavior) ... ok
+test_deleted_cached_interpreter (test_lakebridge_artifact_migration.TestStrictEnvironmentHealthValidation.test_deleted_cached_interpreter) ... ok
+test_missing_version_metadata (test_lakebridge_artifact_migration.TestStrictEnvironmentHealthValidation.test_missing_version_metadata) ... ok
+test_version_mismatch (test_lakebridge_artifact_migration.TestStrictEnvironmentHealthValidation.test_version_mismatch) ... ok
+test_adjacent_edits (test_lakebridge_artifact_migration.TestTextEditApplication.test_adjacent_edits) ... ok
+test_crlf_insertion (test_lakebridge_artifact_migration.TestTextEditApplication.test_crlf_insertion) ... ok
+test_crlf_invalid_end_of_line_positions (test_lakebridge_artifact_migration.TestTextEditApplication.test_crlf_invalid_end_of_line_positions) ... ok
+test_crlf_multiline_edits (test_lakebridge_artifact_migration.TestTextEditApplication.test_crlf_multiline_edits) ... ok
+test_crlf_replacement (test_lakebridge_artifact_migration.TestTextEditApplication.test_crlf_replacement) ... ok
+test_crlf_unicode_with_crlf (test_lakebridge_artifact_migration.TestTextEditApplication.test_crlf_unicode_with_crlf) ... ok
+test_deletion (test_lakebridge_artifact_migration.TestTextEditApplication.test_deletion) ... ok
+test_insertion (test_lakebridge_artifact_migration.TestTextEditApplication.test_insertion) ... ok
+test_invalid_range_rejected (test_lakebridge_artifact_migration.TestTextEditApplication.test_invalid_range_rejected) ... ok
+test_multiline_edit (test_lakebridge_artifact_migration.TestTextEditApplication.test_multiline_edit) ... ok
+test_multiple_independent_edits (test_lakebridge_artifact_migration.TestTextEditApplication.test_multiple_independent_edits) ... ok
+test_one_full_document_replacement (test_lakebridge_artifact_migration.TestTextEditApplication.test_one_full_document_replacement) ... ok
+test_overlapping_edits_rejected (test_lakebridge_artifact_migration.TestTextEditApplication.test_overlapping_edits_rejected) ... ok
+test_unicode_utf16_offsets (test_lakebridge_artifact_migration.TestTextEditApplication.test_unicode_utf16_offsets) ... ok
 test_all_required_methods_present (test_modularity.TestAdapterContract.test_all_required_methods_present) ... ok
 test_object_type_normalization (test_modularity.TestAdapterContract.test_object_type_normalization) ... ok
 test_probe_queries_are_dialect_specific (test_modularity.TestAdapterContract.test_probe_queries_are_dialect_specific) ... ok
@@ -1400,69 +1571,7 @@ test_h35_to_h39_file_write_failure (test_sql_object_artifact_materialization.Tes
 test_i40_unchanged_definition (test_sql_object_artifact_materialization.TestSqlObjectArtifactMaterialization.test_i40_unchanged_definition) ... ok
 test_j41_changed_definition (test_sql_object_artifact_materialization.TestSqlObjectArtifactMaterialization.test_j41_changed_definition) ... ok
 test_k42_to_k47_failure_ordering (test_sql_object_artifact_materialization.TestSqlObjectArtifactMaterialization.test_k42_to_k47_failure_ordering) ... ok
-test_l48_to_l55_content_integrity (test_sql_object_artifact_materialization.TestSqlObjectArtifactMaterialization.test_l48_to_l55_content_integrity) ... 
-=== Starting SQL Artifact Migration run_id=run-test-22 ===
-Control Catalog=da_accelerators, Control Schema=control
-Filter Connection='', Filter Database='', Max Artifacts=None
-Discovered 1 selected candidate artifact(s)
-=== Starting SQL Artifact Migration run_id=run-test-22 ===
-Control Catalog=da_accelerators, Control Schema=control
-Filter Connection='', Filter Database='', Max Artifacts=None
-Discovered 0 selected candidate artifact(s)
-NB18 complete: status=SUCCEEDED, business_status=PARTIAL, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=1, failed=0
-NB18 complete: status=SUCCEEDED, business_status=NO_OBJECTS, discovered=0, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
-NB18 complete: status=FAILED, business_status=FAILED, discovered=2, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=2
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=0, repaired=1, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=1, repaired=0, skipped=0, failed=0
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=4, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=4
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=1, repaired=0, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=0, repaired=1, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=0, repaired=1, skipped=0, failed=0
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=0, repaired=1, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
-NB18 complete: status=FAILED, business_status=FAILED, discovered=2, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=2
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=PARTIAL, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=1, failed=0
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=1, unchanged=0, repaired=0, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=1, unchanged=0, repaired=0, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=1, unchanged=0, repaired=0, skipped=0, failed=0
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
-NB18 complete: status=SUCCEEDED, business_status=PARTIAL, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=1, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=PARTIAL, discovered=2, materialized=0, updated=0, unchanged=1, repaired=0, skipped=1, failed=0
-NB18 complete: status=SUCCEEDED, business_status=PARTIAL, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=1, failed=0
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
-NB18 complete: status=SUCCEEDED, business_status=PARTIAL, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=1, failed=0
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
-NB18 complete: status=FAILED, business_status=FAILED, discovered=1, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=0, unchanged=1, repaired=0, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=0, updated=1, unchanged=0, repaired=0, skipped=0, failed=0
-NB18 complete: status=FAILED, business_status=PARTIAL, discovered=2, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=1
-NB18 complete: status=SUCCEEDED, business_status=NO_OBJECTS, discovered=0, materialized=0, updated=0, unchanged=0, repaired=0, skipped=0, failed=0
-NB18 complete: status=SUCCEEDED, business_status=COMPLETE, discovered=1, materialized=1, updated=0, unchanged=0, repaired=0, skipped=0, failed=0ok
+test_l48_to_l55_content_integrity (test_sql_object_artifact_materialization.TestSqlObjectArtifactMaterialization.test_l48_to_l55_content_integrity) ... ok
 test_static_safety_active_conflict_does_not_mutate_manifest (test_sql_object_artifact_materialization.TestSqlObjectArtifactMaterialization.test_static_safety_active_conflict_does_not_mutate_manifest) ... ok
 test_static_safety_conditional_in_progress_claim_and_verification (test_sql_object_artifact_materialization.TestSqlObjectArtifactMaterialization.test_static_safety_conditional_in_progress_claim_and_verification) ... ok
 test_static_safety_general_merge_sql_conditioned (test_sql_object_artifact_materialization.TestSqlObjectArtifactMaterialization.test_static_safety_general_merge_sql_conditioned) ... ok
@@ -1654,7 +1763,6 @@ test_source_mismatch_fails (test_type_mappers.TestYamlValidation.test_source_mis
 test_target_mismatch_fails (test_type_mappers.TestYamlValidation.test_target_mismatch_fails) ... ok
 
 ----------------------------------------------------------------------
-Ran 1306 tests in 2.392s
+Ran 1380 tests in 3.500s
 
 OK
-

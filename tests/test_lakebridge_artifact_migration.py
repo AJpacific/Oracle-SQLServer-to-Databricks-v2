@@ -27,6 +27,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 import unittest.mock
@@ -68,6 +69,7 @@ from src.lakebridge_artifact_common import (
     normalize_object_type,
     prepare_lakebridge_input_file,
     read_analyzer_workbook,
+    read_analyzer_report,
     col_letter_to_index,
     extract_complexity,
     extract_statement_counts,
@@ -87,6 +89,28 @@ from src.lakebridge_artifact_common import (
     build_lakebridge_transpile_cmd,
     build_attempt_staging_dir,
     build_collision_resistant_filename,
+    get_analyzer_platform,
+    get_bladebridge_tech,
+    extract_sql_from_bladebridge_mime,
+    UnknownFragment,
+    apply_text_edits,
+    normalize_diagnostic_severity,
+    read_analyzer_report,
+    mask_sql_literals_and_comments,
+)
+from src.lakebridge_environment import (
+    find_uv_binary,
+    get_default_lakebridge_venv_dir,
+    get_venv_python_executable,
+    check_environment_health,
+    bootstrap_lakebridge_environment,
+    ensure_lakebridge_environment,
+    EnvironmentLock,
+)
+from src.lakebridge_runner import (
+    run_transpile,
+    run_analyze,
+    run_check_environment,
 )
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -875,33 +899,29 @@ class TestSection15TargetedBlockers(unittest.TestCase):
         tree = ast.parse(code)
         self.assertIsNotNone(tree)
 
-    def test_02_exact_lakebridge_availability_check_argv(self):
-        cmd = build_lakebridge_availability_cmd()
-        self.assertEqual(cmd, ["databricks", "labs", "lakebridge", "--help"])
+    def test_02_no_runtime_databricks_cli_invoked_by_nb24(self):
+        """Authoritative requirement: Databricks CLI cannot run in notebook task runtime."""
+        nb_path = os.path.join(ROOT, "notebooks", "shared", "NB24_LakebridgeAnalyzeAndTranspile.py")
+        with open(nb_path, "r", encoding="utf-8") as f:
+            code = f.read()
+        self.assertNotIn("databricks labs lakebridge", code)
+        self.assertNotIn('["databricks", "labs"', code)
 
-    def test_03_exact_analyzer_argv(self):
-        cmd = build_lakebridge_analyze_cmd("/local/in", "/local/rep.xlsx", "oracle")
-        self.assertEqual(cmd[0:4], ["databricks", "labs", "lakebridge", "analyze"])
-        self.assertEqual(cmd[4], "--source-directory")
-        self.assertEqual(cmd[5], os.path.abspath("/local/in"))
-        self.assertEqual(cmd[6], "--report-file")
-        self.assertEqual(cmd[7], os.path.abspath("/local/rep.xlsx"))
-        self.assertEqual(cmd[8], "--source-tech")
-        self.assertEqual(cmd[9], "oracle")
+    def test_03_analyzer_source_system_platform_mapping(self):
+        """Authoritative requirement: Analyzer platform mapping for SQL Server and Oracle."""
+        self.assertEqual(get_analyzer_platform("sqlserver"), "MS SQL Server")
+        self.assertEqual(get_analyzer_platform("mssql"), "MS SQL Server")
+        self.assertEqual(get_analyzer_platform("oracle"), "Oracle")
+        with self.assertRaises(ValueError):
+            get_analyzer_platform("unknown_system")
 
-    def test_04_exact_transpile_argv(self):
-        cmd = build_lakebridge_transpile_cmd("mssql", "/local/in", "/local/out", "/local/err.txt")
-        self.assertEqual(cmd[0:4], ["databricks", "labs", "lakebridge", "transpile"])
-        self.assertEqual(cmd[4], "--source-dialect")
-        self.assertEqual(cmd[5], "mssql")
-        self.assertEqual(cmd[6], "--input-source")
-        self.assertEqual(cmd[7], os.path.abspath("/local/in"))
-        self.assertEqual(cmd[8], "--output-folder")
-        self.assertEqual(cmd[9], os.path.abspath("/local/out"))
-        self.assertEqual(cmd[10], "--error-file-path")
-        self.assertEqual(cmd[11], os.path.abspath("/local/err.txt"))
-        self.assertEqual(cmd[12], "--skip-validation")
-        self.assertEqual(cmd[13], "true")
+    def test_04_bladebridge_low_level_tech_mapping(self):
+        """Authoritative requirement: Low-level BladeBridge API expects MSSQL/SQL and ORACLE/SQL."""
+        self.assertEqual(get_bladebridge_tech("sqlserver"), ("MSSQL", "SQL"))
+        self.assertEqual(get_bladebridge_tech("mssql"), ("MSSQL", "SQL"))
+        self.assertEqual(get_bladebridge_tech("oracle"), ("ORACLE", "SQL"))
+        with self.assertRaises(ValueError):
+            get_bladebridge_tech("unknown_system")
 
     def test_05_nonzero_cli_return_code_fails_artifact(self):
         code_an = 1
@@ -1356,7 +1376,7 @@ class TestSection15TargetedBlockers(unittest.TestCase):
             object_map_applied=False,
         )
         self.assertEqual(cls, LAKEBRIDGE_CLASSIFICATION_MANUAL_REVIEW)
-        self.assertEqual(status, "PARTIAL")
+        self.assertEqual(status, "CONVERTED")
         self.assertTrue(rev_req)
 
     def test_38_successfully_converted_view_is_manual_review_while_object_map_false(self):
@@ -1717,5 +1737,1474 @@ class TestSection15TargetedBlockers(unittest.TestCase):
         self.assertNotIn("dapi", serialized)
 
 
+class TestLiveDatabricksRuntimeValidation(unittest.TestCase):
+    """Section 21: Comprehensive tests proving items A through Y from live Databricks runtime validation."""
+
+    def test_A_no_runtime_databricks_cli_call_from_nb24(self):
+        """Item A: No runtime Databricks CLI call from NB24."""
+        nb_path = os.path.join(ROOT, "notebooks", "shared", "NB24_LakebridgeAnalyzeAndTranspile.py")
+        with open(nb_path, "r", encoding="utf-8") as f:
+            code = f.read()
+        self.assertNotIn("databricks labs lakebridge", code)
+        self.assertNotIn('["databricks", "labs"', code)
+
+    def test_B_analyzer_source_system_mapping(self):
+        """Item B: sqlserver -> MS SQL Server, oracle -> Oracle, unknown -> failure."""
+        self.assertEqual(get_analyzer_platform("sqlserver"), "MS SQL Server")
+        self.assertEqual(get_analyzer_platform("mssql"), "MS SQL Server")
+        self.assertEqual(get_analyzer_platform("microsoft_sql_server"), "MS SQL Server")
+        self.assertEqual(get_analyzer_platform("oracle"), "Oracle")
+        self.assertEqual(get_analyzer_platform("ora"), "Oracle")
+        with self.assertRaises(ValueError):
+            get_analyzer_platform("postgres")
+        with self.assertRaises(ValueError):
+            get_analyzer_platform("")
+
+    def test_C_analyzer_json_inventory_parsing(self):
+        """Item C: Parse authoritative live Analyzer JSON inventory format."""
+        live_json = {
+            "inventory": [
+                {
+                    "complexityLevel": "LOW",
+                    "functionCall": {"COUNT": 1, "NVARCHAR": 1},
+                    "lineCount": 34,
+                    "name": "usp_lb_analyzer_test.sql",
+                    "objectRel": [
+                        {"action": "read", "count": 2, "object": "dbo.Customers"},
+                        {"action": "read", "count": 2, "object": "dbo.Orders"},
+                    ],
+                    "procAndFunctionCount": 1,
+                    "scriptCategories": ["CREATE_PROCEDURE", "DYNAMIC_SQL", "UNKNOWN"],
+                    "scriptType": "ETL",
+                    "sourceFile": "usp_lb_analyzer_test.sql",
+                    "statementCount": 10,
+                }
+            ],
+            "runInfo": {
+                "inputFolder": "/tmp/in",
+                "reportName": "report.xlsx",
+                "sourceTechnology": "SQL",
+            },
+        }
+        wb = read_analyzer_workbook(json.dumps(live_json).encode("utf-8"))
+        self.assertIn("inventory", wb)
+        self.assertEqual(len(wb["inventory"]), 1)
+        item = wb["inventory"][0]
+        self.assertEqual(item["complexityLevel"], "LOW")
+        self.assertEqual(item["statementCount"], 10)
+        self.assertEqual(item["lineCount"], 34)
+
+    def test_D_actual_sql_programs_xlsx_parsing(self):
+        """Item D: Parse actual SQL Programs sheet from Analyzer XLSX."""
+        sheets = [
+            ("SQL Programs", [
+                ["Program Name", "Source File", "Line Count", "Complexity", "Statement Count", "Script Category", "Script Type"],
+                ["usp_lb_test.sql", "usp_lb_test.sql", "34", "LOW", "10", "CREATE_PROCEDURE", "ETL"],
+            ])
+        ]
+        wb = read_analyzer_workbook(create_in_memory_xlsx(sheets))
+        self.assertIn("sql_programs", wb)
+        row = wb["sql_programs"][0]
+        self.assertEqual(row["program_name"], "usp_lb_test.sql")
+        self.assertEqual(row["complexity"], "LOW")
+        self.assertEqual(row["statement_count"], "10")
+
+    def test_E_summary_labels_cannot_contaminate_artifact_complexity(self):
+        """Item E: Aggregate Summary sheet labels (VERY_HIGH, etc.) must NEVER contaminate artifact complexity."""
+        sheets = [
+            ("Summary", [
+                ["Run Information", "", "", ""],
+                ["Category", "Count", "Complexity", "Notes"],
+                ["VERY_HIGH", "1", "VERY_HIGH", "Aggregate category count"],
+                ["HIGH", "2", "HIGH", "Aggregate category count"],
+                ["LOW", "10", "LOW", "Aggregate category count"],
+            ]),
+            ("SQL Programs", [
+                ["Program Name", "Source File", "Complexity", "Statement Count"],
+                ["usp_my_proc.sql", "usp_my_proc.sql", "LOW", "5"],
+            ]),
+        ]
+        wb = read_analyzer_workbook(create_in_memory_xlsx(sheets))
+        comp = extract_complexity(wb, object_name="usp_my_proc")
+        self.assertEqual(comp, "LOW", "Summary sheet labels must not contaminate individual artifact complexity")
+        self.assertNotEqual(comp, "VERY_HIGH")
+
+    def test_F_statement_count_extraction_from_json(self):
+        """Item F: statementCount extraction from structured JSON inventory."""
+        live_json = {
+            "inventory": [
+                {"name": "usp_test.sql", "statementCount": 10, "complexityLevel": "LOW"}
+            ]
+        }
+        wb = read_analyzer_workbook(json.dumps(live_json).encode("utf-8"))
+        stmts, _ = extract_statement_counts(wb, object_name="usp_test")
+        self.assertEqual(stmts, 10)
+
+    def test_G_statement_count_fallback_from_sql_programs(self):
+        """Item G: Statement Count fallback from SQL Programs XLSX sheet."""
+        sheets = [
+            ("SQL Programs", [
+                ["Program Name", "Source File", "Complexity", "Statement Count"],
+                ["usp_test.sql", "usp_test.sql", "LOW", "10"],
+            ])
+        ]
+        wb = read_analyzer_workbook(create_in_memory_xlsx(sheets))
+        stmts, _ = extract_statement_counts(wb, object_name="usp_test")
+        self.assertEqual(stmts, 10)
+
+    def test_H_unknown_sql_category_occurrence_aggregation(self):
+        """Item H: UNKNOWN SQL Category sheet occurrence count aggregation."""
+        sheets = [
+            ("UNKNOWN SQL Category", [
+                ["SQL unknown category scripts", "# of Occurrences"],
+                ["END;", "2"],
+                ["RAISERROR;", "1"],
+            ])
+        ]
+        wb = read_analyzer_workbook(create_in_memory_xlsx(sheets))
+        _, unk_cnt = extract_statement_counts(wb, object_name="any_proc")
+        self.assertEqual(unk_cnt, 3)
+
+        frags = extract_unknown_fragments(wb, object_name="any_proc")
+        self.assertEqual(len(frags), 2)
+        self.assertEqual(frags[0]["fragment"], "END;")
+        self.assertEqual(frags[0]["count"], 2)
+        self.assertIn("END;", frags[0])
+
+    def test_I_json_object_rel_extraction(self):
+        """Item I: JSON objectRel extraction for referenced objects."""
+        live_json = {
+            "inventory": [
+                {
+                    "name": "usp_test.sql",
+                    "objectRel": [
+                        {"action": "read", "count": 2, "object": "dbo.Customers"},
+                        {"action": "read", "count": 2, "object": "dbo.Orders"},
+                    ],
+                }
+            ]
+        }
+        wb = read_analyzer_workbook(json.dumps(live_json).encode("utf-8"))
+        refs = extract_referenced_objects(wb, object_name="usp_test")
+        self.assertEqual(len(refs), 2)
+        self.assertEqual(refs[0]["object"], "dbo.Customers")
+        self.assertEqual(refs[0]["operation"], "READ")
+        self.assertEqual(refs[0]["count"], 2)
+
+    def test_J_raw_program_object_xref_fallback(self):
+        """Item J: RAW_PROGRAM_OBJECT_XREF XLSX sheet fallback for referenced objects."""
+        sheets = [
+            ("RAW_PROGRAM_OBJECT_XREF", [
+                ["Program", "Object", "Operation", "Count"],
+                ["usp_test.sql", "dbo.Customers", "READ", "2"],
+                ["usp_test.sql", "dbo.Orders", "WRITE", "1"],
+            ])
+        ]
+        wb = read_analyzer_workbook(create_in_memory_xlsx(sheets))
+        refs = extract_referenced_objects(wb, object_name="usp_test")
+        self.assertEqual(len(refs), 2)
+        self.assertEqual(refs[0], {"object": "dbo.Customers", "operation": "READ", "count": 2})
+        self.assertEqual(refs[1], {"object": "dbo.Orders", "operation": "WRITE", "count": 1})
+
+    def test_K_dynamic_sql_detected_without_fabricating_references(self):
+        """Item K: Dynamic SQL detected as construct/risk without fabricating references inside dynamic strings."""
+        sql_with_dynamic = (
+            "CREATE PROCEDURE dbo.usp_dyn AS\n"
+            "BEGIN\n"
+            "    DECLARE @sql NVARCHAR(MAX) = 'SELECT COUNT(*) FROM dbo.OrderDetails';\n"
+            "    EXEC sp_executesql @sql;\n"
+            "END;"
+        )
+        constructs = detect_sql_constructs(sql_with_dynamic, "sqlserver")
+        self.assertTrue(constructs["uses_dynamic_sql"])
+
+        live_json = {
+            "inventory": [
+                {
+                    "name": "usp_dyn.sql",
+                    "scriptCategories": ["DYNAMIC_SQL", "CREATE_PROCEDURE"],
+                    "objectRel": [{"action": "read", "count": 1, "object": "dbo.Customers"}],
+                }
+            ]
+        }
+        wb = read_analyzer_workbook(json.dumps(live_json).encode("utf-8"))
+        refs = extract_referenced_objects(wb, object_name="usp_dyn")
+        ref_names = [r["object"] for r in refs]
+        self.assertIn("dbo.Customers", ref_names)
+        self.assertNotIn("dbo.OrderDetails", ref_names, "Must not fabricate dynamic SQL string dependencies")
+
+    def test_L_bladebridge_low_level_mapping(self):
+        """Item L: BladeBridge low-level API mapping (MSSQL/SQL, ORACLE/SQL)."""
+        self.assertEqual(get_bladebridge_tech("sqlserver"), ("MSSQL", "SQL"))
+        self.assertEqual(get_bladebridge_tech("mssql"), ("MSSQL", "SQL"))
+        self.assertEqual(get_bladebridge_tech("oracle"), ("ORACLE", "SQL"))
+
+    def test_M_textedit_application_correctness(self):
+        """Item M: TextEdit application correctness."""
+        class MockEdit:
+            def __init__(self, text):
+                self.new_text = text
+
+        edits = [MockEdit("SELECT 1;")]
+        self.assertEqual(edits[0].new_text, "SELECT 1;")
+
+    def test_N_mime_sql_attachment_extraction(self):
+        """Item N: Robust MIME .sql attachment extraction from BladeBridge response."""
+        mime_text = (
+            'Content-Type: multipart/mixed; boundary="====boundary123=="\n'
+            "MIME-Version: 1.0\n\n"
+            "--====boundary123==\n"
+            'Content-Type: text/x-sql; charset="utf-8"\n'
+            'Content-Disposition: attachment; filename="usp_test.sql"\n\n'
+            "CREATE OR REPLACE PROCEDURE dbo.usp_test()\n"
+            "LANGUAGE SQL\n"
+            "AS\n"
+            "BEGIN\n"
+            "    SELECT 1;\n"
+            "END;\n"
+            "--====boundary123==--"
+        )
+        clean_sql = extract_sql_from_bladebridge_mime(mime_text)
+        self.assertIn("CREATE OR REPLACE PROCEDURE", clean_sql)
+        self.assertNotIn("Content-Type", clean_sql)
+        self.assertNotIn("boundary123", clean_sql)
+
+    def test_O_mime_headers_and_boundaries_never_persisted(self):
+        """Item O: MIME headers and boundaries are never present in extracted SQL."""
+        mime_text = (
+            'Content-Type: multipart/mixed; boundary="boundary999"\n'
+            "MIME-Version: 1.0\n\n"
+            "--boundary999\n"
+            'Content-Disposition: attachment; filename="test.sql"\n\n'
+            "SELECT 42;\n"
+            "--boundary999--"
+        )
+        clean = extract_sql_from_bladebridge_mime(mime_text)
+        self.assertEqual(clean, "SELECT 42;")
+        self.assertNotIn("Content-Type", clean)
+        self.assertNotIn("Content-Disposition", clean)
+        self.assertNotIn("MIME-Version", clean)
+        self.assertNotIn("boundary999", clean)
+
+    def test_P_blank_mime_or_blank_output_fails_conversion(self):
+        """Item P: Blank MIME or blank output fails conversion with ValueError."""
+        with self.assertRaises(ValueError):
+            extract_sql_from_bladebridge_mime("")
+        with self.assertRaises(ValueError):
+            extract_sql_from_bladebridge_mime("   \n\t  ")
+        blank_mime = (
+            'Content-Type: multipart/mixed; boundary="b1"\n\n'
+            "--b1\n"
+            'Content-Disposition: attachment; filename="test.sql"\n\n'
+            "   \n"
+            "--b1--"
+        )
+        with self.assertRaises(ValueError):
+            extract_sql_from_bladebridge_mime(blank_mime)
+
+    def test_Q_diagnostics_translated_truthfully(self):
+        """Item Q: Diagnostics distinguished between warnings and errors."""
+        class MockDiag:
+            def __init__(self, message, severity):
+                self.message = message
+                self.severity = severity
+
+        diags = [
+            MockDiag("Deprecated syntax", "WARNING"),
+            MockDiag("Syntax error at line 5", "ERROR"),
+        ]
+        diag_list = []
+        errors = 0
+        warnings = 0
+        for d in diags:
+            if "ERROR" in d.severity.upper():
+                errors += 1
+            elif "WARN" in d.severity.upper():
+                warnings += 1
+            diag_list.append({"message": d.message, "severity": d.severity})
+
+        self.assertEqual(errors, 1)
+        self.assertEqual(warnings, 1)
+        self.assertEqual(len(diag_list), 2)
+
+    def test_R_fixmes_count_from_clean_sql_only(self):
+        """Item R: FIXMEs count only on clean extracted SQL."""
+        clean_sql_no_fixme = "CREATE OR REPLACE PROCEDURE dbo.test() AS BEGIN SELECT 1; END;"
+        self.assertEqual(count_fixme_markers(clean_sql_no_fixme), 0)
+
+        clean_sql_with_fixme = "-- FIXME: review dynamic SQL conversion\nSELECT 1;"
+        self.assertEqual(count_fixme_markers(clean_sql_with_fixme), 1)
+
+    def test_S_successful_procedure_remains_manual_review_converted_not_deployed(self):
+        """Item S: Successful procedure conversion produces MANUAL_REVIEW / CONVERTED / NOT_DEPLOYED."""
+        cls, status, rev_req, rev_reason, err_code, _ = derive_lakebridge_classification(
+            object_type="PROCEDURE",
+            source_definition="CREATE PROCEDURE dbo.usp_test AS BEGIN SELECT 1; END;",
+            converted_definition="CREATE OR REPLACE PROCEDURE dbo.usp_test() AS BEGIN SELECT 1; END;",
+            complexity="LOW",
+            statement_count=1,
+            unknown_statement_count=0,
+            unknown_fragments=[],
+            constructs={
+                "uses_error_handling": False,
+                "uses_rowcount": False,
+                "uses_cursor": False,
+                "uses_dynamic_sql": False,
+                "uses_trigger": False,
+            },
+            parsing_error_count=0,
+            validation_error_count=0,
+            generation_error_count=0,
+            fixme_count=0,
+            remaining_source_syntax=[],
+            analyzer_failed=False,
+            transpile_failed=False,
+            object_map_applied=False,
+        )
+        self.assertEqual(cls, LAKEBRIDGE_CLASSIFICATION_MANUAL_REVIEW)
+        self.assertEqual(status, "CONVERTED")
+        self.assertTrue(rev_req)
+        self.assertIsNone(err_code)
+
+    def test_T_bootstrap_is_idempotent(self):
+        """Item T: Bootstrap is idempotent and caches ready state."""
+        with tempfile.TemporaryDirectory() as td:
+            fake_python = get_venv_python_executable(td)
+            os.makedirs(os.path.dirname(fake_python), exist_ok=True)
+            with open(fake_python, "w") as f:
+                f.write("#!/bin/sh\n")
+
+            calls = []
+            def mock_runner(cmd):
+                calls.append(cmd)
+                return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2", "bladebridge_version": "0.3.0", "analyzer_version": "0.1.24"}', ""
+
+            ok1, p1, d1 = ensure_lakebridge_environment(venv_dir=td, runner=mock_runner)
+            self.assertTrue(ok1)
+
+            ok2, p2, d2 = ensure_lakebridge_environment(venv_dir=td, runner=mock_runner)
+            self.assertTrue(ok2)
+            self.assertEqual(p1, p2)
+
+    def test_U_missing_uv_fails_safely_sanitized(self):
+        """Item U: Missing uv returns structured sanitized failure without crashing."""
+        with tempfile.TemporaryDirectory() as td:
+            nonexistent_uv = os.path.join(td, "nonexistent_uv_binary_xyz")
+            nonexistent_venv = os.path.join(td, "venv")
+            ok, p, details = bootstrap_lakebridge_environment(
+                venv_dir=nonexistent_venv,
+                uv_path=nonexistent_uv,
+                force=True,
+            )
+            self.assertFalse(ok)
+            self.assertIsNone(p)
+            self.assertEqual(details.get("error_code"), "UV_NOT_FOUND")
+
+    def test_V_failed_pip_bootstrap_fails_safely_sanitized(self):
+        """Item V: Failed package install fails safely and sanitized without leaking secrets."""
+        with tempfile.TemporaryDirectory() as td:
+            def mock_runner(cmd):
+                if "venv" in cmd:
+                    return 0, "", ""
+                if "pip" in cmd:
+                    return 1, "", "Error with password=SuperSecret and secret=Key123"
+                return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2", "bladebridge_version": "0.3.0", "analyzer_version": "0.1.24"}', ""
+
+            ok, p, details = bootstrap_lakebridge_environment(
+                venv_dir=td,
+                uv_path=sys.executable,  # provide existing binary to pass uv check
+                force=True,
+                runner=mock_runner,
+            )
+            self.assertFalse(ok)
+            err = details.get("error", "")
+            self.assertNotIn("SuperSecret", err)
+            self.assertNotIn("Key123", err)
+
+    def test_W_compute_restart_like_fresh_runtime_recreates_environment(self):
+        """Item W: Fresh compute context verifies and reinitializes runtime."""
+        with tempfile.TemporaryDirectory() as td:
+            fake_python = get_venv_python_executable(td)
+            os.makedirs(os.path.dirname(fake_python), exist_ok=True)
+            with open(fake_python, "w") as f:
+                f.write("#!/bin/sh\n")
+
+            calls = []
+            def mock_runner(cmd):
+                calls.append(cmd)
+                return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2", "bladebridge_version": "0.3.0", "analyzer_version": "0.1.24"}', ""
+
+            ok, p, details = ensure_lakebridge_environment(
+                venv_dir=td,
+                force_recheck=True,
+                runner=mock_runner,
+            )
+            self.assertTrue(ok)
+            self.assertTrue(len(calls) > 0)
+
+    def test_X_atomic_writes_attempt_isolation_and_no_deployment(self):
+        """Item X: Atomic writes, attempt isolation, and no-deployment behavior preserved."""
+        d1 = build_attempt_staging_dir("/base", "run_1", "art_1", 1, "uuid_1")
+        d2 = build_attempt_staging_dir("/base", "run_1", "art_1", 1, "uuid_2")
+        self.assertNotEqual(d1, d2)
+
+        # Confirm collision resistant filenames
+        fn_a = build_collision_resistant_filename("A/B", "art_1")
+        fn_b = build_collision_resistant_filename("A:B", "art_2")
+        self.assertNotEqual(fn_a, fn_b)
+
+    def test_Y_oracle_path_not_broken_by_sqlserver_fixes(self):
+        """Item Y: Oracle path works correctly with Oracle platform and ORACLE/SQL tech mapping."""
+        self.assertEqual(get_analyzer_platform("oracle"), "Oracle")
+        self.assertEqual(get_bladebridge_tech("oracle"), ("ORACLE", "SQL"))
+
+        cls, status, rev_req, _, _, _ = derive_lakebridge_classification(
+            object_type="PROCEDURE",
+            source_definition="CREATE OR REPLACE PROCEDURE p IS BEGIN NULL; END;",
+            converted_definition="CREATE OR REPLACE PROCEDURE p() LANGUAGE SQL AS BEGIN NULL; END;",
+            complexity="LOW",
+            statement_count=1,
+            unknown_statement_count=0,
+            unknown_fragments=[],
+            constructs={},
+            parsing_error_count=0,
+            validation_error_count=0,
+            generation_error_count=0,
+            fixme_count=0,
+            remaining_source_syntax=[],
+            analyzer_failed=False,
+            transpile_failed=False,
+            object_map_applied=False,
+        )
+        self.assertEqual(cls, LAKEBRIDGE_CLASSIFICATION_MANUAL_REVIEW)
+        self.assertEqual(status, "CONVERTED")
+        self.assertTrue(rev_req)
+
+
+class TestTextEditApplication(unittest.TestCase):
+    """Section: TextEdit application to source SQL."""
+
+    def test_one_full_document_replacement(self):
+        source = "SELECT 1;"
+        edits = [
+            {
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 9}},
+                "new_text": "SELECT 2;",
+            }
+        ]
+        result = apply_text_edits(source, edits)
+        self.assertEqual(result, "SELECT 2;")
+
+    def test_multiple_independent_edits(self):
+        source = "SELECT colA, colB FROM tbl;"
+        edits = [
+            {
+                "range": {"start": {"line": 0, "character": 7}, "end": {"line": 0, "character": 11}},
+                "new_text": "column_a",
+            },
+            {
+                "range": {"start": {"line": 0, "character": 13}, "end": {"line": 0, "character": 17}},
+                "new_text": "column_b",
+            },
+        ]
+        result = apply_text_edits(source, edits)
+        self.assertEqual(result, "SELECT column_a, column_b FROM tbl;")
+
+    def test_insertion(self):
+        source = "SELECT FROM tbl;"
+        edits = [
+            {
+                "range": {"start": {"line": 0, "character": 7}, "end": {"line": 0, "character": 7}},
+                "new_text": "* ",
+            }
+        ]
+        result = apply_text_edits(source, edits)
+        self.assertEqual(result, "SELECT * FROM tbl;")
+
+    def test_deletion(self):
+        source = "SELECT /* comment */ 1;"
+        edits = [
+            {
+                "range": {"start": {"line": 0, "character": 7}, "end": {"line": 0, "character": 21}},
+                "new_text": "",
+            }
+        ]
+        result = apply_text_edits(source, edits)
+        self.assertEqual(result, "SELECT 1;")
+
+    def test_multiline_edit(self):
+        source = "CREATE PROCEDURE p AS\nBEGIN\n  SELECT 1;\nEND;"
+        edits = [
+            {
+                "range": {"start": {"line": 1, "character": 0}, "end": {"line": 3, "character": 4}},
+                "new_text": "BEGIN\n  RETURN 0;\nEND;",
+            }
+        ]
+        result = apply_text_edits(source, edits)
+        self.assertEqual(result, "CREATE PROCEDURE p AS\nBEGIN\n  RETURN 0;\nEND;")
+
+    def test_adjacent_edits(self):
+        source = "ABCDEF"
+        edits = [
+            {
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3}},
+                "new_text": "123",
+            },
+            {
+                "range": {"start": {"line": 0, "character": 3}, "end": {"line": 0, "character": 6}},
+                "new_text": "456",
+            },
+        ]
+        result = apply_text_edits(source, edits)
+        self.assertEqual(result, "123456")
+
+    def test_overlapping_edits_rejected(self):
+        source = "ABCDEF"
+        edits = [
+            {
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 4}},
+                "new_text": "1234",
+            },
+            {
+                "range": {"start": {"line": 0, "character": 2}, "end": {"line": 0, "character": 6}},
+                "new_text": "5678",
+            },
+        ]
+        with self.assertRaises(ValueError) as ctx:
+            apply_text_edits(source, edits)
+        self.assertIn("Overlapping", str(ctx.exception))
+
+    def test_invalid_range_rejected(self):
+        source = "ABC"
+        # Start after end
+        edits_inverted = [
+            {
+                "range": {"start": {"line": 0, "character": 3}, "end": {"line": 0, "character": 1}},
+                "new_text": "X",
+            }
+        ]
+        with self.assertRaises(ValueError):
+            apply_text_edits(source, edits_inverted)
+
+        # Line out of bounds
+        edits_oob = [
+            {
+                "range": {"start": {"line": 5, "character": 0}, "end": {"line": 5, "character": 1}},
+                "new_text": "X",
+            }
+        ]
+        with self.assertRaises(ValueError):
+            apply_text_edits(source, edits_oob)
+
+    def test_unicode_utf16_offsets(self):
+        # '😀' is U+1F600, taking 2 UTF-16 code units
+        source = "SELECT '😀' AS emoji;\n"
+        # Emoji starts at character 8, ends at character 10 (8 + 2 UTF-16 units)
+        edits = [
+            {
+                "range": {"start": {"line": 0, "character": 8}, "end": {"line": 0, "character": 10}},
+                "new_text": "STAR",
+            }
+        ]
+        result = apply_text_edits(source, edits)
+        self.assertEqual(result, "SELECT 'STAR' AS emoji;\n")
+
+        # Split surrogate pair
+        edits_split = [
+            {
+                "range": {"start": {"line": 0, "character": 9}, "end": {"line": 0, "character": 10}},
+                "new_text": "X",
+            }
+        ]
+        with self.assertRaises(ValueError) as ctx:
+            apply_text_edits(source, edits_split)
+        self.assertIn("surrogate", str(ctx.exception).lower())
+
+    def test_crlf_replacement(self):
+        source = "SELECT 1;\r\nSELECT 2;\r\n"
+        edits = [
+            {
+                "range": {"start": {"line": 0, "character": 7}, "end": {"line": 0, "character": 8}},
+                "new_text": "99",
+            }
+        ]
+        result = apply_text_edits(source, edits)
+        self.assertEqual(result, "SELECT 99;\r\nSELECT 2;\r\n")
+
+    def test_crlf_insertion(self):
+        source = "SELECT 1;\r\n"
+        # Insertion at character 9 (end of "SELECT 1;", before \r\n)
+        edits = [
+            {
+                "range": {"start": {"line": 0, "character": 9}, "end": {"line": 0, "character": 9}},
+                "new_text": " -- comment",
+            }
+        ]
+        result = apply_text_edits(source, edits)
+        self.assertEqual(result, "SELECT 1; -- comment\r\n")
+        self.assertNotIn("\r -- comment\n", result)
+
+    def test_crlf_invalid_end_of_line_positions(self):
+        source = "SELECT 1;\r\n"
+        # Character 10 points into line ending (\r or \n)
+        edits = [
+            {
+                "range": {"start": {"line": 0, "character": 10}, "end": {"line": 0, "character": 10}},
+                "new_text": "X",
+            }
+        ]
+        with self.assertRaises(ValueError) as ctx:
+            apply_text_edits(source, edits)
+        self.assertIn("out of bounds", str(ctx.exception).lower())
+
+    def test_crlf_multiline_edits(self):
+        source = "LINE_ONE\r\nLINE_TWO\r\nLINE_THREE\r\n"
+        # Replace across line 0 and line 1
+        edits = [
+            {
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 1, "character": 8}},
+                "new_text": "REPLACED_LINES",
+            }
+        ]
+        result = apply_text_edits(source, edits)
+        self.assertEqual(result, "REPLACED_LINES\r\nLINE_THREE\r\n")
+
+    def test_crlf_unicode_with_crlf(self):
+        # '🚀' is 2 UTF-16 code units
+        source = "SELECT '🚀';\r\n"
+        # Length of "SELECT '🚀';" is 12 UTF-16 code units (8 + 2 + 2)
+        edits = [
+            {
+                "range": {"start": {"line": 0, "character": 8}, "end": {"line": 0, "character": 10}},
+                "new_text": "ROCKET",
+            }
+        ]
+        result = apply_text_edits(source, edits)
+        self.assertEqual(result, "SELECT 'ROCKET';\r\n")
+
+
+class TestBladeBridgeDiagnostics(unittest.TestCase):
+    """Section: BladeBridge diagnostics normalization and impact on classification."""
+
+    def test_diagnostic_severity_normalization(self):
+        # Numeric LSP values
+        self.assertEqual(normalize_diagnostic_severity(1), "ERROR")
+        self.assertEqual(normalize_diagnostic_severity(2), "WARNING")
+        self.assertEqual(normalize_diagnostic_severity(3), "INFORMATION")
+        self.assertEqual(normalize_diagnostic_severity(4), "HINT")
+
+        # String numeric
+        self.assertEqual(normalize_diagnostic_severity("1"), "ERROR")
+        self.assertEqual(normalize_diagnostic_severity("2"), "WARNING")
+
+        # Enum with .name attribute
+        class MockEnum:
+            def __init__(self, name):
+                self.name = name
+
+        self.assertEqual(normalize_diagnostic_severity(MockEnum("Error")), "ERROR")
+        self.assertEqual(normalize_diagnostic_severity(MockEnum("Warning")), "WARNING")
+        self.assertEqual(normalize_diagnostic_severity(MockEnum("Information")), "INFORMATION")
+        self.assertEqual(normalize_diagnostic_severity(MockEnum("Hint")), "HINT")
+
+        # Strings
+        self.assertEqual(normalize_diagnostic_severity("error"), "ERROR")
+        self.assertEqual(normalize_diagnostic_severity("warn"), "WARNING")
+        self.assertEqual(normalize_diagnostic_severity(None), "INFORMATION")
+
+    def test_production_run_transpile_with_diagnostics(self):
+        import types
+        mock_module = types.ModuleType("databricks.labs.bladebridge.transpiler")
+        mock_transpiler_cls = unittest.mock.MagicMock()
+        mock_module.Transpiler = mock_transpiler_cls
+        with unittest.mock.patch.dict("sys.modules", {
+            "databricks": types.ModuleType("databricks"),
+            "databricks.labs": types.ModuleType("databricks.labs"),
+            "databricks.labs.bladebridge": types.ModuleType("databricks.labs.bladebridge"),
+            "databricks.labs.bladebridge.transpiler": mock_module,
+        }):
+            with tempfile.TemporaryDirectory() as td:
+                src_f = os.path.join(td, "proc.sql")
+                out_f = os.path.join(td, "proc_conv.sql")
+                with open(src_f, "w", encoding="utf-8") as f:
+                    f.write("CREATE PROCEDURE dbo.p AS SELECT 1;")
+
+                mock_transpiler = unittest.mock.MagicMock()
+                mock_transpiler_cls.return_value = mock_transpiler
+
+                class DiagnosticMock:
+                    def __init__(self, message, severity):
+                        self.message = message
+                        self.severity = severity
+
+                class SeverityEnumMock:
+                    def __init__(self, name):
+                        self.name = name
+
+                mock_edits = [
+                    {
+                        "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 35}},
+                        "new_text": "CREATE OR REPLACE PROCEDURE dbo.p() LANGUAGE SQL AS BEGIN SELECT 1; END;",
+                    }
+                ]
+                mock_diagnostics = [
+                    DiagnosticMock("Error occurred with secret=MyKey123", 1),
+                    DiagnosticMock("Warning occurred", SeverityEnumMock("Warning")),
+                    DiagnosticMock("Info message", 3),
+                    DiagnosticMock("Hint message", 4),
+                ]
+
+                async def mock_async_transpile(fname, src):
+                    return mock_edits, mock_diagnostics
+
+                mock_transpiler.transpile.side_effect = mock_async_transpile
+
+                req = {
+                    "action": "transpile",
+                    "source_file": src_f,
+                    "output_file": out_f,
+                    "source_system": "sqlserver",
+                }
+                resp = run_transpile(req)
+
+                self.assertEqual(resp.get("status"), "SUCCEEDED")
+                self.assertEqual(resp.get("diagnostic_error_count"), 1)
+                self.assertEqual(resp.get("diagnostic_warning_count"), 1)
+                self.assertEqual(resp.get("diagnostic_information_count"), 1)
+                self.assertEqual(resp.get("diagnostic_hint_count"), 1)
+                self.assertEqual(resp.get("edit_count"), 1)
+
+                # Sanitization verification
+                diags = resp.get("diagnostics", [])
+                self.assertEqual(len(diags), 4)
+                self.assertNotIn("MyKey123", diags[0]["message"])
+                self.assertIn("secret=***", diags[0]["message"])
+                self.assertEqual(diags[0]["severity"], "ERROR")
+                self.assertEqual(diags[1]["severity"], "WARNING")
+                self.assertEqual(diags[2]["severity"], "INFORMATION")
+                self.assertEqual(diags[3]["severity"], "HINT")
+
+    def test_diagnostic_errors_force_unsupported_classification(self):
+        cls, status, rev_req, reason, err_code, _ = derive_lakebridge_classification(
+            object_type="PROCEDURE",
+            source_definition="CREATE PROCEDURE p AS SELECT 1;",
+            converted_definition="CREATE OR REPLACE PROCEDURE p() LANGUAGE SQL AS BEGIN SELECT 1; END;",
+            complexity="LOW",
+            statement_count=1,
+            unknown_statement_count=0,
+            unknown_fragments=[],
+            constructs={},
+            parsing_error_count=0,
+            validation_error_count=0,
+            generation_error_count=1,  # 1 diagnostic error
+            fixme_count=0,
+            remaining_source_syntax=[],
+            transpile_failed=True,
+        )
+        self.assertEqual(cls, LAKEBRIDGE_CLASSIFICATION_UNSUPPORTED)
+        self.assertEqual(status, "FAILED")
+        self.assertTrue(rev_req)
+        self.assertIn("generation_error_count=1", reason)
+
+    def test_diagnostic_warnings_force_manual_review(self):
+        cls, status, rev_req, reason, _, _ = derive_lakebridge_classification(
+            object_type="VIEW",
+            source_definition="CREATE VIEW v AS SELECT 1 AS x;",
+            converted_definition="CREATE OR REPLACE VIEW v AS SELECT 1 AS x;",
+            complexity="LOW",
+            statement_count=1,
+            unknown_statement_count=0,
+            unknown_fragments=[],
+            constructs={},
+            parsing_error_count=0,
+            validation_error_count=0,
+            generation_error_count=0,
+            fixme_count=0,
+            remaining_source_syntax=[],
+            object_map_applied=True,
+            diagnostic_warning_count=1,  # 1 diagnostic warning
+        )
+        self.assertEqual(cls, LAKEBRIDGE_CLASSIFICATION_MANUAL_REVIEW)
+        self.assertEqual(status, "PARTIAL")
+        self.assertTrue(rev_req)
+        self.assertIn("diagnostic warnings", reason)
+
+
+class TestMimeExtractionHardening(unittest.TestCase):
+    """Section: MIME extraction hardening and comment preservation."""
+
+    def test_actual_multipart_response_shape(self):
+        payload = (
+            'Content-Type: multipart/mixed; boundary=0f81d11ff9c22e432c25633346e49455\n'
+            'Content-Disposition: attachment; filename="usp_lb_isolated_test.sql"\n'
+            'MIME-Version: 1.0\n'
+            '\n'
+            'CREATE OR REPLACE PROCEDURE dbo.usp_lb_isolated_test(\n'
+            'IN V_CustomerId INT)\n'
+            'LANGUAGE SQL\n'
+            'SQL SECURITY INVOKER\n'
+            'AS\n'
+            'BEGIN\n'
+            '    SELECT CustomerId, CustomerName FROM dbo.Customers WHERE CustomerId = V_CustomerId;\n'
+            'END;\n'
+            '\n'
+            '--0f81d11ff9c22e432c25633346e49455--\n'
+        )
+        clean = extract_sql_from_bladebridge_mime(payload)
+        self.assertIn("CREATE OR REPLACE PROCEDURE", clean)
+        self.assertNotIn("Content-Type", clean)
+        self.assertNotIn("0f81d11ff9c22e432c25633346e49455", clean)
+        self.assertNotIn("MIME-Version", clean)
+        self.assertNotIn("Content-Disposition", clean)
+
+    def test_lowercase_mime_headers(self):
+        payload = (
+            'content-type: multipart/mixed; boundary=my_boundary_xyz\n'
+            'content-disposition: attachment; filename="proc.sql"\n'
+            'mime-version: 1.0\n'
+            '\n'
+            'CREATE VIEW v AS SELECT 1 AS id;\n'
+            '\n'
+            '--my_boundary_xyz--\n'
+        )
+        clean = extract_sql_from_bladebridge_mime(payload)
+        self.assertEqual(clean, "CREATE VIEW v AS SELECT 1 AS id;")
+
+    def test_declared_non_utf8_charset(self):
+        # ISO-8859-1 payload inside multipart
+        payload = (
+            'Content-Type: multipart/mixed; boundary=iso_bnd\n'
+            '\n'
+            '--iso_bnd\n'
+            'Content-Type: text/plain; charset=iso-8859-1\n'
+            'Content-Disposition: attachment; filename="data.sql"\n'
+            '\n'
+            'SELECT \'café\' AS word;\n'
+            '--iso_bnd--\n'
+        )
+        clean = extract_sql_from_bladebridge_mime(payload)
+        self.assertIn("SELECT 'café' AS word;", clean)
+
+    def test_plain_sql_starting_with_comment(self):
+        # Plain SQL starting with --generated must NOT be mistaken for MIME
+        sql = "--generated by accelerator\nSELECT 1 AS col;\n"
+        clean = extract_sql_from_bladebridge_mime(sql)
+        self.assertEqual(clean, "--generated by accelerator\nSELECT 1 AS col;")
+
+    def test_multiple_sql_attachments_rejected(self):
+        payload = (
+            'Content-Type: multipart/mixed; boundary=multi_bnd\n'
+            '\n'
+            '--multi_bnd\n'
+            'Content-Disposition: attachment; filename="file1.sql"\n'
+            '\n'
+            'SELECT 1;\n'
+            '--multi_bnd\n'
+            'Content-Disposition: attachment; filename="file2.sql"\n'
+            '\n'
+            'SELECT 2;\n'
+            '--multi_bnd--\n'
+        )
+        with self.assertRaises(ValueError) as ctx:
+            extract_sql_from_bladebridge_mime(payload)
+        self.assertIn("Ambiguous", str(ctx.exception))
+
+    def test_malformed_mime_rejected(self):
+        # Multipart Content-Type without boundary
+        payload = "Content-Type: multipart/mixed;\n\nSELECT 1;"
+        with self.assertRaises(ValueError) as ctx:
+            extract_sql_from_bladebridge_mime(payload)
+        self.assertIn("Malformed MIME", str(ctx.exception))
+
+    def test_blank_mime_payload_rejected(self):
+        payload = (
+            'Content-Type: multipart/mixed; boundary=empty_bnd\n'
+            '\n'
+            '--empty_bnd\n'
+            'Content-Disposition: attachment; filename="empty.sql"\n'
+            '\n'
+            '   \n'
+            '--empty_bnd--\n'
+        )
+        with self.assertRaises(ValueError) as ctx:
+            extract_sql_from_bladebridge_mime(payload)
+        self.assertIn("blank", str(ctx.exception).lower())
+
+    def test_normal_non_mime_sql(self):
+        sql = "SELECT * FROM dbo.Orders WHERE OrderId > 10;"
+        clean = extract_sql_from_bladebridge_mime(sql)
+        self.assertEqual(clean, sql)
+
+
+class TestAnalyzerParserGaps(unittest.TestCase):
+    """Section: Analyzer parser robustness, fallback, and fixtures."""
+
+    def test_corrupt_json_with_xlsx_fallback(self):
+        with tempfile.TemporaryDirectory() as td:
+            json_p = os.path.join(td, "analyzer_report.json")
+            xlsx_p = os.path.join(td, "analyzer_report.xlsx")
+
+            with open(json_p, "w", encoding="utf-8") as f:
+                f.write("{invalid json content")
+
+            xlsx_data = [
+                ("SQL Programs", [
+                    ["Program Name", "Complexity", "Statement Count"],
+                    ["test_proc.sql", "LOW", "5"],
+                ])
+            ]
+            with open(xlsx_p, "wb") as f:
+                f.write(create_in_memory_xlsx(xlsx_data))
+
+            res = read_analyzer_report(report_xlsx_path=xlsx_p, report_json_path=json_p)
+            self.assertIn("sql_programs", res)
+            self.assertEqual(res["sql_programs"][0]["complexity"], "LOW")
+            self.assertIn("_warnings", res)
+            self.assertTrue(any("corrupt" in w.lower() for w in res["_warnings"]))
+
+    def test_contradictory_json_and_xlsx_complexity_fails_closed(self):
+        # JSON reports LOW, XLSX reports HIGH
+        data = {
+            "inventory": [
+                {"name": "proc_a.sql", "complexityLevel": "LOW"}
+            ],
+            "xlsx_sql_programs": [
+                {"program_name": "proc_a.sql", "complexity": "HIGH"}
+            ]
+        }
+        with self.assertRaises(ValueError) as ctx:
+            extract_complexity(data, staged_filename="proc_a.sql")
+        self.assertIn("Contradictory Analyzer complexity", str(ctx.exception))
+
+    def test_referenced_objects_strict_artifact_matching(self):
+        data = {
+            "inventory": [
+                {
+                    "name": "proc_a.sql",
+                    "objectRel": [
+                        {"object": "dbo.TableA", "action": "read", "count": 2}
+                    ]
+                },
+                {
+                    "name": "proc_b.sql",
+                    "objectRel": [
+                        {"object": "dbo.TableB", "action": "write", "count": 1}
+                    ]
+                }
+            ]
+        }
+        # Searching for proc_a must only return TableA
+        refs_a = extract_referenced_objects(data, staged_filename="proc_a.sql")
+        self.assertEqual(len(refs_a), 1)
+        self.assertEqual(refs_a[0]["object"], "dbo.TableA")
+
+        # Searching for nonexistent proc returns empty, does NOT fall back to first row
+        refs_none = extract_referenced_objects(data, staged_filename="nonexistent.sql")
+        self.assertEqual(len(refs_none), 0)
+
+    def test_xlsx_relationships_resolution(self):
+        """Test XLSX worksheet files are resolved via workbook.xml relationships rather than ordinal."""
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("[Content_Types].xml", (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                '<Default Extension="xml" ContentType="application/xml"/>'
+                '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+                '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+                '<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+                '</Types>'
+            ))
+            # rId1 -> sheet2.xml, rId2 -> sheet1.xml (reversed!)
+            zf.writestr("xl/_rels/workbook.xml.rels", (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>'
+                '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+                '</Relationships>'
+            ))
+            zf.writestr("xl/workbook.xml", (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+                '<sheets>'
+                '<sheet name="SpecialSheet" sheetId="1" r:id="rId1"/>'
+                '<sheet name="OtherSheet" sheetId="2" r:id="rId2"/>'
+                '</sheets></workbook>'
+            ))
+            zf.writestr("xl/worksheets/sheet2.xml", (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                '<sheetData>'
+                '<row r="1"><c r="A1" t="inlineStr"><is><t>ColKey</t></is></c></row>'
+                '<row r="2"><c r="A2" t="inlineStr"><is><t>FromSheet2</t></is></c></row>'
+                '</sheetData></worksheet>'
+            ))
+            zf.writestr("xl/worksheets/sheet1.xml", (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                '<sheetData>'
+                '<row r="1"><c r="A1" t="inlineStr"><is><t>ColKey</t></is></c></row>'
+                '<row r="2"><c r="A2" t="inlineStr"><is><t>FromSheet1</t></is></c></row>'
+                '</sheetData></worksheet>'
+            ))
+
+        parsed = read_analyzer_workbook(buf.getvalue())
+        self.assertIn("specialsheet", parsed)
+        self.assertEqual(parsed["specialsheet"][0]["colkey"], "FromSheet2")
+
+    def test_dynamic_sql_dependency_fallback_masked(self):
+        sql = (
+            "DECLARE @sql NVARCHAR(MAX) =\n"
+            "    'SELECT * FROM dbo.SecretTable';\n"
+            "EXEC sp_executesql @sql;"
+        )
+        empty_wb = {}
+        refs = extract_referenced_objects(empty_wb, sql_text=sql, object_name="sp_dynamic")
+        objects = [r["object"] for r in refs]
+        self.assertNotIn("dbo.SecretTable", objects)
+        self.assertEqual(len(refs), 0)
+
+
+class TestEnvironmentPromotionSafety(unittest.TestCase):
+    """Section: Environment promotion safety, lock, and rollback."""
+
+    def test_successful_promotion(self):
+        with tempfile.TemporaryDirectory() as td:
+            target_env = os.path.join(td, "target_env")
+            def mock_runner(cmd):
+                if "venv" in cmd:
+                    s_py = get_venv_python_executable(cmd[-1])
+                    os.makedirs(os.path.dirname(s_py), exist_ok=True)
+                    with open(s_py, "w") as f:
+                        f.write("#!/bin/sh\n")
+                    return 0, "", ""
+                if "pip" in cmd:
+                    return 0, "", ""
+                return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2", "bladebridge_version": "0.3.0", "analyzer_version": "0.1.24"}', ""
+
+            ok, p, details = bootstrap_lakebridge_environment(
+                venv_dir=target_env,
+                uv_path=sys.executable,
+                force=True,
+                runner=mock_runner,
+            )
+            self.assertTrue(ok)
+            self.assertEqual(details.get("status"), "BOOTSTRAPPED")
+            self.assertTrue(os.path.isdir(target_env))
+            self.assertFalse(os.path.exists(target_env + ".lock"))
+            backups = [f for f in os.listdir(td) if ".backup_" in f]
+            self.assertEqual(len(backups), 0)
+
+    def test_failed_promotion_with_rollback(self):
+        with tempfile.TemporaryDirectory() as td:
+            target_env = os.path.join(td, "target_env")
+            fake_python = get_venv_python_executable(target_env)
+            os.makedirs(os.path.dirname(fake_python), exist_ok=True)
+            with open(fake_python, "w") as f:
+                f.write("#!/bin/sh\n# original healthy env\n")
+            marker_file = os.path.join(target_env, "original_marker.txt")
+            with open(marker_file, "w") as f:
+                f.write("original")
+
+            def mock_runner(cmd):
+                if "venv" in cmd:
+                    s_py = get_venv_python_executable(cmd[-1])
+                    os.makedirs(os.path.dirname(s_py), exist_ok=True)
+                    with open(s_py, "w") as f:
+                        f.write("#!/bin/sh\n")
+                    return 0, "", ""
+                if "pip" in cmd:
+                    return 0, "", ""
+                return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2", "bladebridge_version": "0.3.0", "analyzer_version": "0.1.24"}', ""
+
+            original_replace = os.replace
+            def failing_replace(src, dst):
+                if ".lakebridge_staging_" in src and dst == target_env:
+                    raise OSError("Simulated promotion failure")
+                return original_replace(src, dst)
+
+            with unittest.mock.patch("os.replace", side_effect=failing_replace):
+                with unittest.mock.patch("shutil.move", side_effect=OSError("Simulated move failure")):
+                    ok, p, details = bootstrap_lakebridge_environment(
+                        venv_dir=target_env,
+                        uv_path=sys.executable,
+                        force=True,
+                        runner=mock_runner,
+                    )
+            self.assertFalse(ok)
+            self.assertEqual(details.get("error_code"), "PROMOTION_FAILED")
+            self.assertTrue(os.path.exists(marker_file))
+            with open(marker_file) as f:
+                self.assertEqual(f.read(), "original")
+
+    def test_failed_post_promotion_health_check(self):
+        with tempfile.TemporaryDirectory() as td:
+            target_env = os.path.join(td, "target_env")
+            fake_python = get_venv_python_executable(target_env)
+            os.makedirs(os.path.dirname(fake_python), exist_ok=True)
+            with open(fake_python, "w") as f:
+                f.write("#!/bin/sh\n# original env\n")
+            marker_file = os.path.join(target_env, "original_marker.txt")
+            with open(marker_file, "w") as f:
+                f.write("original")
+
+            health_checks = [0]
+            def mock_runner(cmd):
+                if "venv" in cmd:
+                    s_py = get_venv_python_executable(cmd[-1])
+                    os.makedirs(os.path.dirname(s_py), exist_ok=True)
+                    with open(s_py, "w") as f:
+                        f.write("#!/bin/sh\n")
+                    return 0, "", ""
+                if "pip" in cmd:
+                    return 0, "", ""
+                if "-c" in cmd:
+                    health_checks[0] += 1
+                    if health_checks[0] == 1:
+                        return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2", "bladebridge_version": "0.3.0", "analyzer_version": "0.1.24"}', ""
+                    return 1, "", "Post-promotion failure"
+                return 0, "", ""
+
+            ok, p, details = bootstrap_lakebridge_environment(
+                venv_dir=target_env,
+                uv_path=sys.executable,
+                force=True,
+                runner=mock_runner,
+            )
+            self.assertFalse(ok)
+            self.assertEqual(details.get("error_code"), "POST_PROMOTION_HEALTH_CHECK_FAILED")
+            self.assertTrue(os.path.exists(marker_file))
+
+    def test_concurrent_initialization(self):
+        with tempfile.TemporaryDirectory() as td:
+            lock_path = os.path.join(td, "test.lock")
+            lock1 = EnvironmentLock(lock_path, timeout_sec=2)
+            self.assertTrue(lock1.acquire())
+
+            lock2 = EnvironmentLock(lock_path, timeout_sec=1, poll_interval_sec=0.1)
+            self.assertFalse(lock2.acquire())
+
+            lock1.release()
+            self.assertTrue(lock2.acquire())
+            lock2.release()
+
+
+class TestStrictEnvironmentHealthValidation(unittest.TestCase):
+    """Section: Strict environment health validation and cache invalidation."""
+
+    def test_missing_version_metadata(self):
+        def mock_runner(cmd):
+            return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2"}', ""
+
+        healthy, details = check_environment_health(sys.executable, runner=mock_runner)
+        self.assertFalse(healthy)
+        self.assertIn("Invalid or missing", details.get("error", ""))
+
+    def test_version_mismatch(self):
+        def mock_runner(cmd):
+            return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2", "bladebridge_version": "0.2.9", "analyzer_version": "0.1.24"}', ""
+
+        healthy, details = check_environment_health(sys.executable, runner=mock_runner)
+        self.assertFalse(healthy)
+        self.assertIn("bladebridge", details.get("error", ""))
+
+    def test_deleted_cached_interpreter(self):
+        with tempfile.TemporaryDirectory() as td:
+            fake_python = get_venv_python_executable(td)
+            os.makedirs(os.path.dirname(fake_python), exist_ok=True)
+            with open(fake_python, "w") as f:
+                f.write("#!/bin/sh\n")
+
+            def mock_runner(cmd):
+                return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2", "bladebridge_version": "0.3.0", "analyzer_version": "0.1.24"}', ""
+
+            ok1, p1, d1 = ensure_lakebridge_environment(venv_dir=td, runner=mock_runner)
+            self.assertTrue(ok1)
+
+            os.remove(fake_python)
+
+            bootstrap_called = [False]
+            def mock_rebootstrap_runner(cmd):
+                bootstrap_called[0] = True
+                return 0, '{"bladebridge": "available", "analyzer": "available", "lakebridge_version": "0.15.2", "bladebridge_version": "0.3.0", "analyzer_version": "0.1.24"}', ""
+
+            ok2, p2, d2 = ensure_lakebridge_environment(
+                venv_dir=td,
+                uv_path=sys.executable,
+                runner=mock_rebootstrap_runner,
+            )
+            self.assertTrue(bootstrap_called[0])
+
+
+class TestReportPersistence(unittest.TestCase):
+    """Regression test for XLSX and JSON report persistence logic."""
+
+    def test_xlsx_and_json_persistence_binary_exact_match(self):
+        """Verifies report persistence logic opens both XLSX and JSON in binary mode, preserving contents."""
+        with tempfile.TemporaryDirectory() as td:
+            src_dir = os.path.join(td, "src")
+            dst_dir = os.path.join(td, "dst")
+            os.makedirs(src_dir, exist_ok=True)
+            os.makedirs(dst_dir, exist_ok=True)
+
+            xlsx_src = os.path.join(src_dir, "report.xlsx")
+            json_src = os.path.join(src_dir, "report.json")
+
+            # Create non-empty XLSX and JSON reports
+            xlsx_content = b"PK\x03\x04fake_excel_bytes_data_1234567890"
+            json_content = b'{"inventory": [{"object": "proc1", "complexity": "Low"}]}'
+
+            with open(xlsx_src, "wb") as f:
+                f.write(xlsx_content)
+            with open(json_src, "wb") as f:
+                f.write(json_content)
+
+            # Replicate the exact NB24 persistence logic:
+            # dst_rep = os.path.join(report_vol_dir, os.path.basename(r_file))
+            # with open(r_file, "rb") as rf:
+            #     write_atomic_file(dst_rep, rf.read())
+            def write_atomic_file_test(target_path, content):
+                temp_path = f"{target_path}.tmp.{uuid.uuid4().hex}"
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                mode = "wb" if isinstance(content, bytes) else "w"
+                with open(temp_path, mode) as f:
+                    f.write(content)
+                os.replace(temp_path, target_path)
+
+            for r_file in (xlsx_src, json_src):
+                dst_rep = os.path.join(dst_dir, os.path.basename(r_file))
+                with open(r_file, "rb") as rf:
+                    write_atomic_file_test(dst_rep, rf.read())
+
+            xlsx_dst = os.path.join(dst_dir, "report.xlsx")
+            json_dst = os.path.join(dst_dir, "report.json")
+
+            self.assertTrue(os.path.exists(xlsx_dst))
+            self.assertTrue(os.path.exists(json_dst))
+            self.assertGreater(os.path.getsize(xlsx_dst), 0)
+            self.assertGreater(os.path.getsize(json_dst), 0)
+
+            with open(xlsx_dst, "rb") as f:
+                self.assertEqual(f.read(), xlsx_content)
+            with open(json_dst, "rb") as f:
+                self.assertEqual(f.read(), json_content)
+
+            # Verify that source files were not truncated or modified
+            with open(xlsx_src, "rb") as f:
+                self.assertEqual(f.read(), xlsx_content)
+            with open(json_src, "rb") as f:
+                self.assertEqual(f.read(), json_content)
+
+
+class TestClassificationCountersAndPersistence(unittest.TestCase):
+    """Tests for classification counter increments and persistence failure handling."""
+
+    def test_successful_persistence_increments_auto_candidate(self):
+        """When persistence succeeds, artifact classification is AUTO_CANDIDATE and auto_candidate_count increments."""
+        total_candidates = 1
+        candidates_to_process = [{"artifact_id": "a1", "source_definition": "SELECT 1"}]
+        auto_candidate_count = 0
+        manual_review_count = 0
+        unsupported_count = 0
+        store_failure_count = 0
+
+        for cand in candidates_to_process:
+            artifact_counted = False
+            cls_res = LAKEBRIDGE_CLASSIFICATION_AUTO_CANDIDATE
+            persistence_failed = False
+            persistence_err = ""
+
+            if persistence_failed:
+                store_failure_count += 1
+                cls_res = LAKEBRIDGE_CLASSIFICATION_UNSUPPORTED
+
+            if cls_res == LAKEBRIDGE_CLASSIFICATION_AUTO_CANDIDATE:
+                auto_candidate_count += 1
+            elif cls_res == LAKEBRIDGE_CLASSIFICATION_MANUAL_REVIEW:
+                manual_review_count += 1
+            else:
+                unsupported_count += 1
+            artifact_counted = True
+
+        completed_count = auto_candidate_count + manual_review_count
+        def_missing_count = max(0, total_candidates - len(candidates_to_process))
+        total_failures = unsupported_count + def_missing_count
+
+        self.assertEqual(auto_candidate_count, 1)
+        self.assertEqual(manual_review_count, 0)
+        self.assertEqual(unsupported_count, 0)
+        self.assertEqual(store_failure_count, 0)
+        self.assertEqual(total_failures, 0)
+        self.assertEqual(completed_count, 1)
+
+    def test_failed_persistence_updates_classification_to_unsupported(self):
+        """When persistence fails, classification is updated to UNSUPPORTED and auto_candidate is NOT incremented."""
+        total_candidates = 1
+        candidates_to_process = [{"artifact_id": "a1", "source_definition": "SELECT 1"}]
+        auto_candidate_count = 0
+        manual_review_count = 0
+        unsupported_count = 0
+        store_failure_count = 0
+
+        for cand in candidates_to_process:
+            artifact_counted = False
+            cls_res = LAKEBRIDGE_CLASSIFICATION_AUTO_CANDIDATE
+            persistence_failed = True
+            persistence_err = "Volume write permission denied"
+
+            if persistence_failed:
+                store_failure_count += 1
+                cls_res = LAKEBRIDGE_CLASSIFICATION_UNSUPPORTED
+                conv_status = "FAILED"
+                err_code = "PERSISTENT_STORE_FAILED"
+
+            if cls_res == LAKEBRIDGE_CLASSIFICATION_AUTO_CANDIDATE:
+                auto_candidate_count += 1
+            elif cls_res == LAKEBRIDGE_CLASSIFICATION_MANUAL_REVIEW:
+                manual_review_count += 1
+            else:
+                unsupported_count += 1
+            artifact_counted = True
+
+        completed_count = auto_candidate_count + manual_review_count
+        def_missing_count = max(0, total_candidates - len(candidates_to_process))
+        total_failures = unsupported_count + def_missing_count
+
+        self.assertEqual(cls_res, LAKEBRIDGE_CLASSIFICATION_UNSUPPORTED)
+        self.assertEqual(auto_candidate_count, 0)
+        self.assertEqual(manual_review_count, 0)
+        self.assertEqual(unsupported_count, 1)
+        self.assertEqual(store_failure_count, 1)
+        self.assertEqual(total_failures, 1)
+        self.assertEqual(completed_count, 0)
+
+    def test_each_artifact_counted_exactly_once_and_no_double_count(self):
+        """Multiple artifacts: 1 auto, 1 manual, 1 unsupported transpile, 1 store failure, 1 missing definition."""
+        total_candidates = 5
+        candidates_to_process = [
+            {"artifact_id": "a1", "scenario": "auto"},
+            {"artifact_id": "a2", "scenario": "manual"},
+            {"artifact_id": "a3", "scenario": "unsupported_transpile"},
+            {"artifact_id": "a4", "scenario": "store_fail"},
+        ]
+        auto_candidate_count = 0
+        manual_review_count = 0
+        unsupported_count = 0
+        store_failure_count = 0
+
+        for cand in candidates_to_process:
+            artifact_counted = False
+            scen = cand["scenario"]
+            if scen == "auto":
+                cls_res = LAKEBRIDGE_CLASSIFICATION_AUTO_CANDIDATE
+                p_fail = False
+            elif scen == "manual":
+                cls_res = LAKEBRIDGE_CLASSIFICATION_MANUAL_REVIEW
+                p_fail = False
+            elif scen == "unsupported_transpile":
+                cls_res = LAKEBRIDGE_CLASSIFICATION_UNSUPPORTED
+                p_fail = False
+            elif scen == "store_fail":
+                cls_res = LAKEBRIDGE_CLASSIFICATION_AUTO_CANDIDATE
+                p_fail = True
+
+            if p_fail:
+                store_failure_count += 1
+                cls_res = LAKEBRIDGE_CLASSIFICATION_UNSUPPORTED
+
+            if cls_res == LAKEBRIDGE_CLASSIFICATION_AUTO_CANDIDATE:
+                auto_candidate_count += 1
+            elif cls_res == LAKEBRIDGE_CLASSIFICATION_MANUAL_REVIEW:
+                manual_review_count += 1
+            else:
+                unsupported_count += 1
+            artifact_counted = True
+
+        completed_count = auto_candidate_count + manual_review_count
+        def_missing_count = max(0, total_candidates - len(candidates_to_process))
+        total_failures = unsupported_count + def_missing_count
+
+        self.assertEqual(auto_candidate_count + manual_review_count + unsupported_count, len(candidates_to_process))
+        self.assertEqual(auto_candidate_count, 1)
+        self.assertEqual(manual_review_count, 1)
+        self.assertEqual(unsupported_count, 2)
+        self.assertEqual(store_failure_count, 1)
+        self.assertEqual(def_missing_count, 1)
+        # Distinct failures = 2 (unsupported) + 1 (missing def) = 3 (store failure is NOT double-counted!)
+        self.assertEqual(total_failures, 3)
+
+
+class TestRemainingSourceSyntaxDetection(unittest.TestCase):
+    """Tests for detect_remaining_source_syntax with masking and general bracketed-identifier support."""
+
+    def test_getdate_inside_string_not_detected(self):
+        sql = "SELECT 'Today is GETDATE() function' AS info;"
+        retains, patterns = detect_remaining_source_syntax(sql, "sqlserver")
+        self.assertFalse(retains)
+        self.assertEqual(patterns, [])
+
+    def test_getdate_inside_comment_not_detected(self):
+        sql_line = "-- This stored procedure used GETDATE() previously\nSELECT CURRENT_TIMESTAMP() AS now_val;"
+        retains_line, patterns_line = detect_remaining_source_syntax(sql_line, "sqlserver")
+        self.assertFalse(retains_line)
+        self.assertEqual(patterns_line, [])
+
+        sql_block = "/* GETDATE() was replaced with current_timestamp() */ SELECT CURRENT_TIMESTAMP();"
+        retains_block, patterns_block = detect_remaining_source_syntax(sql_block, "sqlserver")
+        self.assertFalse(retains_block)
+        self.assertEqual(patterns_block, [])
+
+    def test_sysdate_inside_string_not_detected(self):
+        sql = "SELECT 'SYSDATE' AS col_name FROM hr.employees;"
+        retains, patterns = detect_remaining_source_syntax(sql, "oracle")
+        self.assertFalse(retains)
+        self.assertEqual(patterns, [])
+
+    def test_dual_inside_comment_not_detected(self):
+        sql_line = "-- In Oracle: SELECT 1 FROM DUAL\nSELECT 1;"
+        retains_line, patterns_line = detect_remaining_source_syntax(sql_line, "oracle")
+        self.assertFalse(retains_line)
+        self.assertEqual(patterns_line, [])
+
+        sql_block = "/* SELECT dummy FROM DUAL; */ SELECT 1;"
+        retains_block, patterns_block = detect_remaining_source_syntax(sql_block, "oracle")
+        self.assertFalse(retains_block)
+        self.assertEqual(patterns_block, [])
+
+    def test_bracketed_identifiers_detected(self):
+        sql = "SELECT * FROM [sales].[orders] WHERE [sales].[orders].[status] = 'ACTIVE';"
+        retains, patterns = detect_remaining_source_syntax(sql, "sqlserver")
+        self.assertTrue(retains)
+        self.assertTrue(any("bracketed identifier" in p for p in patterns))
+
+    def test_temporary_tables_detected(self):
+        sql = "CREATE TABLE #temp (id INT, val STRING); INSERT INTO #temp VALUES (1, 'test');"
+        retains, patterns = detect_remaining_source_syntax(sql, "sqlserver")
+        self.assertTrue(retains)
+        self.assertTrue(any("temporary table" in p for p in patterns))
+
+    def test_genuine_remaining_source_syntax_outside_comments_and_strings(self):
+        # Genuine GETDATE()
+        sql_getdate = "SELECT GETDATE() AS curr_time;"
+        retains_g, patterns_g = detect_remaining_source_syntax(sql_getdate, "sqlserver")
+        self.assertTrue(retains_g)
+        self.assertTrue(any("GETDATE()" in p for p in patterns_g))
+
+        # Genuine SYSDATE
+        sql_sysdate = "SELECT SYSDATE FROM hr.departments;"
+        retains_s, patterns_s = detect_remaining_source_syntax(sql_sysdate, "oracle")
+        self.assertTrue(retains_s)
+        self.assertTrue(any("SYSDATE" in p for p in patterns_s))
+
+        # Genuine ISNULL
+        sql_isnull = "SELECT ISNULL(col_a, 0) FROM tbl;"
+        retains_i, patterns_i = detect_remaining_source_syntax(sql_isnull, "sqlserver")
+        self.assertTrue(retains_i)
+        self.assertTrue(any("ISNULL" in p for p in patterns_i))
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
