@@ -77,8 +77,10 @@ def _table_exists(fqn: str) -> bool:
 try:
     control_ddl = build_create_artifact_control_ddl(catalog, control_schema)
     spark.sql(control_ddl)
-    existing_cols = spark.table(ctrl_fqn).columns
-    for stmt in build_upgrade_artifact_control_ddl(catalog, control_schema, existing_cols):
+    ctrl_tbl = spark.table(ctrl_fqn)
+    existing_cols = getattr(ctrl_tbl, "columns", [])
+    existing_schema = getattr(ctrl_tbl, "schema", None)
+    for stmt in build_upgrade_artifact_control_ddl(catalog, control_schema, existing_cols, existing_schema=existing_schema):
         spark.sql(stmt)
 except Exception as e:
     safe_err = sanitize_error(e)

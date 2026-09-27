@@ -3204,6 +3204,129 @@ class TestRemainingSourceSyntaxDetection(unittest.TestCase):
         self.assertTrue(any("ISNULL" in p for p in patterns_i))
 
 
+class TestConversionClassificationNullabilityAndUpgrade(unittest.TestCase):
+    """Regression tests for conversion_classification nullability and schema upgrade."""
+
+    def test_successful_t23_preconversion_row_allows_none_classification(self):
+        """T23 pre-conversion row has conversion_classification=None and matches nullable column contract."""
+        col_map = {col[0]: (col[1], col[2]) for col in SQL_ARTIFACT_CONTROL_COLUMNS}
+        self.assertIn("conversion_classification", col_map)
+        col_type, is_nullable = col_map["conversion_classification"]
+        self.assertEqual(col_type, "STRING")
+        self.assertTrue(is_nullable, "conversion_classification must be nullable in SQL_ARTIFACT_CONTROL_COLUMNS")
+
+        row = prepare_artifact_rerun_control_row(
+            existing_row=None,
+            current_run_id="run_101",
+            connection_id="conn_sql",
+            source_system="sqlserver",
+            source_database="SalesDB",
+            source_schema="dbo",
+            object_name="GetCustomerOrders",
+            object_type="PROCEDURE",
+            source_definition="CREATE PROCEDURE dbo.GetCustomerOrders AS SELECT 1;",
+            source_definition_hash="abc123hash",
+            now_ts="2026-09-27T12:00:00Z",
+            fetch_error_code=None,
+            fetch_error_message=None,
+        )
+
+        self.assertIsNone(row["conversion_classification"], "pre-conversion row must have conversion_classification=None")
+        self.assertEqual(row["conversion_status"], "PENDING", "conversion_status must remain PENDING")
+        self.assertNotEqual(row["conversion_classification"], "PENDING", "conversion_classification must NEVER be 'PENDING'")
+        self.assertEqual(row["deployment_status"], "NOT_DEPLOYED")
+
+    def test_t24_can_later_populate_valid_classifications(self):
+        """T24 can update conversion_classification to AUTO_CANDIDATE, MANUAL_REVIEW, or UNSUPPORTED."""
+        row = prepare_artifact_rerun_control_row(
+            existing_row=None,
+            current_run_id="run_102",
+            connection_id="conn_sql",
+            source_system="sqlserver",
+            source_database=None,
+            source_schema="dbo",
+            object_name="v_active_users",
+            object_type="VIEW",
+            source_definition="CREATE VIEW dbo.v_active_users AS SELECT 1 AS id;",
+            source_definition_hash="def456hash",
+            now_ts="2026-09-27T12:00:00Z",
+        )
+
+        for valid_cls in [
+            LAKEBRIDGE_CLASSIFICATION_AUTO_CANDIDATE,
+            LAKEBRIDGE_CLASSIFICATION_MANUAL_REVIEW,
+            LAKEBRIDGE_CLASSIFICATION_UNSUPPORTED,
+        ]:
+            row["conversion_classification"] = valid_cls
+            self.assertEqual(row["conversion_classification"], valid_cls)
+            self.assertIsInstance(row["conversion_classification"], str)
+
+    def test_existing_table_upgrade_removes_obsolete_not_null_safely(self):
+        """Existing table created with conversion_classification NOT NULL gets safe ALTER COLUMN DROP NOT NULL DDL."""
+        existing_schema_with_not_null = [
+            ("artifact_id", "STRING", False),
+            ("connection_id", "STRING", False),
+            ("source_system", "STRING", False),
+            ("conversion_classification", "STRING", False),  # Legacy NOT NULL
+            ("conversion_status", "STRING", False),
+        ]
+
+        stmts = build_upgrade_artifact_control_ddl(
+            catalog="da_acc",
+            control_schema="control",
+            existing_columns=["artifact_id", "connection_id", "source_system", "conversion_classification", "conversion_status"],
+            existing_schema=existing_schema_with_not_null,
+        )
+
+        self.assertTrue(any("ALTER COLUMN `conversion_classification` DROP NOT NULL" in s for s in stmts))
+        self.assertFalse(any("DROP TABLE" in s for s in stmts))
+        self.assertFalse(any("CREATE TABLE" in s for s in stmts))
+
+    def test_already_nullable_table_upgrade_is_idempotent(self):
+        """Table already migrated with conversion_classification nullable=True produces no DROP NOT NULL."""
+        all_cols_nullable_aware = [
+            (col[0], col[1], col[2]) for col in SQL_ARTIFACT_CONTROL_COLUMNS
+        ]
+        all_col_names = [col[0] for col in SQL_ARTIFACT_CONTROL_COLUMNS]
+
+        stmts = build_upgrade_artifact_control_ddl(
+            catalog="da_acc",
+            control_schema="control",
+            existing_columns=all_col_names,
+            existing_schema=all_cols_nullable_aware,
+        )
+        self.assertEqual(stmts, [], "Already-migrated schema must produce no upgrade DDL")
+
+    def test_no_other_control_table_nullability_changes(self):
+        """Proves no other column in SQL_ARTIFACT_CONTROL_COLUMNS had its nullability altered."""
+        expected_not_null_columns = {
+            "artifact_id",
+            "connection_id",
+            "source_system",
+            "source_schema",
+            "object_name",
+            "object_type",
+            "source_definition_hash",
+            "conversion_status",
+            "deployment_status",
+            "manual_review_required",
+            "attempt_count",
+            "created_ts",
+            "updated_ts",
+            "is_active",
+        }
+
+        actual_not_null_columns = {
+            col[0] for col in SQL_ARTIFACT_CONTROL_COLUMNS if not col[2]
+        }
+
+        self.assertEqual(
+            actual_not_null_columns,
+            expected_not_null_columns,
+            "Only conversion_classification must become nullable; all other required NOT NULL columns must be unchanged",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -119,7 +119,7 @@ SQL_ARTIFACT_CONTROL_COLUMNS: List[Tuple[str, str, bool]] = [
     ("converted_definition", "STRING", True),
     ("source_definition_hash", "STRING", False),
     ("converted_definition_hash", "STRING", True),
-    ("conversion_classification", "STRING", False),
+    ("conversion_classification", "STRING", True),
     ("conversion_status", "STRING", False),
     ("deployment_status", "STRING", False),
     ("manual_review_required", "BOOLEAN", False),
@@ -874,17 +874,58 @@ def build_create_artifact_execution_log_ddl(catalog: str, control_schema: str) -
     return f"CREATE TABLE IF NOT EXISTS {fqn} (\n{body}\n) USING DELTA"
 
 
-def build_upgrade_artifact_control_ddl(catalog: str, control_schema: str, existing_columns: List[str]) -> List[str]:
-    """Generate ALTER TABLE ADD COLUMNS DDL for any missing columns in sql_artifact_control."""
-    existing_lower = {c.strip().lower() for c in existing_columns or []}
+def build_upgrade_artifact_control_ddl(
+    catalog: str,
+    control_schema: str,
+    existing_columns: Any,
+    existing_schema: Optional[Any] = None,
+) -> List[str]:
+    """Generate ALTER TABLE DDL for any missing columns or obsolete NOT NULL constraints in sql_artifact_control."""
+    existing_lower = set()
+    existing_nullables: Dict[str, bool] = {}
+
+    schema_obj = existing_schema if existing_schema is not None else existing_columns
+    if schema_obj is not None:
+        fields = getattr(schema_obj, "fields", None) or (schema_obj if isinstance(schema_obj, (list, tuple)) else [])
+        for f in fields:
+            if isinstance(f, str):
+                cname = f.strip().lower()
+                existing_lower.add(cname)
+            elif isinstance(f, (list, tuple)) and len(f) >= 1:
+                cname = str(f[0]).strip().lower()
+                existing_lower.add(cname)
+                if len(f) >= 3 and isinstance(f[2], bool):
+                    existing_nullables[cname] = f[2]
+            elif hasattr(f, "name"):
+                cname = str(f.name).strip().lower()
+                existing_lower.add(cname)
+                if hasattr(f, "nullable"):
+                    existing_nullables[cname] = bool(f.nullable)
+            elif isinstance(f, dict):
+                cname = str(f.get("name") or "").strip().lower()
+                if cname:
+                    existing_lower.add(cname)
+                    if "nullable" in f:
+                        existing_nullables[cname] = bool(f["nullable"])
+
+    fqn = f"{quote_databricks(catalog)}.{quote_databricks(control_schema)}.{quote_databricks(SQL_ARTIFACT_CONTROL_TABLE)}"
+    stmts = []
+
+    # 1. Add missing columns
     missing_cols = []
     for col_name, col_type, is_nullable in SQL_ARTIFACT_CONTROL_COLUMNS:
         if col_name.lower() not in existing_lower:
             missing_cols.append(f"{quote_databricks(col_name)} {col_type}")
-    if not missing_cols:
-        return []
-    fqn = f"{quote_databricks(catalog)}.{quote_databricks(control_schema)}.{quote_databricks(SQL_ARTIFACT_CONTROL_TABLE)}"
-    return [f"ALTER TABLE {fqn} ADD COLUMNS ({', '.join(missing_cols)})"]
+    if missing_cols:
+        stmts.append(f"ALTER TABLE {fqn} ADD COLUMNS ({', '.join(missing_cols)})")
+
+    # 2. Drop obsolete NOT NULL constraints (e.g. conversion_classification)
+    for col_name, col_type, is_nullable in SQL_ARTIFACT_CONTROL_COLUMNS:
+        c_low = col_name.lower()
+        if is_nullable and c_low in existing_nullables and existing_nullables[c_low] is False:
+            stmts.append(f"ALTER TABLE {fqn} ALTER COLUMN {quote_databricks(col_name)} DROP NOT NULL")
+
+    return stmts
 
 
 def build_upgrade_artifact_execution_log_ddl(catalog: str, control_schema: str, existing_columns: List[str]) -> List[str]:

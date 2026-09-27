@@ -685,6 +685,16 @@ test_successful_persistence_increments_auto_candidate (test_lakebridge_artifact_
 When persistence succeeds, artifact classification is AUTO_CANDIDATE and auto_candidate_count increments. ... ok
 test_all_18_lakebridge_columns_present (test_lakebridge_artifact_migration.TestControlTable18LakebridgeColumns.test_all_18_lakebridge_columns_present) ... ok
 test_ddl_generation_and_upgrade (test_lakebridge_artifact_migration.TestControlTable18LakebridgeColumns.test_ddl_generation_and_upgrade) ... ok
+test_already_nullable_table_upgrade_is_idempotent (test_lakebridge_artifact_migration.TestConversionClassificationNullabilityAndUpgrade.test_already_nullable_table_upgrade_is_idempotent)
+Table already migrated with conversion_classification nullable=True produces no DROP NOT NULL. ... ok
+test_existing_table_upgrade_removes_obsolete_not_null_safely (test_lakebridge_artifact_migration.TestConversionClassificationNullabilityAndUpgrade.test_existing_table_upgrade_removes_obsolete_not_null_safely)
+Existing table created with conversion_classification NOT NULL gets safe ALTER COLUMN DROP NOT NULL DDL. ... ok
+test_no_other_control_table_nullability_changes (test_lakebridge_artifact_migration.TestConversionClassificationNullabilityAndUpgrade.test_no_other_control_table_nullability_changes)
+Proves no other column in SQL_ARTIFACT_CONTROL_COLUMNS had its nullability altered. ... ok
+test_successful_t23_preconversion_row_allows_none_classification (test_lakebridge_artifact_migration.TestConversionClassificationNullabilityAndUpgrade.test_successful_t23_preconversion_row_allows_none_classification)
+T23 pre-conversion row has conversion_classification=None and matches nullable column contract. ... ok
+test_t24_can_later_populate_valid_classifications (test_lakebridge_artifact_migration.TestConversionClassificationNullabilityAndUpgrade.test_t24_can_later_populate_valid_classifications)
+T24 can update conversion_classification to AUTO_CANDIDATE, MANUAL_REVIEW, or UNSUPPORTED. ... ok
 test_concurrent_initialization (test_lakebridge_artifact_migration.TestEnvironmentPromotionSafety.test_concurrent_initialization) ... ok
 test_failed_post_promotion_health_check (test_lakebridge_artifact_migration.TestEnvironmentPromotionSafety.test_failed_post_promotion_health_check) ... ok
 test_failed_promotion_with_rollback (test_lakebridge_artifact_migration.TestEnvironmentPromotionSafety.test_failed_promotion_with_rollback) ... ok
@@ -1763,6 +1773,6 @@ test_source_mismatch_fails (test_type_mappers.TestYamlValidation.test_source_mis
 test_target_mismatch_fails (test_type_mappers.TestYamlValidation.test_target_mismatch_fails) ... ok
 
 ----------------------------------------------------------------------
-Ran 1380 tests in 3.500s
+Ran 1385 tests in 5.191s
 
 OK
